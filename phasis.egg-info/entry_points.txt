@@ -1,2 +1,0 @@
-[console_scripts]
-phasis = phasis.cli:main
