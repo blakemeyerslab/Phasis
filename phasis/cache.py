@@ -15,6 +15,127 @@ import re
 MEM_FILE_DEFAULT = "phasis.mem"
 
 
+# ---------------------------------------------------------------------------
+# Centralized cache API (Phase II)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MemCache:
+    """Small helper around the phasis.mem (ConfigParser) cache.
+
+    Cache rule:
+      - If an output path is NOT registered in mem -> cache miss.
+      - Cache hit requires output fingerprint match, and if input_sig is provided,
+        also requires signature match stored under "<outpath>.sig".
+    """
+
+    memFile: str
+    cfg: configparser.ConfigParser
+
+    @classmethod
+    def load(cls, memFile: str) -> "MemCache":
+        cfg = configparser.ConfigParser()
+        cfg.optionxform = str
+        if memFile:
+            cfg.read(memFile)
+        return cls(memFile=str(memFile or MEM_FILE_DEFAULT), cfg=cfg)
+
+    def ensure(self, section: str) -> None:
+        if not self.cfg.has_section(section):
+            self.cfg.add_section(section)
+
+    def get(self, section: str, key: str, default: str | None = None) -> str | None:
+        if not self.cfg.has_section(section):
+            return default
+        return self.cfg[section].get(key, default)
+
+    def set(self, section: str, key: str, value: object) -> None:
+        self.ensure(section)
+        self.cfg[section][key] = str(value)
+
+    def flush(self) -> None:
+        with open(self.memFile, "w") as fh:
+            self.cfg.write(fh)
+
+    def fingerprint(self, path: str) -> str:
+        _, fp = getmd5(path)
+        return str(fp or "")
+
+    def _dbg_enabled(self) -> bool:
+        v = str(os.environ.get("PHASIS_CACHE_DEBUG", "")).strip().lower()
+        return v in {"1", "true", "yes", "y", "on"}
+
+    def _dbg(self, msg: str) -> None:
+        if self._dbg_enabled():
+            print(f"[PHASIS:CACHE] {msg}")
+
+    def hit(self, section: str, outpath: str, input_sig: str | None = None) -> bool:
+        self.ensure(section)
+        if not outpath:
+            self._dbg(f"MISS section={section} out=<empty> reason=empty_outpath")
+            return False
+        if not os.path.isfile(outpath):
+            self._dbg(f"MISS section={section} out={outpath} reason=missing_file")
+            return False
+        cur_fp = self.fingerprint(outpath)
+        prev_fp = self.get(section, outpath)
+        if not prev_fp:
+            self._dbg(f"MISS section={section} out={outpath} reason=not_registered")
+            return False
+        if not cur_fp:
+            self._dbg(f"MISS section={section} out={outpath} reason=fingerprint_failed")
+            return False
+        if prev_fp != cur_fp:
+            self._dbg(
+                f"MISS section={section} out={outpath} reason=fingerprint_mismatch prev={prev_fp} cur={cur_fp}"
+            )
+            return False
+        if input_sig is None:
+            self._dbg(f"HIT  section={section} out={outpath} mode=hash_only")
+            return True
+        prev_sig = self.get(section, sig_key(outpath))
+        if not prev_sig:
+            self._dbg(f"MISS section={section} out={outpath} reason=signature_not_registered")
+            return False
+        if prev_sig != input_sig:
+            self._dbg(
+                f"MISS section={section} out={outpath} reason=signature_mismatch prev={prev_sig} cur={input_sig}"
+            )
+            return False
+        self._dbg(f"HIT  section={section} out={outpath} mode=hash+sig")
+        return True
+
+    def record(self, section: str, outpath: str, input_sig: str | None = None) -> str:
+        self.ensure(section)
+        if not outpath or not os.path.isfile(outpath):
+            if not outpath:
+                self._dbg(f"RECORD_SKIP section={section} out=<empty> reason=empty_outpath")
+            else:
+                self._dbg(f"RECORD_SKIP section={section} out={outpath} reason=missing_file")
+            return ""
+        cur_fp = self.fingerprint(outpath)
+        if cur_fp:
+            self.set(section, outpath, cur_fp)
+        if input_sig is not None:
+            self.set(section, sig_key(outpath), input_sig)
+        self.flush()
+        self._dbg(
+            f"REC  section={section} out={outpath} fp={cur_fp or '<empty>'} sig={'<none>' if input_sig is None else input_sig}"
+        )
+        return cur_fp
+
+
+def stage_signature(
+    *,
+    files: Iterable[str] | None = None,
+    params: Dict[str, object] | None = None,
+    extra: Iterable[str] | None = None,
+) -> str:
+    """Convenience wrapper for compute_cache_signature (central API)."""
+    return compute_cache_signature(files=files, params=params, extra=extra)
+
+
 CLEANUP_PATTERNS = [
     "fas",
     "sam",

@@ -13,39 +13,54 @@ Design constraints:
 - minimal behavior drift vs legacy implementation
 """
 
-import configparser
 import os
 import re
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import getmd5, phase2_basename
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 
 # Canonical column order for processed cluster rows
 PROCESSED_CLUSTER_COLUMNS: List[str] = [
-    "alib", "clusterID", "chromosome", "strand", "pos", "len", "hits", "abun",
-    "pval_h_f", "N_f", "X_f", "pval_r_f", "pval_corr_f", "pval_h_r", "N_r", "X_r",
-    "pval_r_r", "pval_corr_r", "tag_id", "tag_seq",
+    "alib",
+    "clusterID",
+    "chromosome",
+    "strand",
+    "pos",
+    "len",
+    "hits",
+    "abun",
+    "pval_h_f",
+    "N_f",
+    "X_f",
+    "pval_r_f",
+    "pval_corr_f",
+    "pval_h_r",
+    "N_r",
+    "X_r",
+    "pval_r_r",
+    "pval_corr_r",
+    "tag_id",
+    "tag_seq",
 ]
 
 
 def process_single_lib_cluster(filename: str) -> List[Tuple]:
     """
-    Parse a single *.PHAS.candidate.clusters file into a list of tuples
-    matching PROCESSED_CLUSTER_COLUMNS.
-
-    filename: path to a cluster file (either per-library or ALL_LIBS.* in concat mode)
+    Parse a single *.PHAS.candidate.clusters file into a list of tuples matching
+    PROCESSED_CLUSTER_COLUMNS.
     """
     if not os.path.isfile(filename):
         raise FileNotFoundError(f"Cluster file not found: {filename}")
 
     clustlist: List[Tuple] = []
 
-    # library name from file basename: AR_1_nocontam.21-PHAS.candidate.clusters -> AR_1_nocontam
+    # library name from file basename:
+    # AR_1_nocontam.21-PHAS.candidate.clusters -> AR_1_nocontam
     base = os.path.basename(filename)
     alib = re.sub(r"\.\d+-PHAS\.candidate\.clusters$", "", base)
 
@@ -60,16 +75,14 @@ def process_single_lib_cluster(filename: str) -> List[Tuple]:
             if not m:
                 aid = None
                 continue
-            aid = m.group(1).strip()  # e.g. lobe_3_nocontam-1_3894_1
+            aid = m.group(1).strip()
             continue
 
-        # data lines belong to the most recent header (aid)
         if not aid:
             continue
 
         ent = line.rstrip("\n").split("\t")
         if len(ent) < 18:
-            # tolerate malformed lines (legacy would throw); keep it permissive
             continue
 
         achr = str(ent[0])
@@ -91,12 +104,28 @@ def process_single_lib_cluster(filename: str) -> List[Tuple]:
         tag_id = str(ent[16])
         tag_seq = str(ent[17])
 
-        # clusterID is the clean per-lib id (no filename glue)
         clustlist.append(
             (
-                alib, aid, achr, astrand, apos, alen, ahits, abun,
-                pval_h_f, N_f, X_f, pval_r_f, pval_corr_f, pval_h_r, N_r, X_r,
-                pval_r_r, pval_corr_r, tag_id, tag_seq,
+                alib,
+                aid,
+                achr,
+                astrand,
+                apos,
+                alen,
+                ahits,
+                abun,
+                pval_h_f,
+                N_f,
+                X_f,
+                pval_r_f,
+                pval_corr_f,
+                pval_h_r,
+                N_r,
+                X_r,
+                pval_r_r,
+                pval_corr_r,
+                tag_id,
+                tag_seq,
             )
         )
 
@@ -112,26 +141,7 @@ def _coerce_paths(clusterFiles: Sequence[str] | str) -> List[str]:
 def _raise_on_parallel_errors(results: List[object]) -> None:
     errs = [x for x in results if isinstance(x, RuntimeError)]
     if errs:
-        # bubble up the *first* error to match "fail fast" expectations
         raise errs[0]
-
-
-def _update_memfile_md5(memFile: str, outfname: str) -> None:
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    config.read(memFile)
-
-    section = "PROCESSED"
-    if not config.has_section(section):
-        config.add_section(section)
-
-    if os.path.isfile(outfname):
-        _, out_md5 = getmd5(outfname)
-        config[section][outfname] = out_md5
-        print(f"Hash for {outfname}: {out_md5}")
-
-    with open(memFile, "w") as fh:
-        config.write(fh)
 
 
 def aggregate_and_write_processed_clusters(
@@ -143,8 +153,6 @@ def aggregate_and_write_processed_clusters(
     Aggregate candidate cluster files and write {phase}_processed_clusters.tab.
 
     Returns: allClusters dataframe (sorted by clusterID, pos)
-
-    memFile: optional explicit path; if None, uses rt.memFile.
     """
     print("### Aggregating and processing candidate cluster files per library ###")
 
@@ -156,7 +164,27 @@ def aggregate_and_write_processed_clusters(
     if missing:
         raise FileNotFoundError(f"Missing cluster file(s): {missing}")
 
-    # --- Parallel processing ---
+    # Stable ordering for signatures and processing
+    paths = sorted(paths, key=os.path.basename)
+
+    outfname = phase2_basename("processed_clusters.tab")
+    mem_path = memFile or getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
+
+    cache = MemCache.load(str(mem_path))
+    input_sig = stage_signature(
+        files=paths,
+        params={
+            "phase": getattr(rt, "phase", None),
+            "concat_libs": bool(getattr(rt, "concat_libs", False)),
+        },
+    )
+
+    if cache.hit("PROCESSED", outfname, input_sig):
+        print(f"  - Output up-to-date (hash+sig match). Skipping aggregation: {outfname}")
+        df_cached = pd.read_csv(outfname, sep="\t")
+        print(f"Processed clusters written to {outfname}")
+        return df_cached
+
     all_clustlists = run_parallel_with_progress(
         process_single_lib_cluster,
         paths,
@@ -166,21 +194,16 @@ def aggregate_and_write_processed_clusters(
     )
     _raise_on_parallel_errors(all_clustlists)
 
-    # Flatten list of lists
     flat_clustlist = [item for sublist in all_clustlists for item in sublist]
 
     allClusters = pd.DataFrame(flat_clustlist, columns=PROCESSED_CLUSTER_COLUMNS)
     allClusters = allClusters.sort_values(by=["clusterID", "pos"])
 
-    outfname = phase2_basename("processed_clusters.tab")
     allClusters.to_csv(outfname, sep="\t", index=False, header=True)
 
-    # --- Update hash in memory file ---
-    mem_path = memFile or getattr(rt, "memFile", None)
-    if mem_path and str(mem_path).strip():
-        _update_memfile_md5(str(mem_path), outfname)
-    else:
-        print("[WARN] memFile not set; skipping processed_clusters md5 update.")
+    fp = cache.record("PROCESSED", outfname, input_sig)
+    if fp:
+        print(f"Hash for {outfname}: {fp}")
 
     print(f"Processed clusters written to {outfname}")
     return allClusters

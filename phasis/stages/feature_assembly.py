@@ -5,12 +5,11 @@ from .. import state as st
 from .. import ids
 import os
 import re
-import configparser
 import numpy as np
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import getmd5, phase2_basename, MEM_FILE_DEFAULT, compute_cache_signature, sig_key
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 DCL_OVERHANG = 3          # 2-nt 3' overhang in duplex -> 3-nt genomic offset
@@ -122,56 +121,35 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
         prefix = "concat_" if concat_libs else ""
         outfname = f"{prefix}{phase}_cluster_set_features.tsv"
 
-
     # Input signature: only reuse cached features when upstream inputs match.
     phas_path = phase2_basename("PHAS_to_detect.tab")
     scored_path = phase2_basename("clusters_scored.tsv")
 
-    extra_sig = []
-    try:
-        extra_sig.append(f"rows={len(clusters_data)}")
-        if hasattr(clusters_data, "columns") and ("alib" in clusters_data.columns):
-            libs = sorted({str(x) for x in clusters_data["alib"].dropna().unique().tolist()})
-            extra_sig.append("libs=" + ",".join(libs))
-    except Exception:
-        extra_sig = []
-
-    input_sig = compute_cache_signature(
+    input_sig = stage_signature(
         files=[phas_path, scored_path],
         params={"phase": phase, "concat_libs": bool(concat_libs)},
-        extra=extra_sig,
     )
 
-
-
-    # ---------- Early hash check ----------
-    cfg = configparser.ConfigParser()
-    cfg.optionxform = str
-    cfg.read(memFile)
+    cache = MemCache.load(memFile)
     section = "CLUSTER_FEATURES"
-    if not cfg.has_section(section):
-        cfg.add_section(section)
 
-    if os.path.isfile(outfname):
-        _, cur_md5 = getmd5(outfname)
-        prev_md5 = cfg[section].get(outfname)
-        prev_sig = cfg[section].get(sig_key(outfname))
-        if prev_md5 and prev_md5 == cur_md5 and prev_sig and prev_sig == input_sig:
-            print(f"  - Output up-to-date (hash+sig match). Skipping assembly: {outfname}")
-            df = pd.read_csv(outfname, sep="\t")
+    # ---------- Early cache check ----------
+    if cache.hit(section, outfname, input_sig):
+        print(f"  - Output up-to-date (hash+sig match). Skipping assembly: {outfname}")
+        df = pd.read_csv(outfname, sep="	")
 
-            # Coerce numerics by legacy names only
-            for col in df.columns:
-                if col in NUMERIC_COLS:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Coerce numerics by legacy names only
+        for col in df.columns:
+            if col in NUMERIC_COLS:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
 
-            # Ensure exact column order if all present
-            missing = [c for c in FEATURE_COLS if c not in df.columns]
-            if not missing:
-                df = df[FEATURE_COLS]
-            else:
-                print(f"[WARN] Existing file lacks expected columns: {missing}")
-            return df
+        # Ensure exact column order if all present
+        missing = [c for c in FEATURE_COLS if c not in df.columns]
+        if not missing:
+            df = df[FEATURE_COLS]
+        else:
+            print(f"[WARN] Existing file lacks expected columns: {missing}")
+        return df
 
     # ---------- Validate input ----------
     required_cols = ['clusterID', 'chromosome', 'strand', 'pos', 'len', 'abun', 'identifier', 'tag_seq', 'alib']
@@ -220,16 +198,11 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
     for col in collected_features.columns:
         if col in NUMERIC_COLS:
             collected_features[col] = pd.to_numeric(collected_features[col], errors="coerce")
-
-    # ---------- Write + hash ----------
-    collected_features.to_csv(outfname, sep="\t", index=False)
-    if os.path.isfile(outfname):
-        _, out_md5 = getmd5(outfname)
-        cfg[section][outfname] = out_md5
-        cfg[section][sig_key(outfname)] = input_sig
-        with open(memFile, 'w') as fh:
-            cfg.write(fh)
-        print(f"  - Wrote {outfname} (md5: {out_md5})")
+    # ---------- Write + cache record ----------
+    collected_features.to_csv(outfname, sep="	", index=False)
+    fp = cache.record(section, outfname, input_sig)
+    if fp:
+        print(f"  - Wrote {outfname} (md5: {fp})")
 
     return collected_features
 

@@ -2,96 +2,121 @@ from __future__ import annotations
 
 import os
 import sys
-import configparser
 
 import numpy as np
 import pandas as pd
 from scipy.stats import combine_pvalues
 
 import phasis.runtime as rt
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
-from phasis.cache import getmd5, phase2_basename, MEM_FILE_DEFAULT, compute_cache_signature, sig_key
 
 from .. import state as st
 
-# Keep same constant as legacy
 WINDOW_MULTIPLIER = 10  # 10 cycles
-
-# Optional alias (nice for consistency/debug)
 WIN_SCORE_LOOKUP = st.WIN_SCORE_LOOKUP
 
 
 def fishers(pvals):
     """
-    Combine p-values using Fisher's method.
-
-    Notes
-    -----
-    SciPy's combine_pvalues computes log(p). If any p==0, you'll see
-    RuntimeWarning: divide by zero encountered in log. That is mathematically
-    fine (it implies an extremely significant combined p-value), but it is
-    noisy and can trigger numerical edge cases on some platforms.
-
-    We defensively clip p-values into (0, 1] before combining.
+    Combine p-values using Fisher's method with defensive clipping.
     """
     if pvals is None:
         return 1.0
-
     arr = np.asarray(list(pvals), dtype=float)
-
-    # Drop NaNs/Infs
     arr = arr[np.isfinite(arr)]
     if arr.size == 0:
         return 1.0
-
-    # Clip into (0, 1]; keep 1.0 as-is, push 0.0 up to a tiny positive float.
-    # 1e-300 is below typical double precision min-normal (~1e-308) but still
-    # representable; also avoids returning exactly 0.0 from combine_pvalues.
     tiny = 1e-300
     arr = np.clip(arr, tiny, 1.0)
-
-    stat, p = combine_pvalues(arr, method="fisher", weights=None)
+    _, p = combine_pvalues(arr, method="fisher", weights=None)
     return float(p)
 
-def compute_scores_for_group(chromosome_data_group):
+
+def _record_clusters_scored_tsv_path(path: str) -> None:
     """
-    Worker: compute PHASIS scores for one (chromosome, library) group.
-
-    Input: ((chromosome, library), rows-as-list) where each row has columns:
-      ['cluster_id','window_n','fw_pval_corr','rv_pval_corr',
-       'combined_window_p_value','chromosome','library']
-
-    Output: list of [cID, phasis_score, combined_fishers]
+    Persist scored TSV path into runtime + snapshot (spawn-safe).
     """
-    (chromosome, lib), data_list = chromosome_data_group
+    try:
+        if not path:
+            return
+        p = os.path.abspath(os.path.expanduser(path))
+        rt.clusters_scored_tsv = p
+        snap = getattr(rt, "runtime_snapshot", None)
+        if hasattr(rt, "save_snapshot"):
+            rt.save_snapshot(snap)
+    except Exception:
+        return
 
-    cols = ['cluster_id','window_n','fw_pval_corr','rv_pval_corr',
-            'combined_window_p_value','chromosome','library']
+
+def infer_library_from_cluster_id(cid: str, phase_value: int) -> str:
+    """
+    Infer library prefix from cluster_id by splitting on '{phase}-PHAS' (or swap-phase tag).
+    This avoids the common trap where '-' appears only inside '21-PHAS'.
+    """
+    s = str(cid)
+
+    tag_main = f"{phase_value}-PHAS"
+    swap_phase = 21 if phase_value == 24 else 24 if phase_value == 21 else phase_value
+    tag_alt = f"{swap_phase}-PHAS"
+
+    if tag_main in s:
+        pref = s.split(tag_main)[0]
+    elif tag_alt in s:
+        pref = s.split(tag_alt)[0]
+    else:
+        return "UNKNOWN"
+
+    return pref.rstrip(".-_")
+
+
+def infer_chromosome_from_cluster_id(cid: str):
+    """
+    Infer chromosome from cluster_id (last '_' chunk). Falls back to string.
+    """
+    s = str(cid)
+    if "_" not in s:
+        return "NA"
+    last = s.rsplit("_", 1)[-1]
+    try:
+        return int(last)
+    except Exception:
+        return last
+
+
+def compute_scores_for_group(group_payload):
+    """
+    Worker: ((chromosome, library), rows_list) -> list rows [cID, phasis_score, combined_fishers]
+    """
+    (chromosome, lib), data_list = group_payload
     if not data_list:
         return []
 
+    cols = [
+        "cluster_id",
+        "window_n",
+        "fw_pval_corr",
+        "rv_pval_corr",
+        "combined_window_p_value",
+    ]
     df = pd.DataFrame(data_list, columns=cols)
 
-    # Re-assert group labels (defensive)
-    df['chromosome'] = chromosome
-    df['library'] = lib
-
-    # Coerce numerics safely
-    for c in ['window_n', 'fw_pval_corr', 'rv_pval_corr', 'combined_window_p_value']:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
+    for c in ("window_n", "fw_pval_corr", "rv_pval_corr", "combined_window_p_value"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
     out = []
-    for cID, aclust in df.groupby('cluster_id', sort=False):
-        vals = aclust['combined_window_p_value'].dropna()
+    for cID, aclust in df.groupby("cluster_id", sort=False):
+        vals = aclust["combined_window_p_value"].dropna()
         if vals.empty:
-            # ---- DEBUG LINE (requested) ----
-            print(f"[DBG] no combined_window_p_value for {cID} in (chr={chromosome}, lib={lib}); rows={len(aclust)}")
             combined_fishers = 1.0
             phasis_score = 0.0
         else:
             combined_fishers = fishers(vals.tolist())
             if not np.isfinite(combined_fishers) or combined_fishers <= 0.0:
-                combined_fishers = max(float(combined_fishers) if np.isfinite(combined_fishers) else 0.0, 1e-300)
+                combined_fishers = max(
+                    float(combined_fishers) if np.isfinite(combined_fishers) else 0.0, 1e-300
+                )
             phasis_score = -np.log10(combined_fishers)
             if not np.isfinite(phasis_score):
                 phasis_score = 300.0
@@ -103,178 +128,83 @@ def compute_scores_for_group(chromosome_data_group):
 
     return out
 
-def _record_clusters_scored_tsv_path(path: str) -> None:
-    """
-    Persist scored TSV path into runtime + snapshot (spawn-safe).
-
-    macOS spawn workers must rebuild WIN_SCORE_LOOKUP from the scored TSV.
-    This stores the absolute path in rt and updates the runtime snapshot file.
-    """
-    try:
-        if not path:
-            return
-        p = os.path.abspath(os.path.expanduser(path))
-        rt.clusters_scored_tsv = p
-
-        # Save back to the same snapshot file if already set, else create default
-        snap = getattr(rt, "runtime_snapshot", None)
-        if hasattr(rt, "save_snapshot"):
-            rt.save_snapshot(snap)
-    except Exception:
-        # Never fail legacy execution because of snapshot bookkeeping
-        return
-
-def infer_library_from_cluster_id(cid: str, phase_value: int) -> str:
-    """
-    Infer library from cluster_id (compact IDs), with fallbacks for old IDs.
-
-    Rules (same as your nested _infer_lib):
-      1) If '-' exists: library is everything before the last '-'
-      2) Else: split on '{phase}-PHAS' or '{swap_phase}-PHAS'
-      3) Else: UNKNOWN
-    """
-    s = str(cid)
-
-    if "-" in s:
-        return s.rsplit("-", 1)[0]
-
-    swap_phase = (21 if phase_value == 24 else 24 if phase_value == 21 else phase_value)
-    tag_main = f"{phase_value}-PHAS"
-    tag_alt = f"{swap_phase}-PHAS"
-
-    if tag_main in s:
-        return s.split(tag_main)[0]
-    if tag_alt in s:
-        return s.split(tag_alt)[0]
-
-    return "UNKNOWN"
 
 def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
     """
     Compute PHASIS scores per (chromosome, library) group in parallel.
-    Writes {phase}_clusters_scored.tsv and caches its hash in memFile.
+    Reads/writes {phase}_clusters_scored.tsv and uses centralized MemCache.
 
-    Spawn-safety:
-      - Records rt.clusters_scored_tsv and saves runtime snapshot so that
-        macOS spawn workers can rebuild WIN_SCORE_LOOKUP from this TSV.
+    Input expectation (from window_selection):
+      columns: cluster_id, window_n, fw_pval_corr, rv_pval_corr, combined_window_p_value
+      (chromosome/alib are NOT required; we infer from cluster_id)
     """
     print("### Step: Compute PHASIS scores per (chromosome, library) ###")
-    # Pull run-specific settings from runtime (spawn/fork safe)
+
     phase = getattr(rt, "phase", None)
-    memFile = getattr(rt, "memFile", MEM_FILE_DEFAULT)
+    memFile = getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
     outfname = phase2_basename("clusters_scored.tsv")
-
     windows_path = phase2_basename("clusters_windows_to_score.tsv")
-    extra_sig = []
-    try:
-        extra_sig.append(f"rows={len(clusters)}")
-    except Exception:
-        extra_sig = []
 
-    input_sig = compute_cache_signature(
-        files=[windows_path],
-        params={"phase": phase},
-        extra=extra_sig,
-    )
+    cache = MemCache.load(memFile)
 
-    # --- Early hash+sig check ---
-    cfg = configparser.ConfigParser()
-    cfg.optionxform = str
-    cfg.read(memFile)
-    section = "CLUSTERS_SCORED"
-    if not cfg.has_section(section):
-        cfg.add_section(section)
+    # Stable signature: depends only on upstream windows TSV + phase
+    input_sig = stage_signature(files=[windows_path], params={"phase": phase})
 
-    if os.path.isfile(outfname):
-        _, cur_md5 = getmd5(outfname)
-        prev_md5 = cfg[section].get(outfname)
-        prev_sig = cfg[section].get(sig_key(outfname))
-        if prev_md5 and prev_md5 == cur_md5 and prev_sig and prev_sig == input_sig:
-            print(f"  - Output up-to-date (hash+sig match). Skipping computation: {outfname}")
-            df_cached = pd.read_csv(outfname, sep="\t")
-            for c in ("phasis_score", "combined_fishers"):
-                if c in df_cached.columns:
-                    df_cached[c] = pd.to_numeric(df_cached[c], errors="coerce").fillna(0.0)
+    if cache.hit("CLUSTERS_SCORED", outfname, input_sig):
+        print(f"  - Output up-to-date (hash+sig match). Skipping computation: {outfname}")
+        df_cached = pd.read_csv(outfname, sep="\t")
+        for c in ("phasis_score", "combined_fishers"):
+            if c in df_cached.columns:
+                df_cached[c] = pd.to_numeric(df_cached[c], errors="coerce").fillna(0.0)
+        _record_clusters_scored_tsv_path(outfname)
+        return df_cached
 
-            # >>> spawn fix: persist scored TSV path for workers
-            _record_clusters_scored_tsv_path(outfname)
-            return df_cached
-
-    # --- Guard input ---
+    # Guard empty input
     if clusters is None or getattr(clusters, "empty", True):
         print("[INFO] compute_and_save_phasis_scores: empty input; writing empty file.")
-        pd.DataFrame(columns=["cID", "phasis_score", "combined_fishers"]).to_csv(
-            outfname, sep="\t", index=False
-        )
-
-        if os.path.isfile(outfname):
-            _, out_md5 = getmd5(outfname)
-            cfg[section][outfname] = out_md5
-            cfg[section][sig_key(outfname)] = input_sig
-            with open(memFile, "w") as fh:
-                cfg.write(fh)
-
-        # >>> spawn fix: persist scored TSV path for workers (even if empty)
+        empty = pd.DataFrame(columns=["cID", "phasis_score", "combined_fishers"])
+        empty.to_csv(outfname, sep="\t", index=False)
+        cache.record("CLUSTERS_SCORED", outfname, input_sig)
         _record_clusters_scored_tsv_path(outfname)
-        return pd.DataFrame(columns=["cID", "phasis_score", "combined_fishers"])
+        return empty
 
-    # --- Derive chromosome & library from compact IDs (robust) ---
     clusters = clusters.copy()
+
+    # Normalize cluster_id column name
     if "cluster_id" not in clusters.columns:
-        raise KeyError("compute_and_save_phasis_scores: input must contain 'cluster_id' column")
+        if "clusterID" in clusters.columns:
+            clusters = clusters.rename(columns={"clusterID": "cluster_id"})
+        else:
+            raise KeyError("compute_and_save_phasis_scores: input must contain 'cluster_id' column")
 
-    clusters["cluster_id"] = clusters["cluster_id"].astype(str)
+    # Ensure required numeric columns exist
+    required = ["window_n", "fw_pval_corr", "rv_pval_corr", "combined_window_p_value"]
+    missing = [c for c in required if c not in clusters.columns]
+    if missing:
+        raise ValueError(f"compute_and_save_phasis_scores: missing required columns: {missing}")
 
-    # Chromosome = last underscore chunk
-    clusters["chromosome"] = clusters["cluster_id"].str.rsplit("_", n=1).str[-1]
-
-    # Library inference (no nested function)
+    # Infer chromosome + library from cluster_id (window_selection output does not include them)
     phase_value = int(phase) if phase is not None else 21
-    clusters["library"] = [
-        infer_library_from_cluster_id(cid, phase_value) for cid in clusters["cluster_id"].tolist()
-    ]
+    clusters["chromosome"] = [infer_chromosome_from_cluster_id(x) for x in clusters["cluster_id"].tolist()]
+    clusters["library"] = [infer_library_from_cluster_id(x, phase_value) for x in clusters["cluster_id"].tolist()]
 
-    # Debug visibility on inference
-    total_rows = len(clusters)
-    unknown_libs = int((clusters["library"] == "UNKNOWN").sum())
-    if unknown_libs:
-        ex = clusters.loc[clusters["library"] == "UNKNOWN", "cluster_id"].head(5).tolist()
-        print(f"[WARN] {unknown_libs}/{total_rows} cluster_ids have UNKNOWN library. Examples: {ex}")
+    # Form groups
+    groups = []
+    for (chrom, lib), df in clusters.groupby(["chromosome", "library"], sort=False, dropna=False):
+        rows = df[
+            ["cluster_id", "window_n", "fw_pval_corr", "rv_pval_corr", "combined_window_p_value"]
+        ].values.tolist()
+        groups.append(((chrom, lib), rows))
 
-    # Ensure numeric columns (they might be strings if read from TSV)
-    for c in ("window_n", "fw_pval_corr", "rv_pval_corr", "combined_window_p_value"):
-        if c in clusters.columns:
-            clusters[c] = pd.to_numeric(clusters[c], errors="coerce")
-
-    # Group and ship to workers (dropna=False to avoid dropping UNKNOWN)
-    groups = [
-        (
-            (chrom, lib),
-            df[
-                [
-                    "cluster_id",
-                    "window_n",
-                    "fw_pval_corr",
-                    "rv_pval_corr",
-                    "combined_window_p_value",
-                    "chromosome",
-                    "library",
-                ]
-            ].values.tolist(),
-        )
-        for (chrom, lib), df in clusters.groupby(["chromosome", "library"], sort=False, dropna=False)
-    ]
     print(f"  - Found {len(groups)} (chromosome, library) groups")
-
     if not groups:
-        print(
-            f"[ERR] No groups formed. Unique cluster_ids={clusters['cluster_id'].nunique()}, "
-            f"chromosomes={clusters['chromosome'].nunique()}, libraries={clusters['library'].nunique()}"
-        )
+        print("[INFO] No groups formed; writing empty scored TSV.")
+        empty = pd.DataFrame(columns=["cID", "phasis_score", "combined_fishers"])
+        empty.to_csv(outfname, sep="\t", index=False)
+        cache.record("CLUSTERS_SCORED", outfname, input_sig)
+        _record_clusters_scored_tsv_path(outfname)
+        return empty
 
-    # --- Parallel compute ---
-    # On Linux/HPC, 'fork' can occasionally deadlock with NumPy/SciPy (esp. if any
-    # native libs have background threads). Prefer forkserver/spawn for this stage.
     preferred_start = getattr(rt, "mp_start_method", None) or os.environ.get("PHASIS_MP_START_METHOD")
     if preferred_start is None and sys.platform != "darwin":
         preferred_start = "forkserver"
@@ -289,20 +219,15 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
         kind="compute",
     )
 
-    # Flatten and write
     flat = [item for sub in (results or []) for item in (sub or [])]
     win_phasis_score = pd.DataFrame(flat, columns=["cID", "phasis_score", "combined_fishers"])
 
     win_phasis_score.to_csv(outfname, sep="\t", index=False)
-    if os.path.isfile(outfname):
-        _, out_md5 = getmd5(outfname)
-        cfg[section][outfname] = out_md5
-        cfg[section][sig_key(outfname)] = input_sig
-        with open(memFile, "w") as fh:
-            cfg.write(fh)
-        print(f"  - Wrote {outfname} (md5: {out_md5})")
+    fp = cache.record("CLUSTERS_SCORED", outfname, input_sig)
+    if fp:
+        print(f"  - Wrote {outfname} (md5: {fp})")
+    else:
+        print(f"  - Wrote {outfname}")
 
-    # >>> spawn fix: persist scored TSV path for workers
     _record_clusters_scored_tsv_path(outfname)
     return win_phasis_score
-

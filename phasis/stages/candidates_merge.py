@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-import configparser
 import os
 from functools import partial
 
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import (
-    MEM_FILE_DEFAULT,
-    compute_cache_signature,
-    getmd5,
-    phase2_basename,
-    sig_key,
-)
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 
@@ -75,16 +68,11 @@ def loci_table_from_clusters(
     # Resolve minClusterLength early for both signature and computation
     mcl = int(getattr(rt, "minClusterLength", 0) or 0) if minClusterLength is None else int(minClusterLength)
 
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    config.read(memFile_local)
-    section = "LOCI_TABLE"
-    if not config.has_section(section):
-        config.add_section(section)
+    cache = MemCache.load(memFile_local)
 
     # Inputs that should invalidate loci-table cache when they change.
     processed_clusters_path = phase2_basename("processed_clusters.tab")
-    curr_sig = compute_cache_signature(
+    input_sig = stage_signature(
         files=[processed_clusters_path],
         params={
             "phase": getattr(rt, "phase", None),
@@ -92,18 +80,13 @@ def loci_table_from_clusters(
         },
     )
 
-    if os.path.isfile(outfname):
-        _, current_fp = getmd5(outfname)
-        prev_fp = config[section].get(outfname)
-        prev_sig = config[section].get(sig_key(outfname))
-
-        if prev_fp and prev_sig and current_fp == prev_fp and curr_sig == prev_sig:
-            print(f"File {outfname} is up-to-date (hash+sig match). Skipping recomputation.")
-            print(f"Loci table written to {outfname}")
-            with open(outfname, "r") as fh:
-                file_lines = fh.readlines()[1:]  # skip header
-                lociTablelist_unique = [ln.strip().split("\t") for ln in file_lines]
-            return pd.DataFrame(lociTablelist_unique, columns=["name", "pval", "chr", "start", "end"])
+    if cache.hit("LOCI_TABLE", outfname, input_sig):
+        print(f"File {outfname} is up-to-date (hash+sig match). Skipping recomputation.")
+        print(f"Loci table written to {outfname}")
+        with open(outfname, "r") as fh:
+            file_lines = fh.readlines()[1:]  # skip header
+            lociTablelist_unique = [ln.strip().split("	") for ln in file_lines]
+        return pd.DataFrame(lociTablelist_unique, columns=["name", "pval", "chr", "start", "end"])
 
     worker_fn = partial(chromosome_clusters_to_candidate_loci, minClusterLength=mcl)
 
@@ -133,13 +116,9 @@ def loci_table_from_clusters(
             fh.write("\t".join(map(str, row)) + "\n")
 
     if os.path.isfile(outfname):
-        _, out_fp = getmd5(outfname)
-        config[section][outfname] = out_fp
-        config[section][sig_key(outfname)] = curr_sig
-        print(f"Hash for {outfname}: {out_fp}")
-
-        with open(memFile_local, "w") as fh:
-            config.write(fh)
+        fp = cache.record("LOCI_TABLE", outfname, input_sig)
+        if fp:
+            print(f"Hash for {outfname}: {fp}")
 
     print(f"Loci table written to {outfname}")
     return pd.DataFrame(lociTablelist_unique, columns=["name", "pval", "chr", "start", "end"])
@@ -161,28 +140,26 @@ def merge_candidate_clusters_across_libs(
     memFile_local = memFile or getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
     concat_local = bool(getattr(rt, "concat_libs", False)) if concat_libs is None else bool(concat_libs)
 
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    config.read(memFile_local)
+    cache = MemCache.load(memFile_local)
+    input_sig = stage_signature(
+        files=[loci_table_path],
+        params={
+            "phase": getattr(rt, "phase", None),
+            "concat_libs": bool(concat_local),
+        },
+    )
 
-    section = "MERGED_CANDIDATES"
-    if not config.has_section(section):
-        config.add_section(section)
+    if cache.hit("MERGED_CANDIDATES", out_path, input_sig):
+        print("Outputs up-to-date (hash+sig match). Skipping merge computation.")
+        df_cached = pd.read_csv(out_path, sep="	")
 
-    if os.path.isfile(out_path):
-        _, curr_fp = getmd5(out_path)
-        prev_fp = config[section].get(out_path)
-        if prev_fp and prev_fp == curr_fp:
-            print("Outputs up-to-date (hash match). Skipping merge computation.")
-            df_cached = pd.read_csv(out_path, sep="\t")
-
-            if "chromosome" not in df_cached.columns and "chr" in df_cached.columns:
-                df_cached = df_cached.rename(columns={"chr": "chromosome"})
-            if "alib" not in df_cached.columns and concat_local:
-                df_cached["alib"] = "ALL_LIBS"
-            if "alib" not in df_cached.columns and not concat_local:
-                print("[WARN] Cached merged table lacks 'alib' in non-concat mode.")
-            return df_cached
+        if "chromosome" not in df_cached.columns and "chr" in df_cached.columns:
+            df_cached = df_cached.rename(columns={"chr": "chromosome"})
+        if "alib" not in df_cached.columns and concat_local:
+            df_cached["alib"] = "ALL_LIBS"
+        if "alib" not in df_cached.columns and not concat_local:
+            print("[WARN] Cached merged table lacks 'alib' in non-concat mode.")
+        return df_cached
 
     if not os.path.isfile(loci_table_path):
         print(f"[WARN] Loci table not found: {loci_table_path}. Returning empty DataFrame.")
@@ -200,11 +177,9 @@ def merge_candidate_clusters_across_libs(
             print("[WARN] 'alib' missing in loci table on non-concat run; setting 'alib'='UNKNOWN'.")
             merged_df["alib"] = "UNKNOWN"
 
-    merged_df.to_csv(out_path, sep="\t", index=False)
-    _, new_fp = getmd5(out_path)
-    config[section][out_path] = new_fp
-    with open(memFile_local, "w") as fh:
-        config.write(fh)
-    print(f"Hash for {os.path.basename(out_path)}:")
+    merged_df.to_csv(out_path, sep="	", index=False)
+    fp = cache.record("MERGED_CANDIDATES", out_path, input_sig)
+    if fp:
+        print(f"Hash for {os.path.basename(out_path)}: {fp}")
 
     return merged_df

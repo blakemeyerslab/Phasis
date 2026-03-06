@@ -734,10 +734,10 @@ def scoringprocess(
 
     # -------------------- Batch planning -------------------------------------
     n_data = len(filtered_inputs)
-    print(f"n_data is {n_data}")
+    #print(f"n_data is {n_data}")
     batch_size = max(10, min(39, n_data))  # mirrors typical chunk sizes seen in logs
     batches = list(iter_batches(filtered_inputs, batch_size))
-    print(f"n_batches set to {len(batches)}")
+    #print(f"n_batches set to {len(batches)}")
 
     # Precompute phased indexes
     sens, asens = getPhasedIndexes(WINDOW_SIZE)
@@ -750,7 +750,7 @@ def scoringprocess(
 
     # -------------------- Process batches ------------------------------------
     for b_idx, b_tot, batch in batches:
-        print(f" Initial chunk_size set to {batch_size}")
+        #print(f" Initial chunk_size set to {batch_size}")
         # 1) Determine affected libs for this batch
         batch_libs = set()
         for akey, _ in batch:
@@ -838,7 +838,7 @@ def scoringprocess(
 
         # If outputs are OK and there are no changed inputs, we can skip scoring
         if batch_outputs_ok and not changed_inputs and not force_rescore:
-            print(f"[INFO] Batch {b_idx}/{b_tot}: outputs ok & inputs unchanged; skip scoring.")
+            #print(f"[INFO] Batch {b_idx}/{b_tot}: outputs ok & inputs unchanged; skip scoring.")
             # still refresh any unknown inputs
             for p_abs in unknown_inputs:
                 md5_now = batch_md5_map.get(p_abs)
@@ -979,7 +979,7 @@ def scoringprocess(
             if n_chunks > 0 and os.path.isfile(outfile) and os.path.getsize(outfile) > 0:
                 clusterFiles.append(outfile)
                 regenerated.append(outfile)
-                print(f"[OK] Aggregated {n_chunks} chunk(s) ({n_bytes} bytes) -> {outfile}")
+                #print(f"[OK] Aggregated {n_chunks} chunk(s) ({n_bytes} bytes) -> {outfile}")
             else:
                 print(f"[WARN] No non-empty chunks aggregated for {lib_prefix}; {os.path.basename(outfile)} is empty.")
                 if os.path.isfile(outfile):

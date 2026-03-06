@@ -14,7 +14,6 @@ Key requirements:
 - minimal behavior drift vs legacy implementation
 """
 
-import configparser
 import os
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -22,7 +21,7 @@ import pandas as pd
 from scipy.stats import combine_pvalues
 
 import phasis.runtime as rt
-from phasis.cache import getmd5, phase2_basename, compute_cache_signature, sig_key
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 import phasis.ids as ids
 
@@ -65,97 +64,18 @@ def _coerce_numeric_allowlist(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _read_cached_if_fresh(output_file: str, memFile: Optional[str], input_sig: Optional[str] = None) -> Optional[pd.DataFrame]:
-    """
-    Return cached dataframe if output_file exists AND md5 matches what's recorded in memFile.
-    Best-effort: any failure returns None and triggers recompute.
-    """
-    if not os.path.isfile(output_file):
-        return None
-    if not memFile or not os.path.isfile(memFile):
-        return None
-
+def _read_cached_phas_to_detect(output_file: str, cache: MemCache, input_sig: str | None) -> Optional[pd.DataFrame]:
+    """Return cached PHAS_to_detect table if cache hit; else None."""
     section_name = "PHAS_TO_DETECT"
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    try:
-        config.read(memFile)
-    except Exception:
-        return None
-
-    try:
-        previous_md5 = config.get(section_name, output_file, fallback=None)
-    except Exception:
-        previous_md5 = None
-
-    if not previous_md5:
-        return None
-
-    try:
-        _, current_md5 = getmd5(output_file)
-    except Exception:
-        return None
-
-    if current_md5 != previous_md5:
-        return None
-
-    # Optional input signature check (prevents stale reuse when inputs change)
-    if input_sig:
+    if cache.hit(section_name, output_file, input_sig):
+        print(f"  - Output up-to-date (hash+sig match). Skipping processing: {output_file}")
         try:
-            prev_sig = config.get(section_name, sig_key(output_file), fallback=None)
+            df = pd.read_csv(output_file, sep="\t", engine="python")
         except Exception:
-            prev_sig = None
-        if not prev_sig or prev_sig != input_sig:
-            return None
-
-    print(f"  - Output up-to-date (hash match). Skipping processing: {output_file}")
-    try:
-        df = pd.read_csv(output_file, sep="\t", engine="python")
-    except Exception:
-        df = pd.read_csv(output_file, sep="\t")
-    df = _coerce_numeric_allowlist(df)
-    return df
-
-
-def _write_md5(memFile: Optional[str], section_name: str, outpath: str, input_sig: Optional[str] = None) -> None:
-    """
-    Best-effort: record md5 for outpath into memFile[section_name][outpath]
-    """
-    if not memFile:
-        print("[WARN] memFile not set; skipping md5 cache update.")
-        return
-
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    try:
-        if os.path.isfile(memFile):
-            config.read(memFile)
-    except Exception:
-        pass
-
-    if not config.has_section(section_name):
-        try:
-            config.add_section(section_name)
-        except Exception:
-            return
-
-    try:
-        _, md5 = getmd5(outpath)
-        config.set(section_name, outpath, md5)
-        if input_sig:
-            try:
-                config.set(section_name, sig_key(outpath), input_sig)
-            except Exception:
-                pass
-    except Exception:
-        return
-
-    try:
-        with open(memFile, "w") as fh:
-            config.write(fh)
-        print(f"  - Wrote {outpath} (md5: {md5})")
-    except Exception:
-        print(f"  - Wrote {outpath}")
+            df = pd.read_csv(output_file, sep="\t")
+        df = _coerce_numeric_allowlist(df)
+        return df
+    return None
 
 
 def process_chromosome_data(loci_group: Sequence[Sequence]) -> pd.DataFrame:
@@ -236,24 +156,23 @@ def build_and_save_phas_clusters(
 
     # Prefer explicit args; fall back to runtime snapshot
     phase_local = phase if phase is not None else getattr(rt, "phase", None)
-    memfile_local = memFile if memFile is not None else getattr(rt, "memFile", None)
+    memfile_local = memFile if memFile is not None else (getattr(rt, "memFile", None) or MEM_FILE_DEFAULT)
     concat_local = concat_libs if concat_libs is not None else getattr(rt, "concat_libs", False)
 
     output_file = phase2_basename("PHAS_to_detect.tab")
 
-    # Signature from upstream Phase II inputs
-    try:
-        proc_path = phase2_basename("processed_clusters.tab")
-        dict_tab = phase2_basename("mergedClusterDict.tab")
-        input_sig = compute_cache_signature(
-            files=[proc_path, dict_tab],
-            params={"phase": phase_local, "concat_libs": bool(concat_local)},
-        )
-    except Exception:
-        input_sig = None
+    cache = MemCache.load(memfile_local)
 
-    # ---- Early hash check ----
-    cached = _read_cached_if_fresh(output_file, memfile_local, input_sig)
+    # Signature from upstream Phase II inputs
+    proc_path = phase2_basename("processed_clusters.tab")
+    dict_tab = phase2_basename("mergedClusterDict.tab")
+    input_sig = stage_signature(
+        files=[proc_path, dict_tab],
+        params={"phase": phase_local, "concat_libs": bool(concat_local)},
+    )
+
+    # ---- Early cache check ----
+    cached = _read_cached_phas_to_detect(output_file, cache, input_sig)
     if cached is not None:
         return cached
 
@@ -345,6 +264,10 @@ def build_and_save_phas_clusters(
 
     # ---- Write + update md5 cache (best effort) ----
     clusters_data.to_csv(output_file, sep="\t", encoding="utf-8", index=False)
-    _write_md5(memfile_local, "PHAS_TO_DETECT", output_file, input_sig)
+    fp = cache.record("PHAS_TO_DETECT", output_file, input_sig)
+    if fp:
+        print(f"  - Wrote {output_file} (md5: {fp})")
+    else:
+        print(f"  - Wrote {output_file}")
 
     return clusters_data

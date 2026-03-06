@@ -18,7 +18,6 @@ Important:
   - caching results in-process
 """
 
-import configparser
 import csv
 import functools
 import os
@@ -31,7 +30,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, getmd5, mem_get, mem_set, phase2_basename, compute_cache_signature, sig_key
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 # ---------------------------------------------------------------------
@@ -627,14 +626,7 @@ def merge_candidate_clusters_parametric(
     memFile_local = memFile or getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
     buf = int(getattr(rt, "clustbuffer", 0) or 0) if clustbuffer is None else int(clustbuffer)
 
-    cfg = configparser.ConfigParser()
-    cfg.optionxform = str
-    cfg.read(memFile_local)
-
-    if not cfg.has_section("MERGED_CLUSTERS"):
-        cfg.add_section("MERGED_CLUSTERS")
-    if not cfg.has_section("MERGED_DICT"):
-        cfg.add_section("MERGED_DICT")
+    cache = MemCache.load(memFile_local)
 
     merged_pairs_path = phase2_basename("merged_clusters.tab")
     merged_dict_path = phase2_basename("mergedClusterDict.tab")
@@ -642,37 +634,22 @@ def merge_candidate_clusters_parametric(
     # ---- cache check ------------------------------------------------------
     # Cache is valid only when BOTH output hashes and the input signature match.
     # This prevents stale Phase II results when new libraries are added.
-    try:
-        loci_tab_path = phase2_basename("candidate.loci_table.tab")
-        proc_tab_path = phase2_basename("processed_clusters.tab")
-        input_sig = compute_cache_signature(
-            files=[loci_tab_path, proc_tab_path],
-            params={"phase": phase, "clustbuffer": buf, "concat_libs": bool(getattr(rt, "concat_libs", False))},
-        )
-    except Exception:
-        input_sig = ""
+    loci_tab_path = phase2_basename("candidate.loci_table.tab")
+    proc_tab_path = phase2_basename("processed_clusters.tab")
+    input_sig = stage_signature(
+        files=[loci_tab_path, proc_tab_path],
+        params={
+            "phase": phase,
+            "clustbuffer": buf,
+            "concat_libs": bool(getattr(rt, "concat_libs", False)),
+        },
+    )
 
-    if os.path.isfile(merged_pairs_path) and os.path.isfile(merged_dict_path):
-        _, h_pairs = getmd5(merged_pairs_path)
-        _, h_dict = getmd5(merged_dict_path)
-        prev_pairs = mem_get(cfg, "MERGED_CLUSTERS", merged_pairs_path)
-        prev_dict = mem_get(cfg, "MERGED_DICT", merged_dict_path)
-        prev_sig = mem_get(cfg, "MERGED_DICT", sig_key(merged_dict_path))
-        if prev_pairs == h_pairs and prev_dict == h_dict and (not input_sig or prev_sig == input_sig):
-            print("Outputs up-to-date (hash match). Skipping merge computation.")
-            try:
-                return _load_simple_tab_dict(merged_dict_path)
-            except Exception:
-                out = {}
-                with open(merged_dict_path, "r") as fh:
-                    for line in fh:
-                        parts = line.rstrip("\n").split("\t")
-                        if not parts:
-                            continue
-                        key = parts[0].strip()
-                        vals = [v for v in (p.strip() for p in parts[1:]) if v]
-                        out[key] = vals if vals else [key]
-                return out
+    if cache.hit("MERGED_CLUSTERS", merged_pairs_path, input_sig) and cache.hit(
+        "MERGED_DICT", merged_dict_path, input_sig
+    ):
+        print("Outputs up-to-date (hash+sig match). Skipping merge computation.")
+        return _load_simple_tab_dict(merged_dict_path)
 
     # ---- build overlap pairs per chromosome (parallel if multi-lib) --------
     mergedClusters: List[List[Any]] = []
@@ -713,17 +690,9 @@ def merge_candidate_clusters_parametric(
         for key, values in mcd.items():
             wr.writerow([key] + values)
 
-    # update hashes
-    if os.path.isfile(merged_pairs_path):
-        _, hp = getmd5(merged_pairs_path)
-        mem_set(cfg, "MERGED_CLUSTERS", merged_pairs_path, hp)
-    if os.path.isfile(merged_dict_path):
-        _, hd = getmd5(merged_dict_path)
-        mem_set(cfg, "MERGED_DICT", merged_dict_path, hd)
-        if input_sig:
-            mem_set(cfg, "MERGED_DICT", sig_key(merged_dict_path), input_sig)
-    with open(memFile_local, "w") as fh:
-        cfg.write(fh)
+    # update cache
+    cache.record("MERGED_CLUSTERS", merged_pairs_path, input_sig)
+    cache.record("MERGED_DICT", merged_dict_path, input_sig)
 
     return mcd
 
@@ -750,14 +719,7 @@ def ensure_mergedClusterDict_always(
     dict_tab = phase2_basename("mergedClusterDict.tab")
 
     memFile_local = memFile or getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
-
-    cfg = configparser.ConfigParser()
-    cfg.optionxform = str
-    try:
-        if memFile_local and os.path.isfile(memFile_local):
-            cfg.read(memFile_local)
-    except Exception:
-        pass
+    cache = MemCache.load(memFile_local)
 
     try:
         buf = int(getattr(rt, "clustbuffer", 0) or 0)
@@ -765,41 +727,31 @@ def ensure_mergedClusterDict_always(
         buf = 0
 
     # Build the *input* signature that should invalidate mergedClusterDict.tab.
-    try:
-        if concat_libs:
-            sig_files = [merged_out_path]
-        else:
-            sig_files = [phase2_basename("candidate.loci_table.tab"), phase2_basename("processed_clusters.tab")]
+    if concat_libs:
+        sig_files = [merged_out_path]
+    else:
+        sig_files = [phase2_basename("candidate.loci_table.tab"), phase2_basename("processed_clusters.tab")]
 
-        dict_input_sig = compute_cache_signature(
-            files=sig_files,
-            params={"phase": phase, "clustbuffer": buf, "concat_libs": bool(concat_libs)},
-        )
-    except Exception:
-        dict_input_sig = ""
+    dict_input_sig = stage_signature(
+        files=sig_files,
+        params={"phase": phase, "clustbuffer": buf, "concat_libs": bool(concat_libs)},
+    )
 
-    # Reuse existing dict tab only if md5 + signature match (when memFile exists).
-    if os.path.isfile(dict_tab):
-        reuse_ok = True
-        if memFile_local and os.path.isfile(memFile_local):
-            try:
-                _, cur_md5 = getmd5(dict_tab)
-            except Exception:
-                cur_md5 = None
-            prev_md5 = mem_get(cfg, "MERGED_DICT", dict_tab)
-            prev_sig = mem_get(cfg, "MERGED_DICT", sig_key(dict_tab))
+    # Reuse existing outputs only if hash + signature match.
+    # In non-concat mode, also require merged_clusters.tab to exist and be fresh,
+    # so users don't end up with a valid dict but missing pair table.
+    pairs_tab = phase2_basename("merged_clusters.tab")
+    reuse_ok = cache.hit("MERGED_DICT", dict_tab, dict_input_sig)
+    if not concat_libs:
+        reuse_ok = reuse_ok and cache.hit("MERGED_CLUSTERS", pairs_tab, dict_input_sig)
 
-            reuse_ok = bool(prev_md5 and cur_md5 and prev_md5 == cur_md5)
-            if dict_input_sig:
-                reuse_ok = reuse_ok and bool(prev_sig and prev_sig == dict_input_sig)
-
-        if reuse_ok:
-            try:
-                mcd = _load_simple_tab_dict(dict_tab)
-                _set_reverse_merged_map(mcd)
-                return mcd
-            except Exception as e:
-                print(f"[WARN] Failed to load {dict_tab}: {e}. Recomputing…")
+    if reuse_ok:
+        try:
+            mcd = _load_simple_tab_dict(dict_tab)
+            _set_reverse_merged_map(mcd)
+            return mcd
+        except Exception as e:
+            print(f"[WARN] Failed to load {dict_tab}: {e}. Recomputing…")
 
     # ---- recompute ----
     if concat_libs:
@@ -833,17 +785,7 @@ def ensure_mergedClusterDict_always(
             for key, values in mcd.items():
                 wr.writerow([key] + values)
 
-        # update mem (best effort)
-        try:
-            _, hd = getmd5(dict_tab)
-            mem_set(cfg, "MERGED_DICT", dict_tab, hd)
-            if dict_input_sig:
-                mem_set(cfg, "MERGED_DICT", sig_key(dict_tab), dict_input_sig)
-            if memFile_local:
-                with open(memFile_local, "w") as fh:
-                    cfg.write(fh)
-        except Exception:
-            pass
+        cache.record("MERGED_DICT", dict_tab, dict_input_sig)
 
         _set_reverse_merged_map(mcd)
         return mcd

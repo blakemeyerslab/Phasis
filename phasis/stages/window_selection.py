@@ -22,7 +22,6 @@ Constraints:
 - runtime-first: defaults come from phasis.runtime, but explicit args are supported
 """
 
-import configparser
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -30,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import getmd5, phase2_basename, compute_cache_signature, sig_key
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 WINDOWS_COLUMNS: List[str] = [
@@ -52,94 +51,31 @@ def _safe_key(akey: str) -> str:
     return s
 
 
-def _load_final_if_fresh(outfname: str, memFile: Optional[str], input_sig: Optional[str] = None) -> Optional[pd.DataFrame]:
-    """Return cached final dataframe if outfname md5 matches memFile record; else None."""
-    if not os.path.isfile(outfname):
-        return None
-    if not memFile or not os.path.isfile(memFile):
-        return None
-
-    cfg = configparser.ConfigParser()
-    cfg.optionxform = str
-    try:
-        cfg.read(memFile)
-    except Exception:
+def _load_final_if_cached(
+    cache: MemCache, outfname: str, input_sig: Optional[str] = None
+) -> Optional[pd.DataFrame]:
+    """Return cached final dataframe if cache hit; else None."""
+    if not cache.hit("WINDOWS_TO_SCORE", outfname, input_sig):
         return None
 
-    sec = "WINDOWS_TO_SCORE"
-    try:
-        prev = cfg.get(sec, outfname, fallback=None)
-    except Exception:
-        prev = None
-    if not prev:
-        return None
-
-    try:
-        _, cur = getmd5(outfname)
-    except Exception:
-        return None
-
-    if cur != prev:
-        return None
-
-    if input_sig:
-        try:
-            prev_sig = cfg.get(sec, sig_key(outfname), fallback=None)
-        except Exception:
-            prev_sig = None
-        if not prev_sig or prev_sig != input_sig:
-            return None
-
-    print(f"  - Output up-to-date (hash match). Skipping computation: {outfname}")
+    print(f"  - Output up-to-date (hash+sig match). Skipping computation: {outfname}")
     try:
         df = pd.read_csv(outfname, sep="\t", engine="python")
     except Exception:
         df = pd.read_csv(outfname, sep="\t")
 
-    # enforce numeric columns
     for c in ("window_n", "fw_pval_corr", "rv_pval_corr", "combined_window_p_value"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
 
-def _write_final_md5(outfname: str, memFile: Optional[str], input_sig: Optional[str] = None) -> None:
-    """Best-effort: store outfname md5 in memFile under section WINDOWS_TO_SCORE."""
-    if not memFile:
-        print("[WARN] memFile not set; skipping WINDOWS_TO_SCORE md5 update.")
-        return
-
-    cfg = configparser.ConfigParser()
-    cfg.optionxform = str
-    try:
-        if os.path.isfile(memFile):
-            cfg.read(memFile)
-    except Exception:
-        pass
-
-    sec = "WINDOWS_TO_SCORE"
-    if not cfg.has_section(sec):
-        try:
-            cfg.add_section(sec)
-        except Exception:
-            return
-
-    try:
-        _, out_md5 = getmd5(outfname)
-        cfg.set(sec, outfname, out_md5)
-        if input_sig:
-            try:
-                cfg.set(sec, sig_key(outfname), input_sig)
-            except Exception:
-                pass
-    except Exception:
-        return
-
-    try:
-        with open(memFile, "w") as fh:
-            cfg.write(fh)
-        print(f"  - Wrote {outfname} (md5: {out_md5})")
-    except Exception:
+def _record_final(cache: MemCache, outfname: str, input_sig: Optional[str] = None) -> None:
+    """Record outfname fingerprint and (optional) signature into phasis.mem."""
+    fp = cache.record("WINDOWS_TO_SCORE", outfname, input_sig)
+    if fp:
+        print(f"  - Wrote {outfname} (md5: {fp})")
+    else:
         print(f"  - Wrote {outfname}")
 
 
@@ -175,6 +111,8 @@ def select_scoring_windows(
         minClusterLength if minClusterLength is not None else getattr(rt, "minClusterLength", 0) or 0
     )
     memFile_local = memFile if memFile is not None else getattr(rt, "memFile", None)
+    memFile_local = memFile_local or MEM_FILE_DEFAULT
+    cache = MemCache.load(memFile_local)
 
     if wl <= 0 or sl <= 0:
         raise ValueError(f"Invalid window_len/sliding: window_len={wl}, sliding={sl}")
@@ -186,17 +124,14 @@ def select_scoring_windows(
     os.makedirs(outdir, exist_ok=True)
 
     # Signature from upstream PHAS_to_detect + key parameters
-    try:
-        phas_tab = phase2_basename("PHAS_to_detect.tab")
-        input_sig = compute_cache_signature(
-            files=[phas_tab],
-            params={"window_len": wl, "sliding": sl, "minClusterLength": mcl},
-        )
-    except Exception:
-        input_sig = None
+    phas_tab = phase2_basename("PHAS_to_detect.tab")
+    input_sig = stage_signature(
+        files=[phas_tab],
+        params={"window_len": wl, "sliding": sl, "minClusterLength": mcl},
+    )
 
-    # Early return on final up-to-date file (hash match)
-    cached = _load_final_if_fresh(outfname, memFile_local, input_sig)
+    # Early return on final up-to-date file (hash+sig match)
+    cached = _load_final_if_cached(cache, outfname, input_sig)
     if cached is not None:
         return cached
 
@@ -207,7 +142,7 @@ def select_scoring_windows(
         print("[INFO] No clusters to select windows from; writing empty output.")
         empty_out = pd.DataFrame(columns=WINDOWS_COLUMNS)
         empty_out.to_csv(outfname, sep="\t", index=False)
-        _write_final_md5(outfname, memFile_local, input_sig)
+        _record_final(cache, outfname, input_sig)
         return empty_out
 
     if "chromosome" not in clusters_data.columns and "chr" in clusters_data.columns:
@@ -224,7 +159,7 @@ def select_scoring_windows(
         print("[INFO] Input empty after column filtering; writing empty output.")
         empty_out = pd.DataFrame(columns=WINDOWS_COLUMNS)
         empty_out.to_csv(outfname, sep="\t", index=False)
-        _write_final_md5(outfname, memFile_local, input_sig)
+        _record_final(cache, outfname, input_sig)
         return empty_out
 
     # --- Build lib‑chr groups ---
@@ -320,7 +255,7 @@ def select_scoring_windows(
 
     # --- Write final + hash ---
     to_score.to_csv(outfname, sep="\t", index=False)
-    _write_final_md5(outfname, memFile_local, input_sig)
+    _record_final(cache, outfname, input_sig)
 
     print(f"    Cached chunks directory: {outdir}")
     return to_score
