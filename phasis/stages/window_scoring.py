@@ -10,7 +10,7 @@ from scipy.stats import combine_pvalues
 
 import phasis.runtime as rt
 from phasis.parallel import run_parallel_with_progress
-from phasis.cache import getmd5, phase2_basename, MEM_FILE_DEFAULT
+from phasis.cache import getmd5, phase2_basename, MEM_FILE_DEFAULT, compute_cache_signature, sig_key
 
 from .. import state as st
 
@@ -164,7 +164,20 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
     memFile = getattr(rt, "memFile", MEM_FILE_DEFAULT)
     outfname = phase2_basename("clusters_scored.tsv")
 
-    # --- Early hash check ---
+    windows_path = phase2_basename("clusters_windows_to_score.tsv")
+    extra_sig = []
+    try:
+        extra_sig.append(f"rows={len(clusters)}")
+    except Exception:
+        extra_sig = []
+
+    input_sig = compute_cache_signature(
+        files=[windows_path],
+        params={"phase": phase},
+        extra=extra_sig,
+    )
+
+    # --- Early hash+sig check ---
     cfg = configparser.ConfigParser()
     cfg.optionxform = str
     cfg.read(memFile)
@@ -175,8 +188,9 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
     if os.path.isfile(outfname):
         _, cur_md5 = getmd5(outfname)
         prev_md5 = cfg[section].get(outfname)
-        if prev_md5 and prev_md5 == cur_md5:
-            print(f"  - Output up-to-date (hash match). Skipping computation: {outfname}")
+        prev_sig = cfg[section].get(sig_key(outfname))
+        if prev_md5 and prev_md5 == cur_md5 and prev_sig and prev_sig == input_sig:
+            print(f"  - Output up-to-date (hash+sig match). Skipping computation: {outfname}")
             df_cached = pd.read_csv(outfname, sep="\t")
             for c in ("phasis_score", "combined_fishers"):
                 if c in df_cached.columns:
@@ -196,6 +210,7 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
         if os.path.isfile(outfname):
             _, out_md5 = getmd5(outfname)
             cfg[section][outfname] = out_md5
+            cfg[section][sig_key(outfname)] = input_sig
             with open(memFile, "w") as fh:
                 cfg.write(fh)
 
@@ -282,6 +297,7 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
     if os.path.isfile(outfname):
         _, out_md5 = getmd5(outfname)
         cfg[section][outfname] = out_md5
+        cfg[section][sig_key(outfname)] = input_sig
         with open(memFile, "w") as fh:
             cfg.write(fh)
         print(f"  - Wrote {outfname} (md5: {out_md5})")

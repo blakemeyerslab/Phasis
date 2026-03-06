@@ -119,7 +119,7 @@ def _print_final_detection_summary(phas_df: pd.DataFrame) -> None:
     total_detections = int(len(phas_df))
     phase_label = phase if phase is not None else getattr(rt, "phase", "NA")
 
-    print(f"  - Detected {unique_loci} unique {phase_label}-loci across {total_detections} PHAS detections.")
+    print(f"  - Detected {unique_loci} unique {phase_label}-PHAS loci candidates across {total_detections} {phase_label}-PHAS library-specific detections.")
 
     if total_detections > 0 and 'alib' in phas_df.columns:
         per_lib = phas_df['alib'].astype(str).value_counts().sort_index()

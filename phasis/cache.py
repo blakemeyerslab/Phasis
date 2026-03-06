@@ -187,12 +187,66 @@ def compute_md5_str(path: str) -> str | None:
     return _fast_file_fingerprint(path)
 
 
-def _md5_of_list_str(items):
-    h = _md5()
+def _sig_of_list_str(items):
+    """Return a stable 32-hex signature for a list of strings (blake2s)."""
+    h = hashlib.blake2s(digest_size=16)
     for s in items:
         h.update(str(s).encode('utf-8'))
         h.update(b'\n')
     return h.hexdigest()
+
+
+def _md5_of_list_str(items):
+    """Backward-compatible alias (signatures are *not* MD5)."""
+    return _sig_of_list_str(items)
+
+
+def sig_key(outpath: str) -> str:
+    """Return the memFile key used to store the input-signature for outpath."""
+    return f"{outpath}.sig"
+
+
+def compute_cache_signature(
+    *,
+    files: Iterable[str] | None = None,
+    params: Dict[str, object] | None = None,
+    extra: Iterable[str] | None = None,
+) -> str:
+    """
+    Compute a stable signature for a stage based on:
+      - content fingerprints of input files (getmd5 -> fast content fingerprint)
+      - key runtime parameters
+      - optional extra strings (counts, library sets, etc.)
+
+    This is used alongside output-file hashes to decide if cached outputs are reusable.
+    """
+    items = []
+
+    for f in (files or []):
+        p = os.path.abspath(os.path.expanduser(str(f)))
+        if os.path.isfile(p):
+            try:
+                _, fp = getmd5(p)
+            except Exception:
+                fp = ""
+            try:
+                size = os.path.getsize(p)
+            except Exception:
+                size = -1
+            items.append(f"FILE	{p}	{fp}	{size}")
+        else:
+            items.append(f"MISSING	{p}")
+
+    if params:
+        for k in sorted(params.keys()):
+            items.append(f"PARAM	{k}={params.get(k)}")
+
+    if extra:
+        for x in extra:
+            items.append(f"EXTRA	{x}")
+
+    return _md5_of_list_str(items)
+
 
 def md5_file_worker(path):
     """

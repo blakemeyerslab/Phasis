@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import getmd5, phase2_basename
+from phasis.cache import getmd5, phase2_basename, compute_cache_signature, sig_key
 from phasis.parallel import run_parallel_with_progress
 
 WINDOWS_COLUMNS: List[str] = [
@@ -52,7 +52,7 @@ def _safe_key(akey: str) -> str:
     return s
 
 
-def _load_final_if_fresh(outfname: str, memFile: Optional[str]) -> Optional[pd.DataFrame]:
+def _load_final_if_fresh(outfname: str, memFile: Optional[str], input_sig: Optional[str] = None) -> Optional[pd.DataFrame]:
     """Return cached final dataframe if outfname md5 matches memFile record; else None."""
     if not os.path.isfile(outfname):
         return None
@@ -82,6 +82,14 @@ def _load_final_if_fresh(outfname: str, memFile: Optional[str]) -> Optional[pd.D
     if cur != prev:
         return None
 
+    if input_sig:
+        try:
+            prev_sig = cfg.get(sec, sig_key(outfname), fallback=None)
+        except Exception:
+            prev_sig = None
+        if not prev_sig or prev_sig != input_sig:
+            return None
+
     print(f"  - Output up-to-date (hash match). Skipping computation: {outfname}")
     try:
         df = pd.read_csv(outfname, sep="\t", engine="python")
@@ -95,7 +103,7 @@ def _load_final_if_fresh(outfname: str, memFile: Optional[str]) -> Optional[pd.D
     return df
 
 
-def _write_final_md5(outfname: str, memFile: Optional[str]) -> None:
+def _write_final_md5(outfname: str, memFile: Optional[str], input_sig: Optional[str] = None) -> None:
     """Best-effort: store outfname md5 in memFile under section WINDOWS_TO_SCORE."""
     if not memFile:
         print("[WARN] memFile not set; skipping WINDOWS_TO_SCORE md5 update.")
@@ -119,6 +127,11 @@ def _write_final_md5(outfname: str, memFile: Optional[str]) -> None:
     try:
         _, out_md5 = getmd5(outfname)
         cfg.set(sec, outfname, out_md5)
+        if input_sig:
+            try:
+                cfg.set(sec, sig_key(outfname), input_sig)
+            except Exception:
+                pass
     except Exception:
         return
 
@@ -172,8 +185,18 @@ def select_scoring_windows(
     outdir = phase2_basename(f"windows_sl{sl}_wl{wl}_mcl{mcl}")
     os.makedirs(outdir, exist_ok=True)
 
+    # Signature from upstream PHAS_to_detect + key parameters
+    try:
+        phas_tab = phase2_basename("PHAS_to_detect.tab")
+        input_sig = compute_cache_signature(
+            files=[phas_tab],
+            params={"window_len": wl, "sliding": sl, "minClusterLength": mcl},
+        )
+    except Exception:
+        input_sig = None
+
     # Early return on final up-to-date file (hash match)
-    cached = _load_final_if_fresh(outfname, memFile_local)
+    cached = _load_final_if_fresh(outfname, memFile_local, input_sig)
     if cached is not None:
         return cached
 
@@ -184,7 +207,7 @@ def select_scoring_windows(
         print("[INFO] No clusters to select windows from; writing empty output.")
         empty_out = pd.DataFrame(columns=WINDOWS_COLUMNS)
         empty_out.to_csv(outfname, sep="\t", index=False)
-        _write_final_md5(outfname, memFile_local)
+        _write_final_md5(outfname, memFile_local, input_sig)
         return empty_out
 
     if "chromosome" not in clusters_data.columns and "chr" in clusters_data.columns:
@@ -201,7 +224,7 @@ def select_scoring_windows(
         print("[INFO] Input empty after column filtering; writing empty output.")
         empty_out = pd.DataFrame(columns=WINDOWS_COLUMNS)
         empty_out.to_csv(outfname, sep="\t", index=False)
-        _write_final_md5(outfname, memFile_local)
+        _write_final_md5(outfname, memFile_local, input_sig)
         return empty_out
 
     # --- Build lib‑chr groups ---
@@ -297,7 +320,7 @@ def select_scoring_windows(
 
     # --- Write final + hash ---
     to_score.to_csv(outfname, sep="\t", index=False)
-    _write_final_md5(outfname, memFile_local)
+    _write_final_md5(outfname, memFile_local, input_sig)
 
     print(f"    Cached chunks directory: {outdir}")
     return to_score

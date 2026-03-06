@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import getmd5, phase2_basename, MEM_FILE_DEFAULT
+from phasis.cache import getmd5, phase2_basename, MEM_FILE_DEFAULT, compute_cache_signature, sig_key
 from phasis.parallel import run_parallel_with_progress
 
 DCL_OVERHANG = 3          # 2-nt 3' overhang in duplex -> 3-nt genomic offset
@@ -123,6 +123,27 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
         outfname = f"{prefix}{phase}_cluster_set_features.tsv"
 
 
+    # Input signature: only reuse cached features when upstream inputs match.
+    phas_path = phase2_basename("PHAS_to_detect.tab")
+    scored_path = phase2_basename("clusters_scored.tsv")
+
+    extra_sig = []
+    try:
+        extra_sig.append(f"rows={len(clusters_data)}")
+        if hasattr(clusters_data, "columns") and ("alib" in clusters_data.columns):
+            libs = sorted({str(x) for x in clusters_data["alib"].dropna().unique().tolist()})
+            extra_sig.append("libs=" + ",".join(libs))
+    except Exception:
+        extra_sig = []
+
+    input_sig = compute_cache_signature(
+        files=[phas_path, scored_path],
+        params={"phase": phase, "concat_libs": bool(concat_libs)},
+        extra=extra_sig,
+    )
+
+
+
     # ---------- Early hash check ----------
     cfg = configparser.ConfigParser()
     cfg.optionxform = str
@@ -134,8 +155,9 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
     if os.path.isfile(outfname):
         _, cur_md5 = getmd5(outfname)
         prev_md5 = cfg[section].get(outfname)
-        if prev_md5 and prev_md5 == cur_md5:
-            print(f"  - Output up-to-date (hash match). Skipping assembly: {outfname}")
+        prev_sig = cfg[section].get(sig_key(outfname))
+        if prev_md5 and prev_md5 == cur_md5 and prev_sig and prev_sig == input_sig:
+            print(f"  - Output up-to-date (hash+sig match). Skipping assembly: {outfname}")
             df = pd.read_csv(outfname, sep="\t")
 
             # Coerce numerics by legacy names only
@@ -204,6 +226,7 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
     if os.path.isfile(outfname):
         _, out_md5 = getmd5(outfname)
         cfg[section][outfname] = out_md5
+        cfg[section][sig_key(outfname)] = input_sig
         with open(memFile, 'w') as fh:
             cfg.write(fh)
         print(f"  - Wrote {outfname} (md5: {out_md5})")

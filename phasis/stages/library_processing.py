@@ -126,6 +126,16 @@ def libraryprocess(libs):
             sys.exit("One or more libraries failed during filtering/conversion; see errors above.")
         libs_processed = _existing_path_results(proc_results)
 
+        # IMPORTANT: even if only some inputs needed processing, return the full
+        # expected .fas list for ALL requested libraries (existing + newly generated).
+        expected_fas = [f"{alib.rpartition(".")[0]}.fas" for alib in libs]
+        libs_all = [p for p in expected_fas if os.path.exists(p)]
+        # preserve deterministic order (expected_fas order) and include any extra outputs
+        for p in libs_processed:
+            if p not in libs_all:
+                libs_all.append(p)
+        libs_processed = libs_all
+
         # Step 3: Record MD5 of original files to memory
         print("Recording MD5:")
         for alib in libs_to_process:
