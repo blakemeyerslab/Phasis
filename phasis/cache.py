@@ -139,6 +139,7 @@ def stage_signature(
 CLEANUP_PATTERNS = [
     "fas",
     "sam",
+    "bam",
     "dict",
     "count",
     "runtime",

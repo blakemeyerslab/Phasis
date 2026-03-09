@@ -1,4 +1,3 @@
-import configparser
 import os
 import subprocess
 import sys
@@ -7,7 +6,7 @@ import gzip
 import shutil
 
 from phasis import runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, getmd5
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, stage_signature
 from phasis.parallel import PPBalance, optimize, run_parallel_with_progress
 
 
@@ -19,6 +18,9 @@ phase = None
 runtype = None
 outdir = None
 memFile = MEM_FILE_DEFAULT
+
+MAPPING_SECTION = "MAPPING"
+
 
 def resolve_plain_or_gz_path(path):
     """
@@ -89,10 +91,156 @@ def archive_fas_to_gz(path):
 
     return gz_path
 
+
+def _ensure_sections(cfg):
+    for sect in (MAPPING_SECTION, "MAPS", "FASTAS"):
+        if not cfg.has_section(sect):
+            cfg.add_section(sect)
+
+
+def _bam_output_for_fas(fas_path):
+    return f"{fas_path.rpartition('.')[0]}.bam"
+
+
+def _legacy_sam_output_for_fas(fas_path):
+    return f"{fas_path.rpartition('.')[0]}.sam"
+
+
+def _summary_output_for_fas(fas_path):
+    return f"{fas_path.rpartition('.')[0]}.sum"
+
+
+def _sorted_bam_temp_for_fas(fas_path):
+    return f"{fas_path.rpartition('.')[0]}.sorted.bam"
+
+
+def _temp_sam_for_fas(fas_path):
+    return f"{fas_path.rpartition('.')[0]}.temp.sam"
+
+
+def _index_files_for_signature(genoIndex):
+    prefix_dir = os.path.dirname(genoIndex) or os.getcwd()
+    prefix_base = os.path.basename(genoIndex)
+    out = []
+
+    if not os.path.isdir(prefix_dir):
+        return out
+
+    for name in sorted(os.listdir(prefix_dir)):
+        if not name.startswith(f"{prefix_base}."):
+            continue
+        if ".ht2" not in name:
+            continue
+        out.append(os.path.join(prefix_dir, name))
+
+    return out
+
+
+def _mapping_input_signature(fas_path, genoIndex):
+    artifact_path = canonical_fas_artifact(fas_path) or fas_path
+    sig_files = [artifact_path]
+
+    ref_path = getattr(rt, "reference", None)
+    if ref_path:
+        sig_files.append(ref_path)
+
+    sig_files.extend(_index_files_for_signature(genoIndex))
+
+    return stage_signature(
+        files=sig_files,
+        params={
+            "stage": "mapping",
+            "maxhits": maxhits,
+            "runtype": runtype,
+        },
+        extra=[
+            os.path.abspath(os.path.expanduser(str(genoIndex))),
+        ],
+    )
+
+
+def _record_compat_fasta_md5(cfg, artifact_path):
+    if not artifact_path:
+        return False
+    if not os.path.isfile(artifact_path):
+        return False
+    md5hex = compute_md5_str(artifact_path) or ""
+    if not md5hex:
+        return False
+    prev = (cfg["FASTAS"].get(artifact_path) or "").strip()
+    if prev == md5hex:
+        return False
+    cfg["FASTAS"][artifact_path] = md5hex
+    return True
+
+
+def _record_compat_map_md5(cfg, bam_path):
+    if not bam_path:
+        return False
+    if not os.path.isfile(bam_path):
+        return False
+    md5hex = compute_md5_str(bam_path) or ""
+    if not md5hex:
+        return False
+    prev = (cfg["MAPS"].get(bam_path) or "").strip()
+    if prev == md5hex:
+        return False
+    cfg["MAPS"][bam_path] = md5hex
+    return True
+
+
+def _legacy_map_cache_hit(cfg, bam_path):
+    prev = (cfg["MAPS"].get(bam_path) or "").strip()
+    if not prev:
+        return False
+    if not os.path.isfile(bam_path):
+        return False
+    cur = compute_md5_str(bam_path) or ""
+    if not cur:
+        return False
+    return prev == cur
+
+
+def _legacy_sam_ready_for_upgrade(cfg, artifact_path, sam_path):
+    if not artifact_path or not os.path.isfile(artifact_path):
+        return False
+    if not os.path.isfile(sam_path):
+        return False
+
+    fas_prev = (cfg["FASTAS"].get(artifact_path) or "").strip()
+    fas_cur = compute_md5_str(artifact_path) or ""
+    if not fas_prev or not fas_cur or fas_prev != fas_cur:
+        return False
+
+    sam_prev = (cfg["MAPS"].get(sam_path) or "").strip()
+    sam_cur = compute_md5_str(sam_path) or ""
+    if not sam_prev or not sam_cur or sam_prev != sam_cur:
+        return False
+
+    return True
+
+
+def _stabilize_outputs(paths):
+    for out_path in paths:
+        tries = 0
+        last_size = -1
+        while tries < 3:
+            if os.path.isfile(out_path):
+                try:
+                    sz = os.path.getsize(out_path)
+                except Exception:
+                    sz = -1
+                if sz > 0 and sz == last_size:
+                    break
+                last_size = sz
+            time.sleep(0.5)
+            tries += 1
+
+
 def sync_from_runtime() -> None:
     """
     Populate mapping-stage globals from phasis.runtime.
-    Keep this minimal: only values needed by updatedsets/mapper/mapprocess.
+    Keep this minimal and spawn-safe.
     """
     global mismat, maxhits, clustbuffer, phase, runtype, outdir, memFile
 
@@ -103,7 +251,6 @@ def sync_from_runtime() -> None:
     runtype = rt.runtype
     outdir = rt.outdir
 
-    # Ensure outdir exists even if stage is called directly
     if outdir:
         outdir_abs = os.path.abspath(os.path.expanduser(outdir))
         if outdir_abs != outdir:
@@ -111,7 +258,6 @@ def sync_from_runtime() -> None:
             rt.outdir = outdir_abs
         os.makedirs(outdir, exist_ok=True)
 
-    # Anchor memFile under outdir (same behavior as legacy)
     mem_override = getattr(rt, "memFile", None)
     if mem_override:
         memFile = mem_override
@@ -123,39 +269,17 @@ def sync_from_runtime() -> None:
         rt.memFile = memFile
 
 
-def updatedsets(config):
-    """
-    Checks which settings have been updated by comparing
-    globals from settings file with entries in memfile.
-    """
-    updatedsetL = []
-
-    if int(config["ADVANCED"]["mismat"]) != int(mismat):
-        updatedsetL.append("mismat")
-    if int(config["ADVANCED"]["maxhits"]) != int(maxhits):
-        updatedsetL.append("maxhits")
-    if int(config["ADVANCED"]["clustbuffer"]) != int(clustbuffer):
-        updatedsetL.append("clustbuffer")
-
-    # Settings that may not exist in early phases of analyses
-    if config["BASIC"].getboolean("phaselen"):
-        if int(config["BASIC"]["phaselen"]) != int(phase):
-            updatedsetL.append("phaselen")
-
-    return updatedsetL
-
-
 def mapper(aninput):
     """
-    Function to map individual files using HISAT2 and sort output with Samtools.
-    Removes headers after sorting.
+    Map one FASTA with HISAT2, then sort and convert to a BAM that excludes
+    unmapped reads. The final BAM preserves the sorted order.
     """
     alib, genoIndex, nspread, maxhits_local, runtype_local = aninput
 
-    asam_temp = f"{alib.rpartition('.')[0]}.temp.sam"
-    asam_sorted = f"{alib.rpartition('.')[0]}.sorted.sam"
-    asam_final = f"{alib.rpartition('.')[0]}.sam"
-    asum = f"{alib.rpartition('.')[0]}.sum"
+    asam_temp = _temp_sam_for_fas(alib)
+    abam_sorted = _sorted_bam_temp_for_fas(alib)
+    abam_final = _bam_output_for_fas(alib)
+    asum = _summary_output_for_fas(alib)
     nspread = str(nspread)
 
     if runtype_local == "G" or runtype_local == "S":
@@ -212,7 +336,7 @@ def mapper(aninput):
         sys.exit()
 
     retcode = subprocess.call(
-        ["samtools", "sort", "-@", str(nspread), "-o", asam_sorted, asam_temp],
+        ["samtools", "sort", "-@", str(nspread), "-O", "BAM", "-o", abam_sorted, asam_temp],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -221,17 +345,44 @@ def mapper(aninput):
         sys.exit()
 
     retcode = subprocess.call(
-        ["samtools", "view", "-@", str(nspread), "-o", asam_final, asam_sorted],
+        ["samtools", "view", "-@", str(nspread), "-b", "-F", "4", "-o", abam_final, abam_sorted],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     if retcode != 0:
-        print(f"Error: Removing headers from '{asam_sorted}' failed.")
+        print(f"Error: BAM conversion/filtering of '{abam_sorted}' failed.")
         sys.exit()
 
-    subprocess.call(["rm", asam_temp, asam_sorted])
+    for tmp_path in (asam_temp, abam_sorted):
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
-    return asam_final
+    return abam_final
+
+
+def _convert_legacy_sam_to_bam(aninput):
+    sam_path, bam_path, nspread, reference = aninput
+    nspread = str(nspread)
+
+    retcode = subprocess.call(
+        ["samtools", "view", "-@", str(nspread), "-b", "-T", reference, "-F", "4", "-o", bam_path, sam_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if retcode != 0:
+        print(f"Error: Legacy SAM -> BAM conversion failed for '{sam_path}'.")
+        sys.exit()
+
+    if os.path.exists(sam_path):
+        try:
+            os.remove(sam_path)
+        except OSError:
+            pass
+
+    return bam_path
 
 
 def mapprocess(
@@ -241,18 +392,19 @@ def mapprocess(
     ncores_local,
 ):
     """
-    Map the libs to reference index and update settings.
+    Map the libs to the reference index with centralized cache validation.
 
     INPUT: libs are logical FASTA paths (usually *.fas from libraryprocess;
-    merged in --concat_libs). The canonical stored artifact is .fas.gz when
-    available, but HISAT2 still receives a temporary plain .fas.
-    OUTPUT: list of mapped SAM files for the libs that required (re)mapping
+    merged in --concat_libs). The canonical stored FASTA artifact is .fas.gz
+    when available, but HISAT2 still receives a temporary plain .fas.
+
+    OUTPUT: list of mapped BAM files for the libs that required work.
 
     Guarantees:
-      - [FASTAS] records the canonical archived artifact when available.
-      - [MAPS] end this step with non-empty MD5s when files exist.
-      - Remaps if the canonical FASTA artifact changed OR the .sam is
-        missing/mismatched OR mem has blank MD5.
+      - MAPPING uses MemCache + stage_signature.
+      - Legacy [FASTAS]/[MAPS] hashes are still written for compatibility.
+      - Final mapping artifacts are *.bam, not *.sam.
+      - BAM excludes unmapped reads and preserves sorted order.
     """
     global maxhits, runtype
 
@@ -260,132 +412,93 @@ def mapprocess(
 
     print("#### Fn: Lib Mapper ##########################")
 
+    cache = MemCache.load(memFile)
+    config = cache.cfg
+    _ensure_sections(config)
+
     bases = [alib.rpartition(".")[0] for alib in libs]
     fas_inputs = [f"{b}.fas" for b in bases]
-    sams_expected = [f"{b}.sam" for b in bases]
-
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    config.read(memFile)
-
-    # Keep parity (even if currently unused in this function)
-    updatedsetL = updatedsets(config)
-    _ = updatedsetL
-
-    for sect in ("MAPS", "FASTAS"):
-        if not config.has_section(sect):
-            config.add_section(sect)
-
-    # Current FASTA md5s (canonical artifact: .fas.gz when present, else .fas)
-    current_fas_md5 = {}
-    current_fas_artifacts = {}
-    for fas in fas_inputs:
-        artifact_path = canonical_fas_artifact(fas)
-        if artifact_path and os.path.isfile(artifact_path):
-            _, md5 = getmd5(artifact_path)
-            current_fas_md5[fas] = md5 or ""
-            current_fas_artifacts[fas] = artifact_path
-
-    # Existing SAM md5s
-    computed_sam_md5 = {}
-    sams_to_check = [s for s in sams_expected if os.path.isfile(s)]
-    if sams_to_check:
-        md5_results = run_parallel_with_progress(
-            getmd5, sams_to_check, desc="Checking existing SAM hashes", unit="lib"
-        )
-        for path, md5 in md5_results:
-            computed_sam_md5[path] = md5 or ""
+    bam_expected = [_bam_output_for_fas(fas) for fas in fas_inputs]
 
     libs_to_map = []
-    for fas_path, sam_path in zip(fas_inputs, sams_expected):
-        artifact_path = current_fas_artifacts.get(fas_path) or canonical_fas_artifact(fas_path) or fas_path
-        fas_prev = (config["FASTAS"].get(artifact_path) or "").strip()
-        fas_cur = current_fas_md5.get(fas_path, "")
+    legacy_sams_to_upgrade = []
+    compat_dirty = False
 
-        fas_changed = (not fas_prev) or (not fas_cur) or (fas_prev != fas_cur)
-        sam_missing = not os.path.isfile(sam_path)
-        sam_prev = (config["MAPS"].get(sam_path) or "").strip()
-        sam_cur = computed_sam_md5.get(sam_path, "")
-        sam_mismatch_or_blank = (not sam_prev) or (not sam_cur) or (sam_prev != sam_cur)
+    for fas_path, bam_path in zip(fas_inputs, bam_expected):
+        artifact_path = canonical_fas_artifact(fas_path)
+        compat_dirty = _record_compat_fasta_md5(config, artifact_path) or compat_dirty
+        input_sig = _mapping_input_signature(fas_path, genoIndex)
 
-        if fas_changed or sam_missing or sam_mismatch_or_blank:
-            libs_to_map.append(fas_path)
+        if cache.hit(MAPPING_SECTION, bam_path, input_sig):
+            print(f"Cache hit for mapped library: {fas_path}")
+            compat_dirty = _record_compat_map_md5(config, bam_path) or compat_dirty
+            continue
 
-    wrote_any = False
+        if _legacy_map_cache_hit(config, bam_path):
+            print(f"Legacy cache matches for mapped library: {fas_path}")
+            cache.record(MAPPING_SECTION, bam_path, input_sig)
+            compat_dirty = _record_compat_map_md5(config, bam_path) or compat_dirty
+            continue
+
+        legacy_sam_path = _legacy_sam_output_for_fas(fas_path)
+        reference_path = getattr(rt, "reference", None)
+        if reference_path and os.path.isfile(reference_path) and _legacy_sam_ready_for_upgrade(config, artifact_path, legacy_sam_path):
+            legacy_sams_to_upgrade.append((fas_path, legacy_sam_path, bam_path, input_sig))
+            continue
+
+        libs_to_map.append((fas_path, bam_path, input_sig))
+
+    libs_mapped = []
+
+    if legacy_sams_to_upgrade:
+        print(
+            "Legacy SAMs to upgrade to BAM: %s"
+            % ", ".join([item[1] for item in legacy_sams_to_upgrade])
+        )
+        nproc, nspread = optimize(ncores_local, len(legacy_sams_to_upgrade))
+        rawinputs = [
+            (sam_path, bam_path, nspread, getattr(rt, "reference", None))
+            for _, sam_path, bam_path, _ in legacy_sams_to_upgrade
+        ]
+        PPBalance(_convert_legacy_sam_to_bam, rawinputs, n_workers=nproc)
+        upgraded_paths = [bam_path for _, _, bam_path, _ in legacy_sams_to_upgrade]
+        _stabilize_outputs(upgraded_paths)
+        for _, _, bam_path, input_sig in legacy_sams_to_upgrade:
+            cache.record(MAPPING_SECTION, bam_path, input_sig)
+            compat_dirty = _record_compat_map_md5(config, bam_path) or compat_dirty
+            libs_mapped.append(bam_path)
 
     if libs_to_map:
-        print("Libraries to be mapped: %s" % (", ".join(libs_to_map)))
+        print("Libraries to be mapped: %s" % (", ".join([item[0] for item in libs_to_map])))
 
         materialized_inputs = []
-        for fas_path in libs_to_map:
+        for fas_path, bam_path, input_sig in libs_to_map:
             resolved = resolve_plain_or_gz_path(fas_path)
             if not resolved or not os.path.isfile(resolved):
                 print(f"Error: input FASTA missing for mapping: {fas_path}")
                 sys.exit()
-            materialized_inputs.append(resolved)
+            materialized_inputs.append((resolved, bam_path, input_sig))
 
         nproc, nspread = optimize(ncores_local, len(materialized_inputs))
-
-        rawinputs = [(alib, genoIndex, nspread, maxhits, runtype) for alib in materialized_inputs]
+        rawinputs = [(alib, genoIndex, nspread, maxhits, runtype) for alib, _, _ in materialized_inputs]
         PPBalance(mapper, rawinputs, n_workers=nproc)
 
-        libs_mapped = [f"{alib.rpartition('.')[0]}.sam" for alib in materialized_inputs]
+        produced_bams = [bam_path for _, bam_path, _ in materialized_inputs]
+        _stabilize_outputs(produced_bams)
 
-        # Wait for filesystem stabilization before hashing
-        for sam_path in libs_mapped:
-            tries = 0
-            last_size = -1
-            while tries < 3:
-                if os.path.isfile(sam_path):
-                    try:
-                        sz = os.path.getsize(sam_path)
-                    except Exception:
-                        sz = -1
-                    if sz > 0 and sz == last_size:
-                        break
-                    last_size = sz
-                time.sleep(0.5)
-                tries += 1
-
-        sam_md5s = run_parallel_with_progress(
-            getmd5, libs_mapped, desc="Hashing mapped SAMs", unit="lib"
-        )
-        for sam_path, md5 in sam_md5s:
-            if md5:
-                if (config["MAPS"].get(sam_path) or "").strip() != md5:
-                    config["MAPS"][sam_path] = md5
-                    wrote_any = True
-            else:
-                print(f"[WARN] MD5 empty for {sam_path}; keeping blank (will force remap next run).")
-
+        for _, bam_path, input_sig in materialized_inputs:
+            cache.record(MAPPING_SECTION, bam_path, input_sig)
+            compat_dirty = _record_compat_map_md5(config, bam_path) or compat_dirty
+            libs_mapped.append(bam_path)
     else:
-        libs_mapped = []
-        print("\nNo new libraries to map this time")
+        if not legacy_sams_to_upgrade:
+            print("\nNo new libraries to map this time")
 
-
-    # Best-effort repair for blank SAM hashes even on no-map runs.
-    for sam_path in sams_expected:
-        if not os.path.isfile(sam_path):
-            continue
-        mem_md5 = (config["MAPS"].get(sam_path) or "").strip()
-        if not mem_md5:
-            _, cur_md5 = getmd5(sam_path)
-            if cur_md5:
-                config["MAPS"][sam_path] = cur_md5
-                wrote_any = True
-
-    # Archive FASTAs so .fas.gz is the canonical stored artifact and hash that.
     for fas_path in fas_inputs:
         artifact_path = archive_fas_to_gz(fas_path)
-        if artifact_path and os.path.isfile(artifact_path):
-            _, cur_md5 = getmd5(artifact_path)
-            cur_md5 = cur_md5 or ""
-            if cur_md5 and (config["FASTAS"].get(artifact_path) or "").strip() != cur_md5:
-                config["FASTAS"][artifact_path] = cur_md5
-                wrote_any = True
+        compat_dirty = _record_compat_fasta_md5(config, artifact_path) or compat_dirty
 
-    if wrote_any:
-        with open(memFile, "w") as fh:
-            config.write(fh)
+    if compat_dirty:
+        cache.flush()
 
     return libs_mapped

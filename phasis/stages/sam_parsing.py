@@ -5,6 +5,7 @@ import os
 import gc
 import pickle
 import configparser
+import subprocess
 from collections import defaultdict, OrderedDict, Counter
 from typing import Iterable, List, Sequence, Tuple
 
@@ -65,6 +66,7 @@ def updatedsets(config: configparser.ConfigParser) -> List[str]:
 
     return updated
 
+
 def _cached_file_matches(config: configparser.ConfigParser, section: str, path: str) -> bool:
     """
     Reuse cache only when:
@@ -86,6 +88,52 @@ def _cached_file_matches(config: configparser.ConfigParser, section: str, path: 
     _, cur = getmd5(path)
     return bool(cur and cur == prev)
 
+
+def _alignment_path_for_lib(alib: str) -> str:
+    base = alib.rpartition(".")[0]
+    bam_path = f"{base}.bam"
+    if os.path.isfile(bam_path):
+        return bam_path
+    return f"{base}.sam"
+
+
+def _iter_alignment_lines(alib: str):
+    """
+    Yield SAM-format alignment lines from either:
+      - a plain SAM file on disk, or
+      - a BAM file streamed through `samtools view`
+    """
+    if alib.endswith(".bam"):
+        proc = subprocess.Popen(
+            ["samtools", "view", alib],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    yield line
+        finally:
+            stderr_text = ""
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                stderr_text = proc.stderr.read()
+                proc.stderr.close()
+            retcode = proc.wait()
+            if retcode != 0:
+                raise RuntimeError(
+                    f"samtools view failed for '{alib}' with exit code {retcode}: {stderr_text.strip()}"
+                )
+        return
+
+    with open(alib, "r") as fh:
+        for line in fh:
+            yield line
+
+
 def libstoset(alist: Iterable[Tuple[str, str]], akey: str) -> None:
     """Write (path, md5) entries to the mem/settings file under section `akey`."""
     mem_file = _resolve_mem_file()
@@ -106,15 +154,15 @@ def libstoset(alist: Iterable[Tuple[str, str]], akey: str) -> None:
 
 def parserprocess(libs: Sequence[str], load_dicts: bool = False):
     """
-    Parse mapped libraries (SAM files) in parallel.
+    Parse mapped libraries (BAM or SAM) in parallel.
 
     Default: return only file paths to avoid RAM blow-ups.
     If load_dicts=True, load them back SEQUENTIALLY (low peak RAM).
 
     Spawn-safe: reads runtime knobs from rt.* and does not rely on legacy globals.
 
-    Note: includes a small correctness fix vs the historical legacy implementation:
-    when 'mismat' changes, we reparse the corresponding *.sam files (not the *.fas paths).
+    Note: when 'mismat' changes, we reparse the corresponding alignment files
+    (*.bam when present, otherwise *.sam).
     """
     print("#### Fn: Lib Parser ##########################")
 
@@ -132,7 +180,7 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
 
     if "mismat" in updatedsetL:
         print("Setting update detected for 'mismat' parameter")
-        libs_to_parse = [f"{lib.rpartition('.')[0]}.sam" for lib in list(libs)]
+        libs_to_parse = [_alignment_path_for_lib(lib) for lib in list(libs)]
     elif config.has_section("PARSED") or config.has_section("COUNTERS"):
         print("Subsequent run for parserprocess; parsing only remapped libraries")
         for alib in libs:
@@ -146,11 +194,11 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
                 print(f"MD5 matches for previously parsed library {alib.rpartition('.')[0]}")
                 continue
 
-            toAppend = f"{alib.rpartition('.')[0]}.sam"
+            toAppend = _alignment_path_for_lib(alib)
             print(f"Added {toAppend} to libs_to_parse")
             libs_to_parse.append(toAppend)
     else:
-        libs_to_parse = [f"{lib.rpartition('.')[0]}.sam" for lib in list(libs)]
+        libs_to_parse = [_alignment_path_for_lib(lib) for lib in list(libs)]
 
     dict_paths: List[str] = []
     count_paths: List[str] = []
@@ -160,7 +208,7 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
         rawinputs = [(alib, maxhits, mismat) for alib in libs_to_parse]
 
         out_pairs = run_parallel_with_progress(
-            samparser_streaming, rawinputs, desc="Parsing SAM", unit="lib"
+            samparser_streaming, rawinputs, desc="Parsing alignments", unit="lib"
         )
 
         for dp, cp in out_pairs:
@@ -214,7 +262,7 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
 
 def samparser_streaming(aninput):
     """
-    Parse one SAM -> write:
+    Parse one alignment file -> write:
       - <lib>_<phase>.dict (pickle of nestdict)
       - <lib>_<phase>.count (pickle of poscountdict)
     Return only (outfile1, outfile2) to keep RAM low.
@@ -232,55 +280,53 @@ def samparser_streaming(aninput):
     total_abund = None
     if norm:
         total_abund = 0
-        with open(alib, "r") as fh:
-            for line in fh:
-                if line.startswith("@"):
-                    continue
-                ent = line.rstrip("\n").split("\t")
-                aflag = int(ent[1])
-                if aflag not in {0, 256, 16, 272}:
-                    continue
-                aname = ent[0].strip()
-                aabun = int(aname.split("|")[-1])
-                total_abund += aabun
-
-    tempdict1 = defaultdict(list)
-    posdict = defaultdict(list)
-
-    reads_passed = 0
-    with open(alib, "r") as fh:
-        for line in fh:
+        for line in _iter_alignment_lines(alib):
             if line.startswith("@"):
                 continue
             ent = line.rstrip("\n").split("\t")
             aflag = int(ent[1])
             if aflag not in {0, 256, 16, 272}:
                 continue
-
             aname = ent[0].strip()
-            achr = ent[2]
-            apos = int(ent[3])
-            atag = ent[9].strip()
-            alen = len(atag)
             aabun = int(aname.split("|")[-1])
-            astrand = "w" if aflag in {0, 256} else "c"
-            try:
-                amismat = int(ent[-7].rpartition(":")[-1])
-                ahits = int(ent[-1].rpartition(":")[-1])
-            except Exception:
-                continue
+            total_abund += aabun
 
-            if ahits < maxhits and amismat <= mismat:
-                reads_passed += 1
-                anid = make_akey(lib_stem(alib), achr)
+    tempdict1 = defaultdict(list)
+    posdict = defaultdict(list)
 
-                adj_abun = aabun
-                if norm and total_abund and total_abund > 0:
-                    adj_abun = max(round((aabun / total_abund) * norm_factor), 1)
+    reads_passed = 0
+    for line in _iter_alignment_lines(alib):
+        if line.startswith("@"):
+            continue
+        ent = line.rstrip("\n").split("\t")
+        aflag = int(ent[1])
+        if aflag not in {0, 256, 16, 272}:
+            continue
 
-                taginfo = [achr, astrand, ahits, atag, aname, apos, alen, adj_abun]
-                tempdict1[anid].append((apos, taginfo))
-                posdict[anid].append(apos)
+        aname = ent[0].strip()
+        achr = ent[2]
+        apos = int(ent[3])
+        atag = ent[9].strip()
+        alen = len(atag)
+        aabun = int(aname.split("|")[-1])
+        astrand = "w" if aflag in {0, 256} else "c"
+        try:
+            amismat = int(ent[-7].rpartition(":")[-1])
+            ahits = int(ent[-1].rpartition(":")[-1])
+        except Exception:
+            continue
+
+        if ahits < maxhits and amismat <= mismat:
+            reads_passed += 1
+            anid = make_akey(lib_stem(alib), achr)
+
+            adj_abun = aabun
+            if norm and total_abund and total_abund > 0:
+                adj_abun = max(round((aabun / total_abund) * norm_factor), 1)
+
+            taginfo = [achr, astrand, ahits, atag, aname, apos, alen, adj_abun]
+            tempdict1[anid].append((apos, taginfo))
+            posdict[anid].append(apos)
 
     nestdict = defaultdict(list)
     for akey, aval in tempdict1.items():
@@ -308,7 +354,7 @@ def samparser_streaming(aninput):
 
 
 def lib_stem(p: str) -> str:
-    """'.../ALL_LIBS.sam' -> 'ALL_LIBS'; 'F_1.tag' -> 'F_1'."""
+    """'.../ALL_LIBS.bam' -> 'ALL_LIBS'; '.../ALL_LIBS.sam' -> 'ALL_LIBS'."""
     return os.path.splitext(os.path.basename(p))[0]
 
 
