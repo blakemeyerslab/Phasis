@@ -3,6 +3,8 @@ import os
 import subprocess
 import sys
 import time
+import gzip
+import shutil
 
 from phasis import runtime as rt
 from phasis.cache import MEM_FILE_DEFAULT, getmd5
@@ -18,6 +20,74 @@ runtype = None
 outdir = None
 memFile = MEM_FILE_DEFAULT
 
+def resolve_plain_or_gz_path(path):
+    """
+    Ensure the plain file at `path` exists if either:
+      - `path` exists, or
+      - `path + ".gz"` exists
+
+    Returns the plain path (`path`) when resolved.
+    Returns None if neither plain nor gzipped form exists.
+    """
+    if os.path.isfile(path):
+        return path
+
+    gz_path = f"{path}.gz"
+    if not os.path.isfile(gz_path):
+        return None
+
+    tmp_path = f"{path}.tmp"
+
+    try:
+        with gzip.open(gz_path, "rb") as src, open(tmp_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    return path
+
+
+def canonical_fas_artifact(path):
+    gz_path = f"{path}.gz"
+    if os.path.isfile(gz_path):
+        return gz_path
+    if os.path.isfile(path):
+        return path
+    return None
+
+
+def archive_fas_to_gz(path):
+    """
+    Compress a plain .fas into deterministic .fas.gz bytes and remove the
+    plain file. Returns the archived path when available, else None.
+    """
+    gz_path = f"{path}.gz"
+    if not os.path.isfile(path):
+        if os.path.isfile(gz_path):
+            return gz_path
+        return None
+
+    tmp_path = f"{gz_path}.tmp"
+
+    try:
+        with open(path, "rb") as src, open(tmp_path, "wb") as raw_dst:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0) as dst:
+                shutil.copyfileobj(src, dst)
+        os.replace(tmp_path, gz_path)
+        os.remove(path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    return gz_path
 
 def sync_from_runtime() -> None:
     """
@@ -173,12 +243,16 @@ def mapprocess(
     """
     Map the libs to reference index and update settings.
 
-    INPUT: libs are paths (usually *.fas from libraryprocess; merged in --concat_libs)
+    INPUT: libs are logical FASTA paths (usually *.fas from libraryprocess;
+    merged in --concat_libs). The canonical stored artifact is .fas.gz when
+    available, but HISAT2 still receives a temporary plain .fas.
     OUTPUT: list of mapped SAM files for the libs that required (re)mapping
 
     Guarantees:
-      - [FASTAS] and [MAPS] end this step with non-empty MD5s when files exist.
-      - Remaps if the .fas changed OR the .sam is missing/mismatched OR mem has blank MD5.
+      - [FASTAS] records the canonical archived artifact when available.
+      - [MAPS] end this step with non-empty MD5s when files exist.
+      - Remaps if the canonical FASTA artifact changed OR the .sam is
+        missing/mismatched OR mem has blank MD5.
     """
     global maxhits, runtype
 
@@ -202,12 +276,15 @@ def mapprocess(
         if not config.has_section(sect):
             config.add_section(sect)
 
-    # Current FASTA md5s
+    # Current FASTA md5s (canonical artifact: .fas.gz when present, else .fas)
     current_fas_md5 = {}
+    current_fas_artifacts = {}
     for fas in fas_inputs:
-        if os.path.isfile(fas):
-            _, md5 = getmd5(fas)
+        artifact_path = canonical_fas_artifact(fas)
+        if artifact_path and os.path.isfile(artifact_path):
+            _, md5 = getmd5(artifact_path)
             current_fas_md5[fas] = md5 or ""
+            current_fas_artifacts[fas] = artifact_path
 
     # Existing SAM md5s
     computed_sam_md5 = {}
@@ -221,12 +298,9 @@ def mapprocess(
 
     libs_to_map = []
     for fas_path, sam_path in zip(fas_inputs, sams_expected):
-        fas_prev = (config["FASTAS"].get(fas_path) or "").strip()
+        artifact_path = current_fas_artifacts.get(fas_path) or canonical_fas_artifact(fas_path) or fas_path
+        fas_prev = (config["FASTAS"].get(artifact_path) or "").strip()
         fas_cur = current_fas_md5.get(fas_path, "")
-
-        # best-effort cache stabilization
-        if fas_cur and fas_prev != fas_cur:
-            config["FASTAS"][fas_path] = fas_cur
 
         fas_changed = (not fas_prev) or (not fas_cur) or (fas_prev != fas_cur)
         sam_missing = not os.path.isfile(sam_path)
@@ -237,15 +311,25 @@ def mapprocess(
         if fas_changed or sam_missing or sam_mismatch_or_blank:
             libs_to_map.append(fas_path)
 
+    wrote_any = False
+
     if libs_to_map:
         print("Libraries to be mapped: %s" % (", ".join(libs_to_map)))
 
-        nproc, nspread = optimize(ncores_local, len(libs_to_map))
+        materialized_inputs = []
+        for fas_path in libs_to_map:
+            resolved = resolve_plain_or_gz_path(fas_path)
+            if not resolved or not os.path.isfile(resolved):
+                print(f"Error: input FASTA missing for mapping: {fas_path}")
+                sys.exit()
+            materialized_inputs.append(resolved)
 
-        rawinputs = [(alib, genoIndex, nspread, maxhits, runtype) for alib in libs_to_map]
+        nproc, nspread = optimize(ncores_local, len(materialized_inputs))
+
+        rawinputs = [(alib, genoIndex, nspread, maxhits, runtype) for alib in materialized_inputs]
         PPBalance(mapper, rawinputs, n_workers=nproc)
 
-        libs_mapped = [f"{alib.rpartition('.')[0]}.sam" for alib in libs_to_map]
+        libs_mapped = [f"{alib.rpartition('.')[0]}.sam" for alib in materialized_inputs]
 
         # Wait for filesystem stabilization before hashing
         for sam_path in libs_mapped:
@@ -268,39 +352,40 @@ def mapprocess(
         )
         for sam_path, md5 in sam_md5s:
             if md5:
-                config["MAPS"][sam_path] = md5
+                if (config["MAPS"].get(sam_path) or "").strip() != md5:
+                    config["MAPS"][sam_path] = md5
+                    wrote_any = True
             else:
                 print(f"[WARN] MD5 empty for {sam_path}; keeping blank (will force remap next run).")
-
-        for fas in libs_to_map:
-            _, fas_md5 = getmd5(fas)
-            config["FASTAS"][fas] = fas_md5 or ""
-
-        with open(memFile, "w") as fh:
-            config.write(fh)
 
     else:
         libs_mapped = []
         print("\nNo new libraries to map this time")
 
-        wrote_any = False
-        for sam_path in sams_expected:
-            if not os.path.isfile(sam_path):
-                continue
-            mem_md5 = (config["MAPS"].get(sam_path) or "").strip()
-            if not mem_md5:
-                _, cur_md5 = getmd5(sam_path)
-                if cur_md5:
-                    config["MAPS"][sam_path] = cur_md5
-                    wrote_any = True
 
-        for fas_path, cur in current_fas_md5.items():
-            if cur and (config["FASTAS"].get(fas_path) or "").strip() != cur:
-                config["FASTAS"][fas_path] = cur
+    # Best-effort repair for blank SAM hashes even on no-map runs.
+    for sam_path in sams_expected:
+        if not os.path.isfile(sam_path):
+            continue
+        mem_md5 = (config["MAPS"].get(sam_path) or "").strip()
+        if not mem_md5:
+            _, cur_md5 = getmd5(sam_path)
+            if cur_md5:
+                config["MAPS"][sam_path] = cur_md5
                 wrote_any = True
 
-        if wrote_any:
-            with open(memFile, "w") as fh:
-                config.write(fh)
+    # Archive FASTAs so .fas.gz is the canonical stored artifact and hash that.
+    for fas_path in fas_inputs:
+        artifact_path = archive_fas_to_gz(fas_path)
+        if artifact_path and os.path.isfile(artifact_path):
+            _, cur_md5 = getmd5(artifact_path)
+            cur_md5 = cur_md5 or ""
+            if cur_md5 and (config["FASTAS"].get(artifact_path) or "").strip() != cur_md5:
+                config["FASTAS"][artifact_path] = cur_md5
+                wrote_any = True
+
+    if wrote_any:
+        with open(memFile, "w") as fh:
+            config.write(fh)
 
     return libs_mapped
