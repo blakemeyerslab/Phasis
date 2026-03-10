@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.colors import Normalize, LinearSegmentedColormap
 from matplotlib.ticker import FixedLocator
-from mpl_toolkits.axes_grid1.inset_locator import inset_axes, Bbox
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from matplotlib.patches import Rectangle
 
 try:
@@ -235,15 +235,37 @@ def _empty_plot_placeholder(outfile, message):
     return None
 
 
+def _chrom_sort_key(chrom_value):
+    chrom_text = str(chrom_value)
+    return (0, int(chrom_text)) if chrom_text.isdigit() else (1, chrom_text)
+
+
+
+def _identifier_sort_tuple(identifier):
+    text = str(identifier)
+    chrom = text.split(":", 1)[0]
+    start_val = float('inf')
+    end_val = float('inf')
+
+    if ":" in text and ".." in text:
+        try:
+            coords = text.split(":", 1)[1]
+            start_text, end_text = coords.split("..", 1)
+            start_val = int(start_text)
+            end_val = int(end_text)
+        except Exception:
+            start_val = float('inf')
+            end_val = float('inf')
+
+    return (_chrom_sort_key(chrom), start_val, end_val, text)
+
+
+
 def _sort_heatmap_frame(data):
-    chrom_data = [identifier.split(":")[0] for identifier in data.index]
-    sorted_indices = sorted(
-        range(len(chrom_data)),
-        key=lambda idx: int(chrom_data[idx]) if chrom_data[idx].isdigit() else chrom_data[idx]
-    )
-    data = data.iloc[sorted_indices]
-    chrom_data = [chrom_data[idx] for idx in sorted_indices]
-    unique_chromosomes = sorted(np.unique(chrom_data), key=lambda x: int(x) if x.isdigit() else x)
+    sorted_identifiers = sorted(list(data.index), key=_identifier_sort_tuple)
+    data = data.loc[sorted_identifiers]
+    chrom_data = [str(identifier).split(":", 1)[0] for identifier in data.index]
+    unique_chromosomes = sorted(np.unique(chrom_data), key=_chrom_sort_key)
     return data, chrom_data, unique_chromosomes
 
 
@@ -273,8 +295,11 @@ def _build_score_heatmap_data(df, value_column):
     return data, phas_mask, chrom_data, unique_chromosomes
 
 
-def _draw_chromosome_bar(fig, heat_data, chrom_data, unique_chromosomes, axes_left=0.12):
-    cax = fig.add_axes([axes_left, 0.1, 0.02, 0.8])
+def _draw_chromosome_bar(fig, ref_ax, heat_data, chrom_data, unique_chromosomes, left_pad=0.055):
+    pos = ref_ax.get_position()
+    bar_width = 0.02
+    bar_left = max(0.02, pos.x0 - left_pad)
+    cax = fig.add_axes([bar_left, pos.y0, bar_width, pos.height])
 
     base_cmap = plt.get_cmap("Greys")
     chrom_cmap = base_cmap(np.linspace(0.3, 0.9, len(unique_chromosomes)))
@@ -284,7 +309,10 @@ def _draw_chromosome_bar(fig, heat_data, chrom_data, unique_chromosomes, axes_le
     cax.imshow(
         chrom_colors,
         cmap=LinearSegmentedColormap.from_list("CustomGreys", chrom_cmap, len(unique_chromosomes)),
-        aspect="auto"
+        aspect="auto",
+        interpolation="nearest",
+        origin="upper",
+        extent=(0, 1, len(heat_data.index), 0),
     )
     cax.set_xticks([])
     cax.set_yticks([])
@@ -294,17 +322,19 @@ def _draw_chromosome_bar(fig, heat_data, chrom_data, unique_chromosomes, axes_le
     cax.spines["bottom"].set_visible(False)
     cax.spines["left"].set_visible(False)
 
-    if str(phase) != "24":
-        cax.set_ylim(len(heat_data.index), 0)
+    cax.set_ylim(len(heat_data.index), 0)
 
-    chrom_positions = np.array([np.mean(np.where(np.array(chrom_data) == chrom)) for chrom in unique_chromosomes])
+    chrom_positions = np.array([
+        np.mean(np.where(np.array(chrom_data) == chrom)[0]) + 0.5
+        for chrom in unique_chromosomes
+    ])
     cax.set_yticks(chrom_positions)
     cax.set_yticklabels(unique_chromosomes, fontsize=16, rotation=0, ha="center")
     cax.yaxis.set_tick_params(labelsize=16, pad=11)
     return cax
 
 
-def _draw_phas_borders(ax, phas_mask, edgecolor="#D4AF37", linewidth=0.8):
+def _draw_phas_borders(ax, phas_mask, edgecolor="#D4AF37", linewidth=0.1):
     rows, cols = np.where(phas_mask.to_numpy(dtype=bool))
     for row_idx, col_idx in zip(rows, cols):
         ax.add_patch(
@@ -346,7 +376,7 @@ def _plot_single_score_heatmap(ax, data, phas_mask, cmap, title_text):
         yticklabels=False,
         ax=ax,
     )
-    _draw_phas_borders(ax, phas_mask)
+    #_draw_phas_borders(ax, phas_mask)
     ax.set_facecolor("#D9D9D9")
 
     ax.set_title(title_text, fontsize=13, pad=20)
@@ -357,8 +387,8 @@ def _plot_single_score_heatmap(ax, data, phas_mask, cmap, title_text):
 def _add_score_colorbar(fig, ax, cmap, norm, max_value, colorbar_label, side="left"):
     pos = ax.get_position()
     cbar_width = 0.014
-    cbar_height = 0.115
-    cbar_bottom = 0.84
+    cbar_height = 0.10
+    cbar_bottom = min(.98 - cbar_height, pos.y1 + 0.06)
 
     if side == "left":
         cbar_left = max(0.02, pos.x0 + 0.005)
@@ -398,6 +428,8 @@ def plot_howell_score_heat_maps(phasis_result_df, plot_type):
     fig, axes = plt.subplots(1, 2, figsize=(16, 11), sharey=True)
     fig.patch.set_facecolor("#D9D9D9")
 
+    plt.subplots_adjust(left=0.18, right=0.97, top=0.72, bottom=0.1, wspace=0.18)
+
     _, norm_howell, max_howell = _plot_single_score_heatmap(
         axes[0],
         data_howell,
@@ -413,15 +445,14 @@ def plot_howell_score_heat_maps(phasis_result_df, plot_type):
         "Peak Howell score (strict)",
     )
 
-    _draw_chromosome_bar(fig, data_howell, chrom_data, unique_chromosomes, axes_left=0.07)
+    _draw_chromosome_bar(fig, axes[0], data_howell, chrom_data, unique_chromosomes, left_pad=0.06)
 
     for ax in axes:
         ax.set_ylabel("")
 
-    plt.subplots_adjust(left=0.16, right=0.96, top=0.76, bottom=0.1, wspace=0.18)
     _add_score_colorbar(fig, axes[0], purple_cmap, norm_howell, max_howell, "Peak Howell score", side="left")
     _add_score_colorbar(fig, axes[1], teal_cmap, norm_howell_strict, max_howell_strict, "Peak Howell score (strict)", side="left")
-    fig.savefig(outfile, dpi=300, bbox_inches="tight")
+    fig.savefig(outfile, dpi=300)
     plt.close(fig)
     return None
 
@@ -667,6 +698,7 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
     cax2.yaxis.set_tick_params(labelsize=16, pad=11)
 
     ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=8)
+
     plt.subplots_adjust(left=0.2, right=0.9, top=0.9, bottom=0.1)
 
     fig = heat.get_figure()
@@ -931,14 +963,21 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
     compact_calls = phas_df[calls_cols].copy()
     compact_calls.to_csv(calls_out, sep="\t", index=False)
 
-    # --- Run the 3 plots in parallel (each on a core) ---
+    # --- Run the 4 plots in parallel (each on a core) ---
     plot_jobs = [
-    (plot_report_heat_map, all_df, method_name, outdir, phase),
-    (plot_phasAbundance_heat_map, all_df, method_name, outdir, phase),
-    (plot_totalAbundance_heat_map, all_df, method_name, outdir, phase),
-    (plot_howell_score_heat_maps, all_df, method_name, outdir, phase),
+        (plot_report_heat_map, all_df, method_name, outdir, phase),
+        (plot_phasAbundance_heat_map, all_df, method_name, outdir, phase),
+        (plot_totalAbundance_heat_map, all_df, method_name, outdir, phase),
+        (plot_howell_score_heat_maps, all_df, method_name, outdir, phase),
     ]
-    with make_pool(min(4, cpu_count()), kind="plot") as p:
-        p.map(_plot_wrapper, plot_jobs)
+    plot_pool = make_pool(min(4, cpu_count()), kind="plot")
+    try:
+        plot_pool.map(_plot_wrapper, plot_jobs)
+        plot_pool.close()
+        plot_pool.join()
+    except Exception:
+        plot_pool.terminate()
+        plot_pool.join()
+        raise
     print(f"  - Wrote: {all_out}, {calls_out}, and {gff_out}")
     _print_final_detection_summary(phas_df)

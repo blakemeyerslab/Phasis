@@ -11,7 +11,7 @@ from typing import Iterable, List, Sequence, Tuple
 
 import phasis.runtime as rt
 from phasis.parallel import run_parallel_with_progress
-from phasis.cache import getmd5, MEM_FILE_DEFAULT
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, getmd5, stage_signature
 
 
 def _resolve_mem_file() -> str:
@@ -152,6 +152,101 @@ def libstoset(alist: Iterable[Tuple[str, str]], akey: str) -> None:
         config.write(fh_out)
 
 
+SAM_PARSING_SECTION = "SAM_PARSING"
+
+
+def _ensure_sections(cfg: configparser.ConfigParser) -> None:
+    for section in (SAM_PARSING_SECTION, "PARSED", "COUNTERS"):
+        if not cfg.has_section(section):
+            cfg.add_section(section)
+
+
+def _parser_output_paths_for_lib(alib: str, phase: str) -> Tuple[str, str]:
+    stem = alib.rpartition(".")[0]
+    return (f"{stem}_{phase}.dict", f"{stem}_{phase}.count")
+
+
+def _parser_input_signature(
+    alignment_path: str,
+    *,
+    phase: str,
+    maxhits: int,
+    mismat: int,
+    norm: bool,
+    norm_factor: float,
+) -> str:
+    return stage_signature(
+        files=[alignment_path],
+        params={
+            "stage": "sam_parsing",
+            "phase": phase,
+            "maxhits": maxhits,
+            "mismat": mismat,
+            "norm": bool(norm),
+            "norm_factor": norm_factor,
+        },
+    )
+
+
+def _legacy_parser_cache_hit(
+    config: configparser.ConfigParser,
+    dict_path: str,
+    count_path: str,
+) -> bool:
+    dict_ok = _cached_file_matches(config, "PARSED", dict_path)
+    count_ok = _cached_file_matches(config, "COUNTERS", count_path)
+    return bool(dict_ok and count_ok)
+
+
+def _record_compat_md5(
+    config: configparser.ConfigParser,
+    section: str,
+    path: str,
+) -> bool:
+    if not path or not os.path.isfile(path):
+        return False
+
+    md5hex = compute_md5_str(path) or ""
+    if not md5hex:
+        return False
+
+    prev = (config[section].get(path) or "").strip()
+    if prev == md5hex:
+        return False
+
+    config[section][path] = md5hex
+    return True
+
+
+def _load_parsed_outputs(
+    dict_paths: Sequence[str],
+    count_paths: Sequence[str],
+    *,
+    load_dicts: bool,
+):
+    if not load_dicts:
+        return list(dict_paths), list(count_paths)
+
+    libs_nestdict = []
+    libs_poscountdict = []
+    for dp, cp in zip(dict_paths, count_paths):
+        try:
+            with open(dp, "rb") as f1:
+                obj = pickle.load(f1)
+                if isinstance(obj, dict):
+                    libs_nestdict.append(obj)
+            with open(cp, "rb") as f2:
+                obj = pickle.load(f2)
+                if isinstance(obj, dict):
+                    libs_poscountdict.append(obj)
+        except FileNotFoundError:
+            print(f"Warning: Missing parsed file for {dp}")
+        gc.collect()
+
+    return libs_nestdict, libs_poscountdict
+
+
+
 def parserprocess(libs: Sequence[str], load_dicts: bool = False):
     """
     Parse mapped libraries (BAM or SAM) in parallel.
@@ -161,8 +256,9 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
 
     Spawn-safe: reads runtime knobs from rt.* and does not rely on legacy globals.
 
-    Note: when 'mismat' changes, we reparse the corresponding alignment files
-    (*.bam when present, otherwise *.sam).
+    Phase I cache-centralized version:
+      - uses MemCache + stage_signature for .dict/.count outputs
+      - preserves legacy [PARSED]/[COUNTERS] bookkeeping for compatibility
     """
     print("#### Fn: Lib Parser ##########################")
 
@@ -170,94 +266,76 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
     phase = str(getattr(rt, "phase", ""))
     maxhits = int(getattr(rt, "maxhits", 0))
     mismat = int(getattr(rt, "mismat", 0))
+    norm = bool(getattr(rt, "norm", False))
+    norm_factor = float(getattr(rt, "norm_factor", 0.0))
 
-    libs_to_parse: List[str] = []
+    cache = MemCache.load(mem_file)
+    config = cache.cfg
+    _ensure_sections(config)
 
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    config.read(mem_file)
     updatedsetL = updatedsets(config)
-
-    if "mismat" in updatedsetL:
+    force_reparse = "mismat" in updatedsetL
+    if force_reparse:
         print("Setting update detected for 'mismat' parameter")
-        libs_to_parse = [_alignment_path_for_lib(lib) for lib in list(libs)]
     elif config.has_section("PARSED") or config.has_section("COUNTERS"):
         print("Subsequent run for parserprocess; parsing only remapped libraries")
-        for alib in libs:
-            dict_path = "%s_%s.dict" % (alib.rpartition(".")[0], phase)
-            count_path = "%s_%s.count" % (alib.rpartition(".")[0], phase)
 
-            dict_ok = _cached_file_matches(config, "PARSED", dict_path)
-            count_ok = _cached_file_matches(config, "COUNTERS", count_path)
-
-            if dict_ok and count_ok:
-                print(f"MD5 matches for previously parsed library {alib.rpartition('.')[0]}")
-                continue
-
-            toAppend = _alignment_path_for_lib(alib)
-            print(f"Added {toAppend} to libs_to_parse")
-            libs_to_parse.append(toAppend)
-    else:
-        libs_to_parse = [_alignment_path_for_lib(lib) for lib in list(libs)]
-
+    parse_jobs = []
     dict_paths: List[str] = []
     count_paths: List[str] = []
+    compat_dirty = False
 
-    if libs_to_parse:
-        print(f"Libraries to be parsed: {', '.join(libs_to_parse)}")
-        rawinputs = [(alib, maxhits, mismat) for alib in libs_to_parse]
+    for alib in libs:
+        alignment_path = _alignment_path_for_lib(alib)
+        dict_path, count_path = _parser_output_paths_for_lib(alib, phase)
+        input_sig = _parser_input_signature(
+            alignment_path,
+            phase=phase,
+            maxhits=maxhits,
+            mismat=mismat,
+            norm=norm,
+            norm_factor=norm_factor,
+        )
+
+        dict_paths.append(dict_path)
+        count_paths.append(count_path)
+
+        if not force_reparse:
+            dict_hit = cache.hit(SAM_PARSING_SECTION, dict_path, input_sig)
+            count_hit = cache.hit(SAM_PARSING_SECTION, count_path, input_sig)
+            if dict_hit and count_hit:
+                print(f"Cache hit for parsed library: {alib.rpartition('.')[0]}")
+                compat_dirty = _record_compat_md5(config, "PARSED", dict_path) or compat_dirty
+                compat_dirty = _record_compat_md5(config, "COUNTERS", count_path) or compat_dirty
+                continue
+
+            if _legacy_parser_cache_hit(config, dict_path, count_path):
+                print(f"Legacy cache matches for parsed library {alib.rpartition('.')[0]}")
+                cache.record(SAM_PARSING_SECTION, dict_path, input_sig)
+                cache.record(SAM_PARSING_SECTION, count_path, input_sig)
+                continue
+
+        print(f"Added {alignment_path} to libs_to_parse")
+        parse_jobs.append((alignment_path, dict_path, count_path, input_sig))
+
+    if parse_jobs:
+        print(f"Libraries to be parsed: {', '.join(job[0] for job in parse_jobs)}")
+        rawinputs = [(alignment_path, maxhits, mismat) for alignment_path, _, _, _ in parse_jobs]
 
         out_pairs = run_parallel_with_progress(
             samparser_streaming, rawinputs, desc="Parsing alignments", unit="lib"
         )
 
-        for dp, cp in out_pairs:
-            dict_paths.append(dp)
-            count_paths.append(cp)
+        for (dp, cp), (_, _, _, input_sig) in zip(out_pairs, parse_jobs):
+            cache.record(SAM_PARSING_SECTION, dp, input_sig)
+            cache.record(SAM_PARSING_SECTION, cp, input_sig)
+            compat_dirty = _record_compat_md5(config, "PARSED", dp) or compat_dirty
+            compat_dirty = _record_compat_md5(config, "COUNTERS", cp) or compat_dirty
 
-        dicthashes = run_parallel_with_progress(getmd5, dict_paths, desc="MD5 dict")
-        counterhashes = run_parallel_with_progress(getmd5, count_paths, desc="MD5 count")
-        libstoset(dicthashes, "PARSED")
-        libstoset(counterhashes, "COUNTERS")
+    if compat_dirty:
+        cache.flush()
 
-        libs_nestdict = []
-        libs_poscountdict = []
-        if load_dicts:
-            for dp, cp in zip(dict_paths, count_paths):
-                with open(dp, "rb") as f1:
-                    obj = pickle.load(f1)
-                    if isinstance(obj, dict):
-                        libs_nestdict.append(obj)
-                with open(cp, "rb") as f2:
-                    obj = pickle.load(f2)
-                    if isinstance(obj, dict):
-                        libs_poscountdict.append(obj)
-                gc.collect()
-        else:
-            libs_nestdict, libs_poscountdict = dict_paths, count_paths
-    else:
-        dict_paths = [f"{alib.rpartition('.')[0]}_{phase}.dict" for alib in libs]
-        count_paths = [f"{alib.rpartition('.')[0]}_{phase}.count" for alib in libs]
-        if load_dicts:
-            libs_nestdict = []
-            libs_poscountdict = []
-            for dp, cp in zip(dict_paths, count_paths):
-                try:
-                    with open(dp, "rb") as f1:
-                        obj = pickle.load(f1)
-                        if isinstance(obj, dict):
-                            libs_nestdict.append(obj)
-                    with open(cp, "rb") as f2:
-                        obj = pickle.load(f2)
-                        if isinstance(obj, dict):
-                            libs_poscountdict.append(obj)
-                except FileNotFoundError:
-                    print(f"Warning: Missing parsed file for {dp}")
-                gc.collect()
-        else:
-            libs_nestdict, libs_poscountdict = dict_paths, count_paths
-
-    return libs_nestdict, libs_poscountdict
+    return _load_parsed_outputs(dict_paths, count_paths, load_dicts=load_dicts)
 
 
 def samparser_streaming(aninput):
