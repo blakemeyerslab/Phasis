@@ -326,11 +326,22 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
             samparser_streaming, rawinputs, desc="Parsing alignments", unit="lib"
         )
 
-        for (dp, cp), (_, _, _, input_sig) in zip(out_pairs, parse_jobs):
-            cache.record(SAM_PARSING_SECTION, dp, input_sig)
-            cache.record(SAM_PARSING_SECTION, cp, input_sig)
+        sig_by_output = {}
+        for _, expected_dp, expected_cp, input_sig in parse_jobs:
+            sig_by_output[expected_dp] = input_sig
+            sig_by_output[expected_cp] = input_sig
+
+        for dp, cp in out_pairs:
+            dict_sig = sig_by_output[dp]
+            count_sig = sig_by_output[cp]
+
+            cache.record(SAM_PARSING_SECTION, dp, dict_sig)
+            cache.record(SAM_PARSING_SECTION, cp, count_sig)
             compat_dirty = _record_compat_md5(config, "PARSED", dp) or compat_dirty
             compat_dirty = _record_compat_md5(config, "COUNTERS", cp) or compat_dirty
+
+            if dict_sig != count_sig:
+                raise RuntimeError(f"Signature mismatch between paired parser outputs: {dp} / {cp}")
 
     if compat_dirty:
         cache.flush()
