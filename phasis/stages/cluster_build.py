@@ -11,7 +11,7 @@ import multiprocessing
 from collections import OrderedDict
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, getmd5
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, getmd5, stage_signature
 from phasis.parallel import run_parallel_with_progress, make_pool
 
 
@@ -49,6 +49,52 @@ def _flush_prev_cluster(prev_merged, clustid, clustlen_cutoff, clustdict_long, c
             clustdict_short[clustid] = prev_merged
         prev_merged = []
     return prev_merged, clustid
+
+
+CLUSTER_BUILD_SECTION = "CLUSTER_BUILD"
+
+
+def _ensure_cluster_sections(cfg: configparser.ConfigParser) -> None:
+    for section in (CLUSTER_BUILD_SECTION, "CLUSTERED"):
+        if not cfg.has_section(section):
+            cfg.add_section(section)
+
+
+def _cluster_output_paths_for_akey(clustfolder: str, akey: str) -> tuple[str, str]:
+    a_safe = _safe_key(akey)
+    lclust_path = os.path.realpath(os.path.join(clustfolder, f"{a_safe}.lclust"))
+    sclust_path = os.path.realpath(os.path.join(clustfolder, f"{a_safe}.sclust"))
+    return lclust_path, sclust_path
+
+
+def _cluster_build_input_signature(count_path: str, *, phase: int, clustbuffer: int) -> str:
+    return stage_signature(
+        files=[count_path],
+        params={
+            "stage": "cluster_build",
+            "phase": int(phase),
+            "clustbuffer": int(clustbuffer),
+        },
+    )
+
+
+def _record_compat_cluster_md5(cfg: configparser.ConfigParser, lclust_path: str) -> bool:
+    if not lclust_path or not os.path.isfile(lclust_path):
+        return False
+
+    _, md5hex = getmd5(lclust_path)
+    md5hex = str(md5hex or "")
+    if not md5hex:
+        return False
+
+    prev = (cfg["CLUSTERED"].get(lclust_path) or "").strip()
+    if prev == md5hex:
+        return False
+
+    cfg["CLUSTERED"][lclust_path] = md5hex
+    return True
+
+
 
 
 def getclusters(args):
@@ -206,11 +252,14 @@ def flush_cluster_batch(
     results,
     new_hashes,
     processed_akeys,
+    cache,
+    sig_by_output,
 ):
     """Top-level (non-nested) flush helper to satisfy no-nested-functions rule."""
     if not batch_items:
-        return
+        return False
 
+    compat_dirty = False
     chunk_results = process_cluster_batch(batch_items, idx)
     for res in chunk_results:
         if isinstance(res, RuntimeError):
@@ -223,9 +272,7 @@ def flush_cluster_batch(
             a, lfile, sfile = res
             _, lmd5 = getmd5(lfile)
 
-        a_safe = _safe_key(a)
-        want_l = os.path.realpath(os.path.join(clustfolder, f"{a_safe}.lclust"))
-        want_s = os.path.realpath(os.path.join(clustfolder, f"{a_safe}.sclust"))
+        want_l, want_s = _cluster_output_paths_for_akey(clustfolder, a)
 
         # If worker wrote elsewhere, move into clustfolder
         if os.path.isfile(lfile) and os.path.realpath(lfile) != want_l:
@@ -257,8 +304,19 @@ def flush_cluster_batch(
                     clustered_md5.pop(k, None)
 
         clustered_md5[want_l] = lmd5_final
+
+        l_sig = sig_by_output.get(want_l)
+        s_sig = sig_by_output.get(want_s)
+        if cache is not None and l_sig is not None:
+            cache.record(CLUSTER_BUILD_SECTION, want_l, l_sig)
+        if cache is not None and s_sig is not None:
+            cache.record(CLUSTER_BUILD_SECTION, want_s, s_sig)
+
+        compat_dirty = _record_compat_cluster_md5(cfg, want_l) or compat_dirty
         results.append((a, want_l, want_s))
         processed_akeys.append(a)
+
+    return compat_dirty
 
 
 def clusterprocess(libs_poscountdict, clustfolder):
@@ -266,8 +324,8 @@ def clusterprocess(libs_poscountdict, clustfolder):
     Phase I clustering (spawn-safe, no nested functions).
 
     - Writes per-lib-chr clusters to <clustfolder>/<akey>.lclust|.sclust
-    - Updates [CLUSTERED] with ABS path under `clustfolder`
-    - Skips recompute when md5 matches current mem entry
+    - Centralizes cache reuse in [CLUSTER_BUILD] for lclust/sclust outputs
+    - Preserves legacy [CLUSTERED] md5 bookkeeping for compatibility
     - Returns: [(akey, lclust_file, sclust_file), ...]
     """
     print("#### Fn: Find Clusters #######################")
@@ -281,24 +339,27 @@ def clusterprocess(libs_poscountdict, clustfolder):
         sources = list(libs_poscountdict)
 
     mem_file = rt.memFile or MEM_FILE_DEFAULT
+    phase = int(rt.phase)
+    clustbuffer = int(rt.clustbuffer)
 
-    cfg = configparser.ConfigParser()
-    cfg.optionxform = str
-    cfg.read(mem_file)
-    if not cfg.has_section("CLUSTERED"):
-        cfg.add_section("CLUSTERED")
+    cache = MemCache.load(mem_file)
+    cfg = cache.cfg
+    _ensure_cluster_sections(cfg)
 
     clustered_md5 = dict(cfg["CLUSTERED"])
 
     results: list[tuple[str, str, str]] = []
     new_hashes: dict[str, str] = {}
     processed_akeys: list[str] = []
+    sig_by_output: dict[str, str] = {}
+    compat_dirty = False
 
     CLUSTER_CHUNK_MAX = 10
     batch = []
     batch_index = 0
 
     for src in sources:
+        input_sig = None
         if isinstance(src, str):
             try:
                 with open(src, "rb") as fh:
@@ -307,6 +368,11 @@ def clusterprocess(libs_poscountdict, clustfolder):
                 print(f"[WARN] Failed to load count file {src}")
                 continue
             loaded_from_path = True
+            input_sig = _cluster_build_input_signature(
+                src,
+                phase=phase,
+                clustbuffer=clustbuffer,
+            )
         elif isinstance(src, dict):
             libdict = src
             loaded_from_path = False
@@ -315,24 +381,46 @@ def clusterprocess(libs_poscountdict, clustfolder):
             continue
 
         for akey, positions in libdict.items():
-            a_safe = _safe_key(akey)
-            lclust_path = os.path.realpath(os.path.join(clustfolder, f"{a_safe}.lclust"))
-            sclust_path = os.path.realpath(os.path.join(clustfolder, f"{a_safe}.sclust"))
+            lclust_path, sclust_path = _cluster_output_paths_for_akey(clustfolder, akey)
 
-            # Cache hit?
-            if os.path.isfile(lclust_path):
-                _, cur_md5 = getmd5(lclust_path)
-                prev_md5 = cfg["CLUSTERED"].get(lclust_path, "")
-                if prev_md5 and cur_md5 and prev_md5 == cur_md5:
+            if input_sig is not None:
+                sig_by_output[lclust_path] = input_sig
+                sig_by_output[sclust_path] = input_sig
+
+                l_hit = cache.hit(CLUSTER_BUILD_SECTION, lclust_path, input_sig)
+                s_hit = cache.hit(CLUSTER_BUILD_SECTION, sclust_path, input_sig)
+                if l_hit and s_hit:
                     _prune_old_clustered_entries(cfg, os.path.basename(lclust_path), lclust_path)
+                    compat_dirty = _record_compat_cluster_md5(cfg, lclust_path) or compat_dirty
                     results.append((akey, lclust_path, sclust_path))
                     processed_akeys.append(akey)
                     continue
 
+                if os.path.isfile(lclust_path) and os.path.isfile(sclust_path):
+                    _, cur_md5 = getmd5(lclust_path)
+                    prev_md5 = cfg["CLUSTERED"].get(lclust_path, "")
+                    if prev_md5 and cur_md5 and prev_md5 == cur_md5:
+                        print(f"Legacy cache matches for clustered library-chr {akey}")
+                        cache.record(CLUSTER_BUILD_SECTION, lclust_path, input_sig)
+                        cache.record(CLUSTER_BUILD_SECTION, sclust_path, input_sig)
+                        _prune_old_clustered_entries(cfg, os.path.basename(lclust_path), lclust_path)
+                        results.append((akey, lclust_path, sclust_path))
+                        processed_akeys.append(akey)
+                        continue
+            else:
+                if os.path.isfile(lclust_path):
+                    _, cur_md5 = getmd5(lclust_path)
+                    prev_md5 = cfg["CLUSTERED"].get(lclust_path, "")
+                    if prev_md5 and cur_md5 and prev_md5 == cur_md5:
+                        _prune_old_clustered_entries(cfg, os.path.basename(lclust_path), lclust_path)
+                        results.append((akey, lclust_path, sclust_path))
+                        processed_akeys.append(akey)
+                        continue
+
             batch.append((akey, positions, clustfolder))
             if len(batch) >= CLUSTER_CHUNK_MAX:
                 batch_index += 1
-                flush_cluster_batch(
+                compat_dirty = flush_cluster_batch(
                     batch,
                     batch_index,
                     clustfolder=clustfolder,
@@ -341,7 +429,9 @@ def clusterprocess(libs_poscountdict, clustfolder):
                     results=results,
                     new_hashes=new_hashes,
                     processed_akeys=processed_akeys,
-                )
+                    cache=cache,
+                    sig_by_output=sig_by_output,
+                ) or compat_dirty
                 batch = []
                 gc.collect()
 
@@ -351,7 +441,7 @@ def clusterprocess(libs_poscountdict, clustfolder):
 
     if batch:
         batch_index += 1
-        flush_cluster_batch(
+        compat_dirty = flush_cluster_batch(
             batch,
             batch_index,
             clustfolder=clustfolder,
@@ -360,17 +450,19 @@ def clusterprocess(libs_poscountdict, clustfolder):
             results=results,
             new_hashes=new_hashes,
             processed_akeys=processed_akeys,
-        )
+            cache=cache,
+            sig_by_output=sig_by_output,
+        ) or compat_dirty
         batch = []
         gc.collect()
 
-    # Persist [CLUSTERED] updates
+    # Persist legacy [CLUSTERED] updates
     if not cfg.has_section("CLUSTERED"):
         cfg.add_section("CLUSTERED")
     for lpath, md5 in new_hashes.items():
         cfg["CLUSTERED"][lpath] = md5
-    with open(mem_file, "w") as fh:
-        cfg.write(fh)
+    if new_hashes or compat_dirty:
+        cache.flush()
 
     # Save akeys list for downstream
     try:

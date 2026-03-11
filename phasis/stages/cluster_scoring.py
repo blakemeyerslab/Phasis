@@ -19,9 +19,11 @@ from scipy.stats import combine_pvalues, hypergeom, mannwhitneyu
 import phasis.runtime as rt
 from phasis.cache import (
     MEM_FILE_DEFAULT,
+    MemCache,
     assemble_candidate_from_chunks,
     md5_file_worker,
     sanitize_mem_md5s,
+    stage_signature,
 )
 from phasis.parallel import run_parallel_with_progress
 
@@ -38,6 +40,83 @@ phase = None
 uniqueRatioCut = None
 memFile = None
 scoredClustFolder = None
+
+
+CLUSTER_SCORING_SECTION = "CLUSTER_SCORING"
+
+
+def _ensure_cluster_scoring_sections(cfg: configparser.ConfigParser) -> None:
+    for sect in ("CLUSTERS", "CLUSTERED", "SCORED_CHUNKS", CLUSTER_SCORING_SECTION):
+        if not cfg.has_section(sect):
+            cfg.add_section(sect)
+
+
+def _normalize_cache_file_inputs(sources):
+    if sources is None:
+        return []
+    if isinstance(sources, str):
+        iterable = [sources]
+    else:
+        iterable = list(sources)
+
+    norm = []
+    for src in iterable:
+        if not isinstance(src, str):
+            return None
+        norm.append(os.path.realpath(src))
+
+    return sorted(set(norm))
+
+
+def _cluster_scoring_stage_signature(
+    lclust_paths,
+    nestdict_sources,
+    *,
+    phase,
+    unique_ratio_cut,
+    concat_mode,
+    merged_name,
+    expected_outputs,
+):
+    nest_paths = _normalize_cache_file_inputs(nestdict_sources)
+    if nest_paths is None:
+        return None
+
+    lclust_norm = [os.path.realpath(p) for p in lclust_paths]
+    files = sorted(set(lclust_norm + nest_paths))
+    extras = sorted({os.path.basename(str(p)) for p in expected_outputs})
+    return stage_signature(
+        files=files,
+        params={
+            "stage": "cluster_scoring",
+            "phase": int(phase),
+            "uniqueRatioCut": float(unique_ratio_cut),
+            "concat_mode": bool(concat_mode),
+            "merged_name": str(merged_name),
+            "window_size": int(WINDOW_SIZE),
+            "uniqratio_hit": int(UNIQRATIO_HIT),
+            "domsize_cut": float(DOMSIZE_CUT),
+        },
+        extra=extras,
+    )
+
+
+def _record_compat_cluster_output_md5(cfg: configparser.ConfigParser, section: str, path: str) -> bool:
+    if not path or not os.path.isfile(path):
+        return False
+
+    _, md5hex = md5_file_worker(path)
+    md5hex = str(md5hex or "")
+    if not md5hex:
+        return False
+
+    key = os.path.basename(path) if section == "CLUSTERS" else os.path.realpath(path)
+    prev = (cfg[section].get(key) or "").strip()
+    if prev == md5hex:
+        return False
+
+    cfg[section][key] = md5hex
+    return True
 
 
 def sync_from_runtime() -> None:
@@ -631,23 +710,19 @@ def scoringprocess(
         return []
 
     # -------------------- mem file & sections --------------------
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    config.read(memFile)
+    cache = MemCache.load(memFile)
+    config = cache.cfg
+    _ensure_cluster_scoring_sections(config)
     # NOTE: kept for legacy parity (currently return value is not used here).
     _ = updatedsets(config)
 
     sect_clusters = "CLUSTERS"       # outputs: bare filename -> md5
     sect_lclust   = "CLUSTERED"      # inputs: absolute realpath -> md5
     sect_chunks   = "SCORED_CHUNKS"  # chunk *.cluster absolute paths -> md5
-    for sect in (sect_clusters, sect_lclust, sect_chunks):
-        if not config.has_section(sect):
-            config.add_section(sect)
 
     removed = sanitize_mem_md5s(config, (sect_clusters, sect_lclust, sect_chunks))
     if any(removed.values()):
-        with open(memFile, "w") as fh:
-            config.write(fh)
+        cache.flush()
 
     # -------------------- Collect nest dict (unfiltered; robust in concat) ----
     # Avoid losing entries by over-filtering here; we'll probe with canonical keys later.
@@ -697,6 +772,36 @@ def scoringprocess(
         for alib in libs:
             bname = _basename_no_ext(alib)
             expected_outfiles.append((alib, f"{bname}.{phase}-PHAS.candidate.clusters"))
+
+    # -------------------- Centralized stage-cache fast path --------------------
+    stage_sig = _cluster_scoring_stage_signature(
+        [p for _, p in filtered_inputs],
+        libs_nestdict,
+        phase=phase,
+        unique_ratio_cut=uniqueRatioCut,
+        concat_mode=concat_mode,
+        merged_name=merged_name,
+        expected_outputs=[outf for _, outf in expected_outfiles],
+    )
+
+    if stage_sig is not None and not force_rescore and not purge_existing:
+        stage_hits = []
+        all_stage_hits = True
+        for _, outfile in expected_outfiles:
+            if cache.hit(CLUSTER_SCORING_SECTION, outfile, stage_sig):
+                stage_hits.append(outfile)
+            else:
+                all_stage_hits = False
+                break
+
+        if all_stage_hits:
+            compat_dirty = False
+            for outfile in stage_hits:
+                compat_dirty = _record_compat_cluster_output_md5(config, sect_clusters, outfile) or compat_dirty
+            if compat_dirty:
+                cache.flush()
+            print(f"cluster files are {stage_hits}")
+            return stage_hits
 
     # -------------------- Map akey (basename) -> lib path ---------------------
     akey_to_lib = {}
@@ -1024,8 +1129,11 @@ def scoringprocess(
         if md5 is not None:
             config[sect_lclust][p_abs] = md5
 
-    with open(memFile, "w") as fh:
-        config.write(fh)
+    for outfile in clusterFiles:
+        if stage_sig is not None and os.path.isfile(outfile):
+            cache.record(CLUSTER_SCORING_SECTION, outfile, stage_sig)
+
+    cache.flush()
 
     print(f"cluster files are {clusterFiles}")
     return clusterFiles
