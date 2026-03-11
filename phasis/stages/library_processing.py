@@ -132,9 +132,17 @@ def _library_input_signature(alib):
     )
 
 
+def _signature_fas_artifact(fas_path):
+    gz_path = f"{fas_path}.gz"
+    if os.path.isfile(gz_path):
+        return gz_path
+    return fas_path
+
+
 def _merged_input_signature(fas_paths):
+    sig_files = [_signature_fas_artifact(p) for p in fas_paths]
     return stage_signature(
-        files=fas_paths,
+        files=sig_files,
         params={
             "stage": "library_processing_merge",
             "mindepth": mindepth,
@@ -258,6 +266,7 @@ def libraryprocess(libs):
 
     libs_to_process = []
     input_md5s = {}
+    trusted_fas = set()
     compat_dirty = False
 
     for alib, fas_path in zip(libs, expected_fas):
@@ -267,6 +276,7 @@ def libraryprocess(libs):
             print(f"Cache hit for processed library: {alib}")
             cur_input_md5 = compute_md5_str(alib) or ""
             input_md5s[alib] = cur_input_md5
+            trusted_fas.add(fas_path)
             compat_dirty = _record_compat_input_md5(config, alib, cur_input_md5) or compat_dirty
             compat_dirty = _record_compat_fasta_md5(config, fas_path) or compat_dirty
             continue
@@ -277,6 +287,7 @@ def libraryprocess(libs):
         if legacy_mindepth_matches and _legacy_input_cache_hit(config, alib, fas_path, cur_input_md5):
             print(f"Legacy cache matches for library: {alib}")
             cache.record(LIBRARY_PROCESSING_SECTION, fas_path, input_sig)
+            trusted_fas.add(fas_path)
             compat_dirty = _record_compat_fasta_md5(config, fas_path) or compat_dirty
             continue
 
@@ -304,7 +315,11 @@ def libraryprocess(libs):
 
     libs_processed = [p for p in expected_fas if _logical_fas_available(p)]
 
+    processed_now = set(proc_outputs) if libs_to_process else set()
+
     for alib, fas_path in zip(libs, expected_fas):
+        if fas_path in processed_now:
+            trusted_fas.add(fas_path)
         if not os.path.isfile(fas_path):
             continue
         input_md5 = input_md5s.get(alib)
@@ -313,7 +328,8 @@ def libraryprocess(libs):
             input_md5s[alib] = input_md5
         compat_dirty = _record_compat_input_md5(config, alib, input_md5) or compat_dirty
         compat_dirty = _record_compat_fasta_md5(config, fas_path) or compat_dirty
-        cache.record(LIBRARY_PROCESSING_SECTION, fas_path, _library_input_signature(alib))
+        if fas_path in trusted_fas:
+            cache.record(LIBRARY_PROCESSING_SECTION, fas_path, _library_input_signature(alib))
 
     if compat_dirty:
         cache.flush()
