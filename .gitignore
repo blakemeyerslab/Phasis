@@ -1,4 +1,5 @@
-phasis/.DS_Store
-phasis/__pycache__
-phasis/stages/__pycache__
-./.gitgnore
+.DS_Store
+__MACOSX/
+
+__pycache__/
+*.py[cod]
