@@ -162,30 +162,6 @@ def resolve_lclust_path(path_like, clustfolder):
     # return normalized original (may not exist; caller will check)
     return os.path.realpath(p)
 
-def updatedsets(config):
-    '''
-    checks which settings have been updated by comparing
-    globals from settings file with entries in memfile
-    '''
-
-    updatedsetL = []
-
-    if int(config["ADVANCED"]["mismat"])     != int(mismat):
-        updatedsetL.append("mismat")
-    if int(config["ADVANCED"]["maxhits"])    != int(maxhits):
-        updatedsetL.append("maxhits")
-    if int(config["ADVANCED"]["clustbuffer"])!= int(clustbuffer):
-        updatedsetL.append("clustbuffer")
-
-    ## Settings that may not exist in ealry phase of
-    ## analyses, generated error when this function
-    ## is used by early functions
-    if config['BASIC'].getboolean('phaselen'):
-        if int(config["BASIC"]["phaselen"])!= int(phase):
-            updatedsetL.append("phaselen")
-
-    return updatedsetL
-
 def _basename_no_ext(p):
     # '/a/b/ALL_LIBS.fas' -> 'ALL_LIBS'
     return os.path.basename(str(p)).rsplit('.', 1)[0]
@@ -713,8 +689,6 @@ def scoringprocess(
     cache = MemCache.load(memFile)
     config = cache.cfg
     _ensure_cluster_scoring_sections(config)
-    # NOTE: kept for legacy parity (currently return value is not used here).
-    _ = updatedsets(config)
 
     sect_clusters = "CLUSTERS"       # outputs: bare filename -> md5
     sect_lclust   = "CLUSTERED"      # inputs: absolute realpath -> md5
