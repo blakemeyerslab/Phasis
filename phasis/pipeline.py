@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 
-from . import cache
 from . import parallel as parallel_utils
 
 
@@ -28,14 +27,14 @@ def run_pipeline() -> int:
     # keep validated runtime inputs consistent
     rt.libs = libs_checked
 
+    cleanup_requested = bool(getattr(rt, "cleanup", False) or getattr(rt, "cleanup_all", False))
+    if cleanup_requested:
+        print("[ERROR] Cleanup modes are standalone. Use them without any other arguments.")
+        return 2
+
     # ---- dispatcher ----
     steps_local = getattr(rt, "steps", None) or "both"
     steps_local = str(steps_local).strip().lower()
-    cleanup_requested = bool(getattr(rt, "cleanup", False))
-
-    if cleanup_requested and steps_local != "both":
-        print("[ERROR] -cleanup is only supported when steps is 'both'.")
-        return 1
 
     if steps_local == "cfind":
         run_phase1_pipeline(libs_checked)
@@ -49,8 +48,5 @@ def run_pipeline() -> int:
         raise ValueError(
             f"Unknown steps value: {steps_local!r} (expected 'cfind', 'class', or 'both')"
         )
-
-    if cleanup_requested:
-        cache.cleanup(getattr(rt, "run_dir", None))
 
     return 0

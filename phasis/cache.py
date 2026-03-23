@@ -137,24 +137,144 @@ def stage_signature(
 
 
 CLEANUP_PATTERNS = [
-    "fas",
-    "sam",
-    "bam",
-    "dict",
-    "count",
-    "runtime",
-    "sum",
-    "scoredClusters",
-    "candidate.clusters",
-    "clusters",
+    "prefix:runtime_",
+    "suffix:.phasis.runtime.json",
+    "suffix:.fas",
+    "suffix:.fas.gz",
+    "suffix:.sam",
+    "suffix:.temp.sam",
+    "suffix:.bam",
+    "suffix:.sorted.bam",
+    "suffix:.dict",
+    "suffix:.count",
+    "suffix:.sum",
+    "suffix:.clean.fa",
+    "suffix:.summ.txt",
+    "suffix:.chrom_id_map.tsv",
+    "suffix:.lclust",
+    "suffix:.sclust",
+    "suffix:.cluster",
+    "suffix:.candidate.clusters",
+    "suffix:_processed_clusters.tab",
+    "suffix:_candidate.loci_table.tab",
+    "suffix:_merged_candidates.tab",
+    "suffix:_merged_clusters.tab",
+    "suffix:_mergedclusterdict.tab",
+    "suffix:_phas_to_detect.tab",
+    "suffix:_clusters_windows_to_score.tsv",
+    "suffix:_clusters_scored.tsv",
+    "suffix:_cluster_set_features.tsv",
+    "suffix:libchr-keys.p",
+    "suffix:_clusters",
+    "suffix:_scoredclusters",
+    "contains:_windows_sl",
 ]
+INDEX_ONLY_MEM_SECTIONS = ("BASIC",)
+INDEX_DIRNAME = "index"
+RESULTS_DIR_SUFFIX = "_results"
 
 
 def match_pattern(filename, patterns) -> bool:
+    text = str(filename).strip().lower()
     for pattern in patterns:
-        if str(filename).endswith(str(pattern)):
+        pattern_text = str(pattern).strip().lower()
+
+        if pattern_text.startswith("prefix:"):
+            if text.startswith(pattern_text.removeprefix("prefix:")):
+                return True
+            continue
+
+        if pattern_text.startswith("contains:"):
+            if pattern_text.removeprefix("contains:") in text:
+                return True
+            continue
+
+        if pattern_text.startswith("suffix:"):
+            if text.endswith(pattern_text.removeprefix("suffix:")):
+                return True
+            continue
+
+        if text.endswith(pattern_text):
             return True
     return False
+
+
+def _cleanup_target_dir(base_dir: str | None = None) -> str:
+    target_dir = base_dir or getattr(rt, "run_dir", None) or os.getcwd()
+    return os.path.abspath(os.path.expanduser(target_dir))
+
+
+def _cleanup_mem_path(target_dir: str) -> str:
+    mem_path = getattr(rt, "memFile", None)
+    if mem_path:
+        return os.path.abspath(os.path.expanduser(str(mem_path)))
+    return os.path.join(target_dir, MEM_FILE_DEFAULT)
+
+
+def _should_preserve_dir(path: str, *, preserve_index: bool) -> bool:
+    abs_path = os.path.abspath(path)
+    dirname = os.path.basename(abs_path.rstrip(os.sep))
+
+    if dirname.endswith(RESULTS_DIR_SUFFIX):
+        return True
+
+    outdir = getattr(rt, "outdir", None)
+    if outdir and abs_path == os.path.abspath(os.path.expanduser(str(outdir))):
+        return True
+
+    if preserve_index and dirname == INDEX_DIRNAME:
+        return True
+
+    return False
+
+
+def _cleanup_tree(target_dir: str, cleanup_patterns, *, preserve_index: bool) -> None:
+    for root, dirs, files in os.walk(target_dir, topdown=True):
+        for dirname in list(dirs):
+            path = os.path.join(root, dirname)
+
+            if _should_preserve_dir(path, preserve_index=preserve_index):
+                dirs.remove(dirname)
+                continue
+
+            if match_pattern(dirname, cleanup_patterns):
+                shutil.rmtree(path, ignore_errors=True)
+                dirs.remove(dirname)
+
+        for filename in files:
+            if match_pattern(filename, cleanup_patterns):
+                path = os.path.join(root, filename)
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+
+
+def _prune_mem_to_sections(mem_file: str, keep_sections=INDEX_ONLY_MEM_SECTIONS) -> None:
+    if not os.path.isfile(mem_file):
+        return None
+
+    config = configparser.ConfigParser()
+    config.optionxform = str
+    config.read(mem_file)
+
+    kept = [section for section in keep_sections if config.has_section(section)]
+    if not kept:
+        try:
+            os.remove(mem_file)
+        except OSError:
+            pass
+        return None
+
+    pruned = configparser.ConfigParser()
+    pruned.optionxform = str
+    for section in kept:
+        pruned[section] = dict(config[section])
+
+    with open(mem_file, "w") as fh:
+        pruned.write(fh)
+
+    return None
 
 
 def cleanup(base_dir: str | None = None, patterns=None) -> None:
@@ -162,26 +282,43 @@ def cleanup(base_dir: str | None = None, patterns=None) -> None:
     Delete PHASIS intermediate files/directories under the run directory.
 
     Kept as a canonical helper outside legacy.py so the active pipeline can
-    support -cleanup without routing cleanup logic through legacy.
+    support standalone intermediate cleanup without routing logic through legacy.
     """
     cleanup_patterns = list(patterns or CLEANUP_PATTERNS)
-    target_dir = base_dir or getattr(rt, "run_dir", None) or os.getcwd()
-    target_dir = os.path.abspath(os.path.expanduser(target_dir))
+    target_dir = _cleanup_target_dir(base_dir)
 
     if not os.path.isdir(target_dir):
         return None
 
-    for root, dirs, files in os.walk(target_dir, topdown=True):
-        for dirname in list(dirs):
-            if match_pattern(dirname, cleanup_patterns):
-                path = os.path.join(root, dirname)
-                shutil.rmtree(path)
-                dirs.remove(dirname)
+    _cleanup_tree(target_dir, cleanup_patterns, preserve_index=True)
+    _prune_mem_to_sections(_cleanup_mem_path(target_dir))
 
-        for filename in files:
-            if match_pattern(filename, cleanup_patterns):
-                path = os.path.join(root, filename)
-                os.remove(path)
+    return None
+
+
+def cleanup_all(base_dir: str | None = None, patterns=None) -> None:
+    """
+    Delete PHASIS intermediate files/directories plus index/ and phasis.mem,
+    while preserving results directories.
+    """
+    cleanup_patterns = list(patterns or CLEANUP_PATTERNS)
+    target_dir = _cleanup_target_dir(base_dir)
+
+    if not os.path.isdir(target_dir):
+        return None
+
+    _cleanup_tree(target_dir, cleanup_patterns, preserve_index=False)
+
+    index_dir = os.path.join(target_dir, INDEX_DIRNAME)
+    if os.path.isdir(index_dir):
+        shutil.rmtree(index_dir, ignore_errors=True)
+
+    mem_file = _cleanup_mem_path(target_dir)
+    if os.path.isfile(mem_file):
+        try:
+            os.remove(mem_file)
+        except OSError:
+            pass
 
     return None
 
@@ -679,6 +816,7 @@ __all__ = [
     "CLEANUP_PATTERNS",
     "match_pattern",
     "cleanup",
+    "cleanup_all",
     "phase2_basename",
     "getmd5",
     "compute_md5_str",

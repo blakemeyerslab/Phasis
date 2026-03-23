@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phasis"
-version = "2.5.3"
+version = "2.6"
 description = "PHAS locus detection and scoring pipeline"
-authors = [{ name = "Atul Kakrana,Thales H Cherubino Ribeiro, Blake C. Meyers" }]
+authors = [{ name = "Thales H Cherubino Ribeiro, Atul Kakrana, Blake C. Meyers" }]
 requires-python = ">=3.10"
 
 dependencies = [

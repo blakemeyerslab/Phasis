@@ -14,6 +14,7 @@ clusters_scored_tsv = None      # absolute path to *_clusters_scored.tsv
 # --- NEW: include missing config knobs you already set in CLI ---
 force = None
 cleanup = None
+cleanup_all = None
 
 # (keep your existing globals below; I’m not repeating them all)
 
@@ -24,7 +25,7 @@ _RUNTIME_KEYS = [
     "libs","reference","norm","norm_factor","maxhits","runtype","mindepth","uniqueRatioCut","mismat",
     "libformat","phase","phase2","phaseLen","clustbuffer","phasisScoreCutoff","minClusterLength","window_len","sliding",
     "cores","classifier","steps","class_cluster_file","max_complexity","min_Howell_score","concat_libs",
-    "outdir","run_dir","memFile","force","clusters_scored_tsv","cleanup",
+    "outdir","run_dir","memFile","force","clusters_scored_tsv","cleanup","cleanup_all",
 ]
 
 def _snapshot_path(run_dir_override: str | None = None) -> str:

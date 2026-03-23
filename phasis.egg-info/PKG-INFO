@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: phasis
+Version: 2.6
+Summary: PHAS locus detection and scoring pipeline
+Author: Thales H Cherubino Ribeiro, Atul Kakrana, Blake C. Meyers
+Requires-Python: >=3.10
+License-File: LICENSE.txt
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: scipy
+Requires-Dist: scikit-learn
+Requires-Dist: matplotlib
+Requires-Dist: seaborn
+Requires-Dist: joblib
+Requires-Dist: tqdm
+Dynamic: license-file

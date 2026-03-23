@@ -12,6 +12,9 @@ from . import runtime as rt
 from .deps_check import require_dependencies
 
 
+_CLEANUP_ONLY_FLAGS = {"-cleanup", "-cleanup_all", "-cleanup_index"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
 
@@ -51,8 +54,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Normalization factor (default 1e7)")
     parser.add_argument("-classifier", default="KNN", type=str,
                         help="Classifier: KNN or GMM [default KNN]")
-    parser.add_argument("-cleanup", action="store_true",
-                        help="Delete intermediate files (not recommended for successive runs)")
+    cleanup_group = parser.add_mutually_exclusive_group()
+    cleanup_group.add_argument(
+        "-cleanup",
+        action="store_true",
+        help="Cleanup-only mode: delete intermediate files, keep index/ and indexing metadata in phasis.mem",
+    )
+    cleanup_group.add_argument(
+        "-cleanup_all", "-cleanup_index",
+        dest="cleanup_all",
+        action="store_true",
+        help="Cleanup-only mode: delete all intermediates, index/, and phasis.mem",
+    )
     parser.add_argument("-steps", default="both", type=str,
                         help="both | cfind | class [default both]")
     parser.add_argument("-class_cluster_file", nargs="*",
@@ -93,6 +106,33 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.steps not in ("both", "cfind", "class"):
         print("ERROR: Invalid value for -steps. Use: both, cfind, class\n")
         raise SystemExit(2)
+
+
+def _cleanup_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "cleanup", False) or getattr(args, "cleanup_all", False))
+
+
+def _validate_cleanup_only_argv(argv: List[str]) -> None:
+    extras = [token for token in argv if token not in _CLEANUP_ONLY_FLAGS]
+    if extras:
+        print("[ERROR] Cleanup modes must be run without any other arguments.")
+        print("Use either 'phasis -cleanup' or 'phasis -cleanup_all' (alias: -cleanup_index).")
+        raise SystemExit(2)
+
+
+def _run_cleanup_mode(args: argparse.Namespace) -> int:
+    from . import cache
+
+    base_dir = os.path.abspath(os.getcwd())
+
+    if getattr(args, "cleanup_all", False):
+        cache.cleanup_all(base_dir)
+        print("[INFO] Full cleanup completed. Results directories were preserved.")
+    else:
+        cache.cleanup(base_dir)
+        print("[INFO] Intermediate cleanup completed. Preserved index/ and indexing metadata in phasis.mem.")
+
+    return 0
 
 
 def configure_runtime(args: argparse.Namespace) -> None:
@@ -151,6 +191,7 @@ def configure_runtime(args: argparse.Namespace) -> None:
     # store optional flags too (even if runtime.py doesn't predeclare them yet)
     rt.force = args.force
     rt.cleanup = args.cleanup
+    rt.cleanup_all = getattr(args, "cleanup_all", False)
     rt.run_dir = os.path.abspath(os.getcwd())
     rt.memFile = os.path.join(rt.run_dir, "phasis.mem")
 
@@ -161,6 +202,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if _cleanup_requested(args):
+        _validate_cleanup_only_argv(argv)
+        return _run_cleanup_mode(args)
 
     # Dependencies should be checked only in the real run path.
     # (argparse will have already exited for -h/-version)
