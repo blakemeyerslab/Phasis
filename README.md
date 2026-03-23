@@ -1,7 +1,7 @@
 # Phasis — Phased sRNA Cluster Discovery and Annotation
 
 **Version:** v2.6  
-**Updated:** 2026-01-20
+**Updated:** 2026-03-23
 
 Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libraries. It supports:
 
