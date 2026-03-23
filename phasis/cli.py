@@ -19,8 +19,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
 
     reqflags = parser.add_argument_group("required arguments")
-    reqflags.add_argument("-libs", help="Quality controlled libraries to process", required=False, nargs="*")
-    reqflags.add_argument("-reference", help="Genome or transcriptome reference FASTA", required=False)
+    reqflags.add_argument(
+        "-libs",
+        help="Quality-controlled libraries to process (FASTA, tag-count, or FASTQ; plain text or .gz)",
+        required=False,
+        nargs="*",
+    )
+    reqflags.add_argument(
+        "-reference",
+        help="Genome or transcriptome reference FASTA (plain text or .gz)",
+        required=False,
+    )
 
     parser.add_argument("-maxhits", default=25, type=int,
                         help="Number of genome/transcriptome hits passed as -k to hisat2 [default 25]")
@@ -28,8 +37,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="G: genome | T: transcriptome | S: scaffolded genome [default G]")
     parser.add_argument("-mindepth", default=2, type=int,
                         help="Minimum depth for p-value computation [default 2]")
-    parser.add_argument("-force", action="store_true",
-                        help="Allow resource-intensive parameter combinations", required=False)
     parser.add_argument("-uniqueRatioCut", default=0.2, type=float,
                         help="Proportion of uniquely mapped reads filter [default 0.2]")
     parser.add_argument("-max_complexity", default=0.3, type=float,
@@ -37,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-mismat", default=0, type=int,
                         help="Mismatches allowed for mapping [default 0]")
     parser.add_argument("-libformat", default="F", type=str,
-                        help="QC format: FASTA (F) or tag-count (T) [default F]")
+                        help="QC format: FASTA (F), tag-count (T), or FASTQ (Q) [default F]")
     parser.add_argument("-phase", default=21, type=int,
                         help="Desired phase length [default 21]")
     parser.add_argument("-clustbuffer", default=300, type=int,
@@ -99,8 +106,21 @@ def _normalize_outdir(outdir: str, phase: int) -> str:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    args.classifier = str(args.classifier).upper()
+    args.libformat = str(args.libformat).upper()
+    args.runtype = str(args.runtype).upper()
+    args.steps = str(args.steps).lower()
+
     if args.classifier not in ("KNN", "GMM"):
         print("\nERROR: Wrong classifier option (use KNN or GMM)\n")
+        raise SystemExit(2)
+
+    if args.libformat not in ("F", "T", "Q"):
+        print("\nERROR: Wrong libformat option (use F, T, or Q)\n")
+        raise SystemExit(2)
+
+    if args.runtype not in ("G", "T", "S"):
+        print("\nERROR: Wrong runtype option (use G, T, or S)\n")
         raise SystemExit(2)
 
     if args.steps not in ("both", "cfind", "class"):
@@ -188,8 +208,7 @@ def configure_runtime(args: argparse.Namespace) -> None:
     rt.concat_libs = args.concat_libs
     rt.outdir = outdir
 
-    # store optional flags too (even if runtime.py doesn't predeclare them yet)
-    rt.force = args.force
+    # store optional flags too
     rt.cleanup = args.cleanup
     rt.cleanup_all = getattr(args, "cleanup_all", False)
     rt.run_dir = os.path.abspath(os.getcwd())

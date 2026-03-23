@@ -327,7 +327,7 @@ def mapper(aninput):
             stderr=subprocess.DEVNULL,
         )
     else:
-        print("Please input the correct setting for 'runtype' parameter in 'phasis.set' file")
+        print("Please input the correct setting for 'runtype'")
         print("Script will exit for now\n")
         sys.exit()
 

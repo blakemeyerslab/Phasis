@@ -168,6 +168,7 @@ CLEANUP_PATTERNS = [
     "suffix:libchr-keys.p",
     "suffix:_clusters",
     "suffix:_scoredclusters",
+    "suffix:processed_libraries",
     "contains:_windows_sl",
 ]
 INDEX_ONLY_MEM_SECTIONS = ("BASIC",)

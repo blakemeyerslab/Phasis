@@ -77,6 +77,29 @@ def _format_runtime_parameter_lines() -> list[str]:
 
     libs_text = ", ".join(libs_list) if libs_list else "None"
 
+    threshold_parts = [
+        f"mindepth={getattr(rt, 'mindepth', 'NA')}",
+        f"maxhits={getattr(rt, 'maxhits', 'NA')}",
+        f"mismat={getattr(rt, 'mismat', 'NA')}",
+        f"uniqueRatioCut={getattr(rt, 'uniqueRatioCut', 'NA')}",
+        f"clustbuffer={getattr(rt, 'clustbuffer', 'NA')}",
+        f"minClusterLength={getattr(rt, 'minClusterLength', 'NA')}",
+        f"window_len={getattr(rt, 'window_len', 'NA')}",
+        f"sliding={getattr(rt, 'sliding', 'NA')}",
+        f"phasisScoreCutoff={getattr(rt, 'phasisScoreCutoff', 'NA')}",
+        f"min_Howell_score={getattr(rt, 'min_Howell_score', 'NA')}",
+        f"max_complexity={getattr(rt, 'max_complexity', 'NA')}",
+        f"norm={getattr(rt, 'norm', 'NA')}",
+    ]
+    if getattr(rt, "norm", False):
+        threshold_parts.append(f"norm_factor={getattr(rt, 'norm_factor', 'NA')}")
+    threshold_parts.extend(
+        [
+            f"cores={getattr(rt, 'cores', 'NA')}",
+            f"ncores={getattr(rt, 'ncores', 'NA')}",
+        ]
+    )
+
     return [
         (
             "  - Parameters: "
@@ -95,42 +118,35 @@ def _format_runtime_parameter_lines() -> list[str]:
         ),
         (
             "  - Thresholds/resources: "
-            f"mindepth={getattr(rt, 'mindepth', 'NA')}, "
-            f"maxhits={getattr(rt, 'maxhits', 'NA')}, "
-            f"mismat={getattr(rt, 'mismat', 'NA')}, "
-            f"uniqueRatioCut={getattr(rt, 'uniqueRatioCut', 'NA')}, "
-            f"clustbuffer={getattr(rt, 'clustbuffer', 'NA')}, "
-            f"minClusterLength={getattr(rt, 'minClusterLength', 'NA')}, "
-            f"window_len={getattr(rt, 'window_len', 'NA')}, "
-            f"sliding={getattr(rt, 'sliding', 'NA')}, "
-            f"phasisScoreCutoff={getattr(rt, 'phasisScoreCutoff', 'NA')}, "
-            f"min_Howell_score={getattr(rt, 'min_Howell_score', 'NA')}, "
-            f"max_complexity={getattr(rt, 'max_complexity', 'NA')}, "
-            f"norm={getattr(rt, 'norm', 'NA')}, "
-            f"norm_factor={getattr(rt, 'norm_factor', 'NA')}, "
-            f"cores={getattr(rt, 'cores', 'NA')}, "
-            f"ncores={getattr(rt, 'ncores', 'NA')}, "
-            f"cleanup={getattr(rt, 'cleanup', 'NA')}"
+            + ", ".join(threshold_parts)
         ),
     ]
 
 
-def _print_final_detection_summary(phas_df: pd.DataFrame) -> None:
+def _print_final_detection_summary(phas_df: pd.DataFrame, *, wrote_line: str | None = None) -> None:
     unique_loci = int(phas_df['identifier'].nunique()) if 'identifier' in phas_df.columns else 0
     total_detections = int(len(phas_df))
     phase_label = phase if phase is not None else getattr(rt, "phase", "NA")
 
-    print(f"  - Detected {unique_loci} unique {phase_label}-PHAS loci candidates across {total_detections} {phase_label}-PHAS library-specific detections.")
+    summary_lines = []
+    if wrote_line:
+        summary_lines.append(wrote_line)
+
+    summary_lines.append(
+        f"  - Detected {unique_loci} unique {phase_label}-PHAS loci candidates across {total_detections} {phase_label}-PHAS library-specific detections."
+    )
 
     if total_detections > 0 and 'alib' in phas_df.columns:
         per_lib = phas_df['alib'].astype(str).value_counts().sort_index()
         per_lib_text = ", ".join(f"{lib}={int(count)}" for lib, count in per_lib.items())
-        print(f"  - Library detections: {per_lib_text}")
+        summary_lines.append(f"  - Library detections: {per_lib_text}")
     else:
-        print("  - Library detections: none")
+        summary_lines.append("  - Library detections: none")
 
-    for line in _format_runtime_parameter_lines():
-        print(line)
+    summary_lines.extend(_format_runtime_parameter_lines())
+
+    print("")
+    print("\n\n".join(summary_lines))
 
 
 def _parse_identifiers_and_alib(features: pd.DataFrame, job_phase: str | int | None):
@@ -979,5 +995,7 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         plot_pool.terminate()
         plot_pool.join()
         raise
-    print(f"  - Wrote: {all_out}, {calls_out}, and {gff_out}")
-    _print_final_detection_summary(phas_df)
+    _print_final_detection_summary(
+        phas_df,
+        wrote_line=f"  - Wrote: {all_out}, {calls_out}, and {gff_out}",
+    )

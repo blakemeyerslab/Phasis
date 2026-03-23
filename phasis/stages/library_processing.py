@@ -2,6 +2,7 @@ import os
 import sys
 import gzip
 import shutil
+import hashlib
 
 from phasis import libprep
 from phasis import runtime as rt
@@ -36,8 +37,38 @@ def _existing_path_results(results):
     return out
 
 
+def _input_stem(alib):
+    base = os.path.basename(str(alib))
+    if base.lower().endswith(".gz"):
+        base = base[:-3]
+    for ext in (".fastq", ".fq", ".fasta", ".fa", ".tag"):
+        if base.lower().endswith(ext):
+            return base[: -len(ext)]
+    stem, dot, _ = base.rpartition(".")
+    return stem if dot else base
+
+
+def _processed_libraries_root():
+    run_dir = getattr(rt, "run_dir", None) or os.getcwd()
+    root = os.path.join(os.path.abspath(os.path.expanduser(str(run_dir))), "processed_libraries")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _processed_subdir_for_input(alib):
+    src = os.path.abspath(os.path.expanduser(str(alib)))
+    digest = hashlib.blake2s(src.encode("utf-8"), digest_size=6).hexdigest()
+    outdir = os.path.join(_processed_libraries_root(), f"src_{digest}")
+    os.makedirs(outdir, exist_ok=True)
+    return outdir
+
+
 def _fas_output_for_input(alib):
-    return f"{alib.rpartition('.')[0]}.fas"
+    return os.path.join(_processed_subdir_for_input(alib), f"{_input_stem(alib)}.fas")
+
+
+def _sum_output_for_fas(fas_path):
+    return f"{fas_path.rpartition('.')[0]}.sum"
 
 def _materialize_fas_from_gz_if_needed(fas_path):
     """
@@ -111,6 +142,8 @@ def _logical_fas_available(fas_path):
 def _processing_mode_name():
     if libformat == "F":
         return "dedup_process"
+    if libformat == "Q":
+        return "fastq_process"
     return "filter_process"
 
 
@@ -190,7 +223,12 @@ def _record_compat_fasta_md5(cfg, fas_path):
 
 
 def _check_input_formats(libs_to_process):
-    check_func = libprep.isfasta if libformat == "F" else libprep.isfiletagcount
+    if libformat == "F":
+        check_func = libprep.isfasta
+    elif libformat == "Q":
+        check_func = libprep.isfastq
+    else:
+        check_func = libprep.isfiletagcount
     print("Checking format:")
     format_results = run_parallel_with_progress(
         check_func, libs_to_process, desc="Checking format"
@@ -202,11 +240,22 @@ def _check_input_formats(libs_to_process):
 
 
 
+def _process_single_library_job(job):
+    alib, out_fas = job
+    out_sum = _sum_output_for_fas(out_fas)
+
+    if libformat == "F":
+        return libprep.dedup_process(alib, out_fas=out_fas, out_sum=out_sum)
+    if libformat == "Q":
+        return libprep.fastq_process(alib, out_fas=out_fas, out_sum=out_sum)
+    return libprep.filter_process(alib, out_fas=out_fas, out_sum=out_sum)
+
+
 def _process_input_libraries(libs_to_process):
-    proc_func = libprep.dedup_process if libformat == "F" else libprep.filter_process
+    jobs = [(alib, _fas_output_for_input(alib)) for alib in libs_to_process]
     print("Processing libraries:")
     proc_results = run_parallel_with_progress(
-        proc_func, libs_to_process, desc="Filtering/Converting"
+        _process_single_library_job, jobs, desc="Filtering/Converting"
     )
     if _runtime_errors(proc_results):
         sys.exit("One or more libraries failed during filtering/conversion; see errors above.")
@@ -340,7 +389,7 @@ def libraryprocess(libs):
     if concat_libs:
         if not libs_processed:
             sys.exit("No processed libraries available to concatenate.")
-        merged_dir = os.path.dirname(libs_processed[0]) or os.getcwd()
+        merged_dir = _processed_libraries_root()
         merged_basename = "ALL_LIBS"
         merged_path = os.path.join(merged_dir, f"{merged_basename}.fas")
         merged_sig = _merged_input_signature(libs_processed)

@@ -83,6 +83,7 @@ Phasis uses **two locations**:
    - Intermediate files (e.g., `21_candidate.loci_table.tab`, `21_processed_clusters.tab`, etc.)
    - Reusable caches such as:
      - `index/` (HISAT2 index)
+     - `processed_libraries/` (processed versions of input libraries, stored as `.fas.gz` for reuse)
      - `phasis.mem` (hash cache that decides what can be reused across runs/phases)
 
 2) **Output directory (`--outdir`)**  
@@ -145,21 +146,31 @@ In the filenames below, `{method}` is the classifier used for the run, currently
 
 ## Common options
 
+- `-libs`: input libraries to process; accepted formats depend on `-libformat` and can be plain text or `.gz`
+- `-reference`: genome or transcriptome reference FASTA; can be plain text or `.gz`
 - `-maxhits` (default: 25): `-k` passed to hisat2
 - `-runtype` (default: G): `G` genome | `T` transcriptome | `S` scaffolded genome
 - `-mindepth` (default: 2): minimum depth for p-value computation
 - `-uniqueRatioCut` (default: 0.2): filter for uniquely mapped reads
+- `-max_complexity` (default: 0.3): maximum complexity filter
 - `-mismat` (default: 0): mismatches allowed in mapping
+- `-libformat` (default: F): `F` FASTA | `T` tag-count | `Q` FASTQ
 - `-phase` (default: 21): phasing length (21 or 24 common)
 - `-clustbuffer` (default: 300): merging distance between clusters
 - `-phasisScoreCutoff` (default: 50 for 21; internally clamped for 24 to 250–300)
 - `-minClusterLength` (default: 350)
 - `-cores` (default: 0): 0 uses most free cores; `>0` sets exact core count
 - `-norm`: enable CP10M normalization (use `-norm_factor` to change factor; default `1e7`)
+- `-norm_factor` (default: `1e7`): normalization factor used when `-norm` is enabled
 - `-classifier` (default: KNN): `KNN` or `GMM`
 - `-steps` (default: both): `both` | `cfind` | `class`
+- `-class_cluster_file`: cluster file(s) to classify when running with `-steps class`
+- `-min_Howell_score` (default: 12.5): minimum Howell score used during classification/output filtering
+- `--concat_libs`: concatenate all input libraries into one virtual library before downstream analysis
+- `--outdir` (default: `{phase}_results`): directory for final outputs; supports `{phase}` in the name
 - `-cleanup`: cleanup-only mode; delete intermediate files but keep `index/`, keep the results directory, and keep only the index-related section of `phasis.mem`
 - `-cleanup_all` (alias: `-cleanup_index`): cleanup-only mode; delete intermediates, `index/`, and `phasis.mem`, while keeping the results directory
+- `-version`: print the installed Phasis version and exit
 
 ---
 
@@ -190,17 +201,18 @@ Notes:
 
 ## Input library formats
 
-Phasis accepts two library formats:
+Phasis accepts three library formats:
 
 - **FASTA** (`-libformat F`) — plain text or gzip-compressed (`.gz`)
 - **Tag-count** (`-libformat T`) — plain text or gzip-compressed (`.gz`); recommended when FASTA is large or contains many ambiguous bases.
+- **FASTQ** (`-libformat Q`) — quality-controlled FASTQ, plain text or gzip-compressed (`.gz`)
 
 The reference FASTA given to `-reference` can also be plain text or gzip-compressed (`.gz`).
+For any supported library input format, Phasis converts the processed library into an internal `.fas.gz` file and stores it under `processed_libraries/` in the run directory so it can be reused safely in later runs.
 
-### Convert FASTQ → FASTA
-Script: `support_scripts/fastq_to_fasta.sh`
+### Run directly from FASTQ
 ```bash
-bash support_scripts/fastq_to_fasta.sh sample.fq
+phasis -libs sample.fastq.gz other_sample.fastq.gz -reference genome.fa.gz -libformat Q
 ```
 
 ### Convert FASTA → tag-count
@@ -209,7 +221,7 @@ Script: `support_scripts/fastaToTag.py`
 python support_scripts/fastaToTag.py sample.fasta
 ```
 
-Then run Phasis:
+Then run Phasis, for example:
 ```bash
 phasis -libs *.tag -reference genome.fa -libformat T
 ```

@@ -28,6 +28,23 @@ def _open_text_maybe_gz(path):
         return gzip.open(path, "rt")
     return open(path, "r")
 
+
+def _input_stem(path):
+    base = os.path.basename(str(path))
+    if base.lower().endswith(".gz"):
+        base = base[:-3]
+    for ext in (".fastq", ".fq", ".fasta", ".fa", ".tag"):
+        if base.lower().endswith(ext):
+            return base[: -len(ext)]
+    stem, dot, _ = base.rpartition(".")
+    return stem if dot else base
+
+
+def _default_output_paths(alib, out_fas=None, out_sum=None):
+    countFile = out_fas if out_fas is not None else f"{_input_stem(alib)}.fas"
+    sumFile = out_sum if out_sum is not None else f"{countFile.rpartition('.')[0]}.sum"
+    return countFile, sumFile
+
 def isfasta(afile):
     '''
     test if file is fasta format
@@ -37,7 +54,7 @@ def isfasta(afile):
     fh_in.close()
     if not firstline.startswith('>') and len(firstline.split('\t')) > 1:
         print("\nERROR: File '%s' doesn't seems to be a FASTA" % (afile))
-        print("------Please provide correct setting for 'libformat' in 'phasis.set'")
+        print("------Please provide correct setting for '-libformat'")
         abool = False
     else:
         abool = True
@@ -52,21 +69,38 @@ def isfiletagcount(afile):
     fh_in.close()
     if firstline.startswith('>') or len(firstline.split('\t')) != 2 :
         print("\nERROR: File '%s' doesn't seems to be tab-seprated tag-count format" % (afile))
-        print("------Please provide correct setting for 'libFormat' in 'phasis.set'")
+        print("------Please provide correct setting for '-libformat'")
         abool = False
     else:
         abool = True
     return abool
 
-def filter_process(alib):
+
+def isfastq(afile):
+    '''
+    test if file is FASTQ format
+    '''
+    fh_in = _open_text_maybe_gz(afile)
+    line1 = fh_in.readline()
+    line2 = fh_in.readline()
+    line3 = fh_in.readline()
+    line4 = fh_in.readline()
+    fh_in.close()
+    if not (line1.startswith('@') and bool(line2) and line3.startswith('+') and bool(line4)):
+        print("\nERROR: File '%s' doesn't seems to be a FASTQ" % (afile))
+        print("------Please provide correct setting for '-libformat'")
+        abool = False
+    else:
+        abool = True
+    return abool
+
+def filter_process(alib, out_fas=None, out_sum=None):
     '''
     filter tag count file for mindepth, and write
     to FASTA
     '''
     min_depth = int(_resolve_mindepth())
-    #print("Writing filtered FASTA for %s" % (alib))
-    asum = "%s.sum" % alib.rpartition('.')[0]    # Summary file
-    countFile   = "%s.fas" % alib.rpartition('.')[0]  ### Writing in de-duplicated FASTA format
+    countFile, asum = _default_output_paths(alib, out_fas=out_fas, out_sum=out_sum)
     fh_out      = open(countFile,'w')
     fh_in       = _open_text_maybe_gz(alib)
     aread       = fh_in.readlines()
@@ -88,14 +122,14 @@ def filter_process(alib):
     fh_out.close()
     return countFile
 
-def dedup_process(alib):
+def dedup_process(alib, out_fas=None, out_sum=None):
     '''
     To parallelize the process
     '''
     print("#### Fn: De-duplicater #######################")
     afastaL     = dedup_fastatolist(alib)         ## Read
     acounter    = deduplicate(afastaL )           ## De-duplicate
-    fastafile   = dedup_writer(acounter,alib)     ## Write
+    fastafile   = dedup_writer(acounter, alib, out_fas=out_fas, out_sum=out_sum)     ## Write
     return fastafile
 
 def dedup_fastatolist(alib):
@@ -132,16 +166,14 @@ def deduplicate(afastaL):
     dedup_end   = time.time()
     return acounter
 
-def dedup_writer(acounter,alib):
+def dedup_writer(acounter,alib, out_fas=None, out_sum=None):
     '''
     filter tag counts for 'mindepth' parameter, writes a dict
     pickle and filtered fasta file
     '''
     min_depth = int(_resolve_mindepth())
     print("Writing filtered FASTA for %s" % (alib))
-    sumFile = "%s.sum" % alib.rpartition('.')[0]    # Summary file
-
-    countFile   = "%s.fas" % alib.rpartition('.')[0]  ### Writing in de-duplicated FASTA format as required for phaster-core
+    countFile, sumFile = _default_output_paths(alib, out_fas=out_fas, out_sum=out_sum)
     fh_out      = open(countFile,'w')
     wcount      = 0 ## tags written
     bcount      = 0 ## tags excluded
@@ -158,6 +190,39 @@ def dedup_writer(acounter,alib):
     #print("Library %s - tag written:%s | tags filtered:%s" % (alib,wcount,bcount))
     fh_out.close()
     return countFile
+
+
+def fastq_process(alib, out_fas=None, out_sum=None):
+    '''
+    Converts a quality-controlled FASTQ into de-duplicated FASTA counts.
+    '''
+    print("#### Fn: FASTQ Processor #####################")
+    seq_counter = collections.Counter()
+    fh_in = _open_text_maybe_gz(alib)
+    read_count = 0
+
+    while True:
+        header = fh_in.readline()
+        if not header:
+            break
+        seq = fh_in.readline()
+        plus = fh_in.readline()
+        qual = fh_in.readline()
+
+        if not seq or not plus or not qual:
+            fh_in.close()
+            raise RuntimeError(f"Incomplete FASTQ record in {alib}")
+
+        if not header.startswith('@') or not plus.startswith('+'):
+            fh_in.close()
+            raise RuntimeError(f"Malformed FASTQ record in {alib}")
+
+        seq_counter[seq.rstrip('\n')] += 1
+        read_count += 1
+
+    fh_in.close()
+    print("Cached FASTQ file: %s | Reads: %s" % (alib, read_count))
+    return dedup_writer(seq_counter, alib, out_fas=out_fas, out_sum=out_sum)
 
 def merge_processed_fastas(fas_paths, out_dir, out_basename, mindepth):
     """

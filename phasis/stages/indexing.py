@@ -266,7 +266,7 @@ def indexBuilder(reference, ncores):
         print("Script will exit now")
         sys.exit()
 
-    print("Generating MD5 hash for HiSat2 index")
+    print("Generating fingerprint for HiSat2 index")
     try:
         refHash, indexHash, _index_marker = index_integrity.compute_index_fingerprints(
             reference=reference,
