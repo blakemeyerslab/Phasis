@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import time
+import gzip
 
 from phasis import runtime as rt
 import phasis.cache as cache
@@ -77,6 +78,37 @@ def _flush_refclean_record(cur_clean, seq_chunks, fh_out1, fh_out2):
     return 0, 1
 
 
+def _open_text_maybe_gz(path):
+    if str(path).lower().endswith(".gz"):
+        return gzip.open(path, "rt")
+    return open(path, "r")
+
+
+def _archive_file_to_gz(path):
+    gz_path = f"{path}.gz"
+    if not os.path.isfile(path):
+        if os.path.isfile(gz_path):
+            return gz_path
+        return None
+
+    tmp_path = f"{gz_path}.tmp"
+
+    try:
+        with open(path, "rb") as src, open(tmp_path, "wb") as raw_dst:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0) as dst:
+                shutil.copyfileobj(src, dst)
+        os.replace(tmp_path, gz_path)
+        os.remove(path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    return gz_path
+
+
 def refClean(filename):
     """
     Cleans FASTA file - multi-line fasta to single line, header clean, empty lines removal.
@@ -103,7 +135,7 @@ def refClean(filename):
 
     chr_re = re.compile(r'^(?:chr|Chr|CHR)?0*([0-9]+)$')
 
-    with open(filename, "r") as fh:
+    with _open_text_maybe_gz(filename) as fh:
         for line in fh:
             if not line.startswith(">"):
                 continue
@@ -178,7 +210,7 @@ def refClean(filename):
     with open(fastaclean, "w") as fh_out1, open(fastasumm, "w") as fh_out2:
         fh_out2.write("Name\tLen\n")
 
-        with open(filename, "r") as fh:
+        with _open_text_maybe_gz(filename) as fh:
             for line in fh:
                 line = line.rstrip("\n")
                 if line.startswith(">"):
@@ -258,6 +290,7 @@ def indexBuilder(reference, ncores):
         maxhits=maxhits,
         mismat=mismat,
     )
+    _archive_file_to_gz(fastaclean)
     print("Index prepared:%s\n" % (genoIndex))
     return genoIndex
 

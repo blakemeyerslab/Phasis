@@ -149,6 +149,7 @@ CLEANUP_PATTERNS = [
     "suffix:.count",
     "suffix:.sum",
     "suffix:.clean.fa",
+    "suffix:.clean.fa.gz",
     "suffix:.summ.txt",
     "suffix:.chrom_id_map.tsv",
     "suffix:.lclust",

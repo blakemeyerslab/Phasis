@@ -68,18 +68,11 @@ wget "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSM3466699&format=file&file
 # Download the maize genome B73_RefGen_v2/AGPv2
 wget https://download.maizegdb.org/B73_RefGen_v2/B73_RefGen_v2.fa.gz
 
-# Decompress files
-gzip -d B73_RefGen_v2.fa.gz
-gzip -d sTR_dcl5_1_2.0.tag.gz
-gzip -d W23_2.0_2.tag.gz
-gzip -d sTP_dcl5_1_2.0.tag.gz
-gzip -d W23_2.0_1.tag.gz
-
 # Detect 21-PHAS
-phasis -mindepth 1 -phase 21 -libformat T -classifier KNN -reference B73_RefGen_v2.fa -cores 12 -maxhits 25 -libs sTR_dcl5_1_2.0.tag W23_2.0_2.tag sTP_dcl5_1_2.0.tag W23_2.0_1.tag
+phasis -mindepth 1 -phase 21 -libformat T -classifier KNN -reference B73_RefGen_v2.fa.gz -cores 12 -maxhits 25 -libs sTR_dcl5_1_2.0.tag.gz W23_2.0_2.tag.gz sTP_dcl5_1_2.0.tag.gz W23_2.0_1.tag.gz
 
 # Detect 24-PHAS (same run directory allows reuse of the HISAT2 index)
-phasis -mindepth 1 -phase 24 -libformat T -classifier KNN -reference B73_RefGen_v2.fa -cores 12 -maxhits 25 -libs sTR_dcl5_1_2.0.tag W23_2.0_2.tag sTP_dcl5_1_2.0.tag W23_2.0_1.tag
+phasis -mindepth 1 -phase 24 -libformat T -classifier KNN -reference B73_RefGen_v2.fa.gz -cores 12 -maxhits 25 -libs sTR_dcl5_1_2.0.tag.gz W23_2.0_2.tag.gz sTP_dcl5_1_2.0.tag.gz W23_2.0_1.tag.gz
 ```
 
 ## How Phasis writes files (important)
@@ -199,8 +192,10 @@ Notes:
 
 Phasis accepts two library formats:
 
-- **FASTA** (`-libformat F`)
-- **Tag-count** (`-libformat T`) — recommended when FASTA is large or contains many ambiguous bases.
+- **FASTA** (`-libformat F`) — plain text or gzip-compressed (`.gz`)
+- **Tag-count** (`-libformat T`) — plain text or gzip-compressed (`.gz`); recommended when FASTA is large or contains many ambiguous bases.
+
+The reference FASTA given to `-reference` can also be plain text or gzip-compressed (`.gz`).
 
 ### Convert FASTQ → FASTA
 Script: `support_scripts/fastq_to_fasta.sh`

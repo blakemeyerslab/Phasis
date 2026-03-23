@@ -1,6 +1,7 @@
 import os
 import time
 import collections
+import gzip
 import phasis.runtime as rt
 
 # Module-level default used by legacy-style call sites.
@@ -21,11 +22,17 @@ def _resolve_mindepth():
         "mindepth is not initialized in phasis.libprep; ensure the runtime snapshot is available to workers"
     )
 
+
+def _open_text_maybe_gz(path):
+    if str(path).lower().endswith(".gz"):
+        return gzip.open(path, "rt")
+    return open(path, "r")
+
 def isfasta(afile):
     '''
     test if file is fasta format
     '''
-    fh_in       = open(afile,'r')
+    fh_in       = _open_text_maybe_gz(afile)
     firstline   = fh_in.readline()
     fh_in.close()
     if not firstline.startswith('>') and len(firstline.split('\t')) > 1:
@@ -40,7 +47,7 @@ def isfiletagcount(afile):
     '''
     test if file is tab seprated tag and counts file
     '''
-    fh_in       = open(afile,'r')
+    fh_in       = _open_text_maybe_gz(afile)
     firstline   = fh_in.readline()
     fh_in.close()
     if firstline.startswith('>') or len(firstline.split('\t')) != 2 :
@@ -61,7 +68,7 @@ def filter_process(alib):
     asum = "%s.sum" % alib.rpartition('.')[0]    # Summary file
     countFile   = "%s.fas" % alib.rpartition('.')[0]  ### Writing in de-duplicated FASTA format
     fh_out      = open(countFile,'w')
-    fh_in       = open(alib,'r')
+    fh_in       = _open_text_maybe_gz(alib)
     aread       = fh_in.readlines()
     bcount      = 0 ## tags written
     ccount      = 0 ## tags excluded
@@ -98,7 +105,7 @@ def dedup_fastatolist(alib):
     ## Output
     fastaL      = [] ## List that holds FASTA tags
     ## input
-    fh_in       = open(alib,'r')
+    fh_in       = _open_text_maybe_gz(alib)
     print("Reading FASTA file:%s" % (alib))
     read_start  = time.time()
     acount      = 0
