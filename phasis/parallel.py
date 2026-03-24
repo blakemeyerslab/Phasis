@@ -12,7 +12,12 @@ def run_parallel_with_progress(
     return_results=True,   # If False and on_result provided, we won’t keep a results list
     start_method=None,     # Optional: 'spawn' / 'fork' / 'forkserver'
     kind="compute",        # Passed to make_pool (e.g., 'plot' -> sets MPLBACKEND=Agg)
-    snapshot_path=None     # Optional explicit runtime snapshot path
+    snapshot_path=None,    # Optional explicit runtime snapshot path
+    maxtasksperchild=1,    # Reuse workers more for cheap tasks when caller opts in
+    adaptive_recovery=False,
+    recovery_success_slices=2,
+    recovery_progress_fraction=0.05,
+    recovery_growth_factor=2.0,
 ):
 
     """
@@ -20,6 +25,8 @@ def run_parallel_with_progress(
       - Streams results via imap_unordered (low peak memory).
       - On any pool failure, automatically retries the current slice with
         smaller (chunk_size, nworkers): [proposed] -> 10 -> 5 -> 1; workers n->8->4->2->1.
+      - Optional adaptive recovery can re-expand chunk_size/workers after a
+        stretch of successful reduced-mode slices.
       - maxtasksperchild=1 to fight per-worker RSS growth.
       - BLAS single-threaded to avoid hidden fan-out.
 
@@ -35,9 +42,16 @@ def run_parallel_with_progress(
         ncores = multiprocessing.cpu_count()
 
     # Initial chunk size & workers
-    chunk_size = _compute_initial_chunk_size(n_data, ncores, unit, min_chunk, batch_factor)
-    #print(f"initial chunk size set to {chunk_size}")
-    nworkers = min(ncores, chunk_size) or 1
+    initial_chunk_size = _compute_initial_chunk_size(n_data, ncores, unit, min_chunk, batch_factor)
+    chunk_size = initial_chunk_size
+    initial_nworkers = min(ncores, chunk_size) or 1
+    nworkers = initial_nworkers
+    success_slices_since_failure = 0
+    items_since_failure = 0
+    recovery_progress_items = _compute_recovery_progress_items(
+        n_data,
+        recovery_progress_fraction,
+    )
 
     # Decide whether to accumulate results or stream-only
     keep_results = (on_result is None) or return_results
@@ -46,6 +60,36 @@ def run_parallel_with_progress(
     i = 0
     with tqdm(total=n_data, desc=desc, unit=unit) as pbar:
         while i < n_data:
+            if adaptive_recovery and (
+                chunk_size < initial_chunk_size or nworkers < initial_nworkers
+            ):
+                if (
+                    success_slices_since_failure >= max(1, int(recovery_success_slices))
+                    and items_since_failure >= recovery_progress_items
+                ):
+                    prev_chunk_size = chunk_size
+                    prev_nworkers = nworkers
+                    chunk_size = _grow_parallel_setting(
+                        chunk_size,
+                        initial_chunk_size,
+                        growth_factor=recovery_growth_factor,
+                    )
+                    nworkers = min(
+                        ncores,
+                        chunk_size,
+                        _grow_parallel_setting(
+                            nworkers,
+                            initial_nworkers,
+                            growth_factor=recovery_growth_factor,
+                        ),
+                    ) or 1
+                    success_slices_since_failure = 0
+                    items_since_failure = 0
+                    if chunk_size != prev_chunk_size or nworkers != prev_nworkers:
+                        print(
+                            f"[INFO] Re-expanding parallelism to chunk_size={chunk_size}, workers={nworkers}."
+                        )
+
             start = i
             end = min(i + chunk_size, n_data)
             proposed = end - start if end > start else 1
@@ -59,25 +103,30 @@ def run_parallel_with_progress(
 
             slice_completed = False
             last_exception = None
+            slice_had_failure = False
+            slice_progress = 0
 
             for local_chunk_size in try_sizes:
                 end = min(start + local_chunk_size, n_data)
                 chunk = data[start:end]
 
                 # Worker trials, decreasing
-                worker_trials = []
-                for w in (nworkers,16, 12, 10, 8, 4, 2, 1):
-                    w = int(max(1, min(w, local_chunk_size, ncores)))
-                    if w not in worker_trials:
-                        worker_trials.append(w)
+                worker_trials = _worker_trial_ladder(nworkers, local_chunk_size, ncores)
 
                 for nw in worker_trials:
                     # Try streaming this chunk with nw workers
                     try:
-                        with make_pool(nw, start_method=start_method, kind=kind, snapshot_path=snapshot_path) as pool:
+                        with make_pool(
+                            nw,
+                            start_method=start_method,
+                            kind=kind,
+                            snapshot_path=snapshot_path,
+                            maxtasksperchild=maxtasksperchild,
+                        ) as pool:
                             # Stream results; avoid big intermediate lists
                             for res in pool.imap_unordered(safe_worker, ((func, arg) for arg in chunk), chunksize=1):
                                 if isinstance(res, RuntimeError):
+                                    slice_had_failure = True
                                     # Retry failed item serially for deterministic logging
                                     idx = None  # only for clarity; we stream, so idx is not needed
                                     retry_res = safe_worker((func, chunk[0])) if False else res  # no-op placeholder
@@ -108,6 +157,7 @@ def run_parallel_with_progress(
                                             print(f"[ERROR] Serial retry failed for arg: {arg}\n{retry}")
                                             if on_result: on_result(retry)
                                             if keep_results: results.append(retry)
+                                    slice_progress = end - start
                                     # Break out of this chunk; move to next slice
                                     break
                                 else:
@@ -116,6 +166,7 @@ def run_parallel_with_progress(
                                     if keep_results:
                                         results.append(res)
                                     pbar.update(1)
+                                    slice_progress += 1
 
                             # If we reached here without exceptions, the chunk is done
                             slice_completed = True
@@ -131,16 +182,25 @@ def run_parallel_with_progress(
                         break  # worker_trials loop
                     except MemoryError as e:
                         last_exception = e
+                        slice_had_failure = True
                         print(f"\n[WARN] MemoryError on slice [{start}:{end}] size={local_chunk_size}, nworkers={nw}. Trying smaller.\n")
                     except Exception as e:
                         last_exception = e
+                        slice_had_failure = True
                         print(f"\n[WARN] Pool error on slice [{start}:{end}] size={local_chunk_size}, nworkers={nw}: {e}\nTrying smaller.\n")
 
                 if slice_completed:
-                    # Mark progress for any remaining items in this slice (if failures were handled serially we already updated)
-                    remaining = (end - start) - 0  # all streamed accounted for
+                    remaining = (end - start) - slice_progress
                     if remaining > 0:
                         pbar.update(remaining)
+                        slice_progress += remaining
+
+                    if slice_had_failure:
+                        success_slices_since_failure = 0
+                        items_since_failure = 0
+                    else:
+                        success_slices_since_failure += 1
+                        items_since_failure += (end - start)
                     break  # size loop
 
             # If pool attempts all failed for this slice, do serial for this slice
@@ -152,7 +212,15 @@ def run_parallel_with_progress(
                         on_result(res)
                     if keep_results:
                         results.append(res)
-                pbar.update(end - start)
+                    pbar.update(1)
+                    slice_progress += 1
+
+                # If even 1-worker pool attempts failed, move to the most
+                # conservative mode and let adaptive recovery climb back up later.
+                chunk_size = 1
+                nworkers = 1
+                success_slices_since_failure = 0
+                items_since_failure = 0
 
             # Advance window and do some housekeeping
             i = end
@@ -179,6 +247,37 @@ def _compute_initial_chunk_size(n_data: int, ncores_local: int, unit: str, min_c
         chunk_size = max(chunk_size, max_chunk_size)
         #print(f" Initial chunk_size set to {chunk_size}")
     return max(1, chunk_size)
+
+
+def _compute_recovery_progress_items(n_data: int, recovery_progress_fraction: float) -> int:
+    try:
+        fraction = float(recovery_progress_fraction)
+    except Exception:
+        fraction = 0.05
+    fraction = min(max(fraction, 0.0), 1.0)
+    return max(1, int(n_data * fraction))
+
+
+def _grow_parallel_setting(current: int, target: int, *, growth_factor: float = 2.0) -> int:
+    current = int(max(1, current))
+    target = int(max(1, target))
+    if current >= target:
+        return target
+    try:
+        grown = int(round(current * float(growth_factor)))
+    except Exception:
+        grown = current * 2
+    return min(target, max(current + 1, grown))
+
+
+def _worker_trial_ladder(preferred_workers: int, local_chunk_size: int, ncores: int) -> list[int]:
+    ceiling = int(max(1, min(preferred_workers, local_chunk_size, ncores)))
+    worker_trials = [ceiling]
+    for w in (16, 12, 10, 8, 4, 2, 1):
+        w = int(max(1, min(w, ceiling)))
+        if w not in worker_trials:
+            worker_trials.append(w)
+    return worker_trials
 
 
 def _infer_runtime_snapshot_path():
@@ -231,12 +330,12 @@ def _pool_initializer(snapshot_path, kind):
 
 
 def make_pool(nworkers: int | None = None, *, processes: int | None = None, start_method: str | None = None,
-             kind: str = "compute", snapshot_path: str | None = None):
+             kind: str = "compute", snapshot_path: str | None = None, maxtasksperchild: int | None = 1):
     """
     Pool with safer defaults to limit RAM spikes.
 
     - BLAS threads set to 1.
-    - maxtasksperchild=1.
+    - maxtasksperchild defaults to 1, but callers can opt into worker reuse.
     - macOS: spawn by default (safe for ObjC/matplotlib).
     - Linux: fork by default.
 
@@ -253,6 +352,8 @@ def make_pool(nworkers: int | None = None, *, processes: int | None = None, star
     if processes is not None:
         nworkers = processes
     nworkers = int(max(1, nworkers or 1))
+    if maxtasksperchild is not None:
+        maxtasksperchild = int(max(1, maxtasksperchild))
 
     if start_method is None:
         # Allow override from runtime/env. On Linux, prefer forkserver over fork to
@@ -275,7 +376,7 @@ def make_pool(nworkers: int | None = None, *, processes: int | None = None, star
 
     return ctx.Pool(
         processes=nworkers,
-        maxtasksperchild=1,
+        maxtasksperchild=maxtasksperchild,
         initializer=_pool_initializer,
         initargs=(snapshot_path, kind),
     )

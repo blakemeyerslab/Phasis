@@ -52,12 +52,30 @@ def _flush_prev_cluster(prev_merged, clustid, clustlen_cutoff, clustdict_long, c
 
 
 CLUSTER_BUILD_SECTION = "CLUSTER_BUILD"
+CLUSTER_BUILD_RECOVERY_SUCCESS_SLICES = 2
+CLUSTER_BUILD_RECOVERY_PROGRESS_FRACTION = 0.05
+CLUSTER_BUILD_MAXTASKSPERCHILD = 16
 
 
 def _ensure_cluster_sections(cfg: configparser.ConfigParser) -> None:
     for section in (CLUSTER_BUILD_SECTION, "CLUSTERED"):
         if not cfg.has_section(section):
             cfg.add_section(section)
+
+
+def _cluster_batch_limit() -> int:
+    """
+    Use larger clustering batches on high-core systems so scaffold-heavy runs
+    can keep more lib-chr jobs in flight.
+    """
+    ncores = getattr(rt, "ncores", None)
+    try:
+        ncores = int(ncores) if ncores is not None else 0
+    except Exception:
+        ncores = 0
+    if ncores <= 0:
+        ncores = multiprocessing.cpu_count()
+    return max(10, min(ncores * 2, 128))
 
 
 def _cluster_output_paths_for_akey(clustfolder: str, akey: str) -> tuple[str, str]:
@@ -204,7 +222,7 @@ def alt_parallel_process(func, data_chunks):
         ncores = multiprocessing.cpu_count()
     max_workers = int(ncores)
 
-    with make_pool(max_workers) as pool:
+    with make_pool(max_workers, maxtasksperchild=CLUSTER_BUILD_MAXTASKSPERCHILD) as pool:
         for result in pool.imap_unordered(func, data_chunks, chunksize=1):
             yield result
 
@@ -213,7 +231,14 @@ def process_cluster_batch(batch, batch_id):
     """Run one clustering batch and return results."""
     try:
         return run_parallel_with_progress(
-            getclusters, batch, desc=f"Clustering batch {batch_id}", unit="lib-chr"
+            getclusters,
+            batch,
+            desc=f"Clustering batch {batch_id}",
+            unit="lib-chr",
+            maxtasksperchild=CLUSTER_BUILD_MAXTASKSPERCHILD,
+            adaptive_recovery=True,
+            recovery_success_slices=CLUSTER_BUILD_RECOVERY_SUCCESS_SLICES,
+            recovery_progress_fraction=CLUSTER_BUILD_RECOVERY_PROGRESS_FRACTION,
         )
     except Exception as e:
         print(f"[WARN] run_parallel_with_progress failed on batch {batch_id}: {e}")
@@ -354,7 +379,7 @@ def clusterprocess(libs_poscountdict, clustfolder):
     sig_by_output: dict[str, str] = {}
     compat_dirty = False
 
-    CLUSTER_CHUNK_MAX = 10
+    CLUSTER_CHUNK_MAX = _cluster_batch_limit()
     batch = []
     batch_index = 0
 
