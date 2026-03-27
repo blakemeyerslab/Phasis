@@ -6,7 +6,7 @@ import hashlib
 
 from phasis import libprep
 from phasis import runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, stage_signature
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, sig_key, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 # Stage-local globals (only what libraryprocess needs)
@@ -70,6 +70,16 @@ def _fas_output_for_input(alib):
 
 def _sum_output_for_fas(fas_path):
     return f"{fas_path.rpartition('.')[0]}.sum"
+
+
+def _cache_debug_enabled():
+    value = str(os.environ.get("PHASIS_CACHE_DEBUG", "")).strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
+
+def _cache_debug(msg):
+    if _cache_debug_enabled():
+        print(f"[PHASIS:CACHE] {msg}")
 
 def _materialize_fas_from_gz_if_needed(fas_path):
     """
@@ -160,6 +170,25 @@ def _archive_fas_job(fas_path):
     return fas_path, _archive_fas_to_gz(fas_path)
 
 
+def _inspect_processed_library_cache_job(job):
+    alib, fas_path = job
+    sync_from_runtime()
+
+    input_sig = _library_input_signature(alib)
+    input_md5 = compute_md5_str(alib) or ""
+    fas_exists = os.path.isfile(fas_path)
+    fas_fp = compute_md5_str(fas_path) or "" if fas_exists else ""
+
+    return {
+        "alib": alib,
+        "fas_path": fas_path,
+        "input_sig": input_sig,
+        "input_md5": input_md5,
+        "fas_exists": fas_exists,
+        "fas_fp": fas_fp,
+    }
+
+
 def _parallel_materialize_fas(paths, *, desc):
     unique_paths = _unique_paths(paths)
     if not unique_paths:
@@ -200,6 +229,116 @@ def _parallel_archive_fas(paths, *, desc):
     for path, artifact_path in results:
         archived_by_path[path] = artifact_path
     return archived_by_path
+
+
+def _parallel_inspect_processed_library_cache(libs, expected_fas, *, desc):
+    jobs = list(zip(libs, expected_fas))
+    if not jobs:
+        return {}
+
+    results = run_parallel_with_progress(
+        _inspect_processed_library_cache_job,
+        jobs,
+        desc=desc,
+        unit="lib",
+        maxtasksperchild=LIBRARY_IO_MAXTASKSPERCHILD,
+    )
+    if _runtime_errors(results):
+        sys.exit("One or more processed-library cache inspection jobs failed; see errors above.")
+
+    return {item["fas_path"]: item for item in results}
+
+
+def _library_cache_hit_from_inspection(cfg, section, fas_path, input_sig, *, fas_exists, fas_fp):
+    if not fas_path:
+        _cache_debug(f"MISS section={section} out=<empty> reason=empty_outpath")
+        return False
+    if not fas_exists:
+        _cache_debug(f"MISS section={section} out={fas_path} reason=missing_file")
+        return False
+
+    prev_fp = (cfg[section].get(fas_path) or "").strip() if cfg.has_section(section) else ""
+    if not prev_fp:
+        _cache_debug(f"MISS section={section} out={fas_path} reason=not_registered")
+        return False
+    if not fas_fp:
+        _cache_debug(f"MISS section={section} out={fas_path} reason=fingerprint_failed")
+        return False
+    if prev_fp != fas_fp:
+        _cache_debug(
+            f"MISS section={section} out={fas_path} reason=fingerprint_mismatch prev={prev_fp} cur={fas_fp}"
+        )
+        return False
+
+    if input_sig is None:
+        _cache_debug(f"HIT  section={section} out={fas_path} mode=hash_only")
+        return True
+
+    prev_sig = (cfg[section].get(sig_key(fas_path)) or "").strip() if cfg.has_section(section) else ""
+    if not prev_sig:
+        _cache_debug(f"MISS section={section} out={fas_path} reason=signature_not_registered")
+        return False
+    if prev_sig != input_sig:
+        _cache_debug(
+            f"MISS section={section} out={fas_path} reason=signature_mismatch prev={prev_sig} cur={input_sig}"
+        )
+        return False
+
+    _cache_debug(f"HIT  section={section} out={fas_path} mode=hash+sig")
+    return True
+
+
+def _legacy_input_cache_hit_from_inspection(cfg, alib, cur_input_md5, *, fas_exists):
+    prev_input_md5 = (cfg["LIBRARIES"].get(alib) or "").strip()
+    if not prev_input_md5 or not cur_input_md5:
+        return False
+    if prev_input_md5 != cur_input_md5:
+        return False
+    if not fas_exists:
+        return False
+    return True
+
+
+def _record_compat_fasta_fp(cfg, fas_path, fas_fp):
+    if not fas_path.endswith(".fas"):
+        return False
+    if not fas_fp:
+        return False
+    prev = (cfg["FASTAS"].get(fas_path) or "").strip()
+    if prev == fas_fp:
+        return False
+    cfg["FASTAS"][fas_path] = fas_fp
+    return True
+
+
+def _record_cache_entry(cache, section, outpath, *, output_fp, input_sig=None):
+    if not outpath or not output_fp:
+        if not outpath:
+            _cache_debug(f"RECORD_SKIP section={section} out=<empty> reason=empty_outpath")
+        else:
+            _cache_debug(f"RECORD_SKIP section={section} out={outpath} reason=fingerprint_failed")
+        return False
+
+    changed = False
+    cache.ensure(section)
+
+    prev_fp = cache.get(section, outpath)
+    if prev_fp != output_fp:
+        cache.set(section, outpath, output_fp)
+        changed = True
+
+    if input_sig is not None:
+        sigpath = sig_key(outpath)
+        prev_sig = cache.get(section, sigpath)
+        if prev_sig != input_sig:
+            cache.set(section, sigpath, input_sig)
+            changed = True
+
+    if changed:
+        _cache_debug(
+            f"REC  section={section} out={outpath} fp={output_fp} sig={'<none>' if input_sig is None else input_sig}"
+        )
+    return changed
 
 def _processing_mode_name():
     if libformat == "F":
@@ -246,17 +385,6 @@ def _merged_input_signature(fas_paths):
         },
         extra=[os.path.basename(p) for p in fas_paths],
     )
-
-
-def _legacy_input_cache_hit(cfg, alib, fas_path, cur_input_md5):
-    prev_input_md5 = (cfg["LIBRARIES"].get(alib) or "").strip()
-    if not prev_input_md5 or not cur_input_md5:
-        return False
-    if prev_input_md5 != cur_input_md5:
-        return False
-    if not os.path.isfile(fas_path):
-        return False
-    return True
 
 
 def _record_compat_input_md5(cfg, alib, md5hex):
@@ -379,28 +507,51 @@ def libraryprocess(libs):
     input_md5s = {}
     trusted_fas = set()
     compat_dirty = False
+    cache_dirty = False
 
     _parallel_materialize_fas(expected_fas, desc="Preparing processed libraries")
+    cache_inspection = _parallel_inspect_processed_library_cache(
+        libs,
+        expected_fas,
+        desc="Checking processed library cache",
+    )
 
     for alib, fas_path in zip(libs, expected_fas):
-        input_sig = _library_input_signature(alib)
-        if cache.hit(LIBRARY_PROCESSING_SECTION, fas_path, input_sig):
-            print(f"Cache hit for processed library: {alib}")
-            cur_input_md5 = compute_md5_str(alib) or ""
-            input_md5s[alib] = cur_input_md5
-            trusted_fas.add(fas_path)
-            compat_dirty = _record_compat_input_md5(config, alib, cur_input_md5) or compat_dirty
-            compat_dirty = _record_compat_fasta_md5(config, fas_path) or compat_dirty
-            continue
+        inspect = cache_inspection.get(fas_path, {})
+        input_sig = inspect.get("input_sig") or _library_input_signature(alib)
+        cur_input_md5 = inspect.get("input_md5", "")
+        fas_exists = bool(inspect.get("fas_exists"))
+        fas_fp = inspect.get("fas_fp", "")
 
-        cur_input_md5 = compute_md5_str(alib) or ""
         input_md5s[alib] = cur_input_md5
 
-        if legacy_mindepth_matches and _legacy_input_cache_hit(config, alib, fas_path, cur_input_md5):
-            print(f"Legacy cache matches for library: {alib}")
-            cache.record(LIBRARY_PROCESSING_SECTION, fas_path, input_sig)
+        if _library_cache_hit_from_inspection(
+            config,
+            LIBRARY_PROCESSING_SECTION,
+            fas_path,
+            input_sig,
+            fas_exists=fas_exists,
+            fas_fp=fas_fp,
+        ):
+            print(f"Cache hit for processed library: {alib}")
             trusted_fas.add(fas_path)
-            compat_dirty = _record_compat_fasta_md5(config, fas_path) or compat_dirty
+            compat_dirty = _record_compat_input_md5(config, alib, cur_input_md5) or compat_dirty
+            compat_dirty = _record_compat_fasta_fp(config, fas_path, fas_fp) or compat_dirty
+            continue
+
+        if legacy_mindepth_matches and _legacy_input_cache_hit_from_inspection(
+            config, alib, cur_input_md5, fas_exists=fas_exists
+        ):
+            print(f"Legacy cache matches for library: {alib}")
+            trusted_fas.add(fas_path)
+            compat_dirty = _record_compat_fasta_fp(config, fas_path, fas_fp) or compat_dirty
+            cache_dirty = _record_cache_entry(
+                cache,
+                LIBRARY_PROCESSING_SECTION,
+                fas_path,
+                output_fp=fas_fp,
+                input_sig=input_sig,
+            ) or cache_dirty
             continue
 
         if cur_input_md5:
@@ -421,6 +572,13 @@ def libraryprocess(libs):
             if p not in libs_all:
                 libs_all.append(p)
         libs_processed = libs_all
+        cache_inspection.update(
+            _parallel_inspect_processed_library_cache(
+                libs_to_process,
+                [_fas_output_for_input(alib) for alib in libs_to_process],
+                desc="Refreshing processed library cache",
+            )
+        )
     else:
         print("\nNo new libraries to process this time.")
         libs_processed = [p for p in expected_fas if os.path.exists(p)]
@@ -434,16 +592,27 @@ def libraryprocess(libs):
             trusted_fas.add(fas_path)
         if not os.path.isfile(fas_path):
             continue
+        inspect = cache_inspection.get(fas_path, {})
         input_md5 = input_md5s.get(alib)
         if input_md5 is None:
-            input_md5 = compute_md5_str(alib) or ""
+            input_md5 = inspect.get("input_md5", "") or compute_md5_str(alib) or ""
             input_md5s[alib] = input_md5
+        input_sig = inspect.get("input_sig") or _library_input_signature(alib)
+        fas_fp = inspect.get("fas_fp", "")
+        if not fas_fp:
+            fas_fp = compute_md5_str(fas_path) or ""
         compat_dirty = _record_compat_input_md5(config, alib, input_md5) or compat_dirty
-        compat_dirty = _record_compat_fasta_md5(config, fas_path) or compat_dirty
+        compat_dirty = _record_compat_fasta_fp(config, fas_path, fas_fp) or compat_dirty
         if fas_path in trusted_fas:
-            cache.record(LIBRARY_PROCESSING_SECTION, fas_path, _library_input_signature(alib))
+            cache_dirty = _record_cache_entry(
+                cache,
+                LIBRARY_PROCESSING_SECTION,
+                fas_path,
+                output_fp=fas_fp,
+                input_sig=input_sig,
+            ) or cache_dirty
 
-    if compat_dirty:
+    if compat_dirty or cache_dirty:
         cache.flush()
 
     _parallel_archive_fas(expected_fas, desc="Archiving processed libraries")
