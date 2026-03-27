@@ -169,6 +169,7 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
         chromosome_groups,
         desc="Assemble features",
         min_chunk=1,
+        adaptive_recovery=True,
         unit="lib-chr"
     )
 

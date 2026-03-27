@@ -14,7 +14,7 @@ def run_parallel_with_progress(
     kind="compute",        # Passed to make_pool (e.g., 'plot' -> sets MPLBACKEND=Agg)
     snapshot_path=None,    # Optional explicit runtime snapshot path
     maxtasksperchild=1,    # Reuse workers more for cheap tasks when caller opts in
-    adaptive_recovery=False,
+    adaptive_recovery=True,
     recovery_success_slices=2,
     recovery_progress_fraction=0.05,
     recovery_growth_factor=2.0,

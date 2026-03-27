@@ -17,6 +17,7 @@ outdir = None
 memFile = MEM_FILE_DEFAULT
 
 LIBRARY_PROCESSING_SECTION = "LIBRARY_PROCESSING"
+LIBRARY_IO_MAXTASKSPERCHILD = 16
 
 
 def _runtime_errors(results):
@@ -138,6 +139,67 @@ def _archive_fas_to_gz(fas_path):
 
 def _logical_fas_available(fas_path):
     return os.path.isfile(fas_path) or os.path.isfile(f"{fas_path}.gz")
+
+
+def _unique_paths(paths):
+    seen = set()
+    out = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def _materialize_fas_job(fas_path):
+    return fas_path, _materialize_fas_from_gz_if_needed(fas_path)
+
+
+def _archive_fas_job(fas_path):
+    return fas_path, _archive_fas_to_gz(fas_path)
+
+
+def _parallel_materialize_fas(paths, *, desc):
+    unique_paths = _unique_paths(paths)
+    if not unique_paths:
+        return {}
+
+    results = run_parallel_with_progress(
+        _materialize_fas_job,
+        unique_paths,
+        desc=desc,
+        unit="lib",
+        maxtasksperchild=LIBRARY_IO_MAXTASKSPERCHILD,
+    )
+    if _runtime_errors(results):
+        sys.exit("One or more processed-library materialization jobs failed; see errors above.")
+
+    resolved_by_path = {}
+    for path, resolved in results:
+        resolved_by_path[path] = resolved
+    return resolved_by_path
+
+
+def _parallel_archive_fas(paths, *, desc):
+    unique_paths = _unique_paths(paths)
+    if not unique_paths:
+        return {}
+
+    results = run_parallel_with_progress(
+        _archive_fas_job,
+        unique_paths,
+        desc=desc,
+        unit="lib",
+        maxtasksperchild=LIBRARY_IO_MAXTASKSPERCHILD,
+    )
+    if _runtime_errors(results):
+        sys.exit("One or more processed-library archive jobs failed; see errors above.")
+
+    archived_by_path = {}
+    for path, artifact_path in results:
+        archived_by_path[path] = artifact_path
+    return archived_by_path
 
 def _processing_mode_name():
     if libformat == "F":
@@ -318,8 +380,9 @@ def libraryprocess(libs):
     trusted_fas = set()
     compat_dirty = False
 
+    _parallel_materialize_fas(expected_fas, desc="Preparing processed libraries")
+
     for alib, fas_path in zip(libs, expected_fas):
-        _materialize_fas_from_gz_if_needed(fas_path)
         input_sig = _library_input_signature(alib)
         if cache.hit(LIBRARY_PROCESSING_SECTION, fas_path, input_sig):
             print(f"Cache hit for processed library: {alib}")
@@ -383,8 +446,7 @@ def libraryprocess(libs):
     if compat_dirty:
         cache.flush()
 
-    for fas_path in expected_fas:
-        _archive_fas_to_gz(fas_path)
+    _parallel_archive_fas(expected_fas, desc="Archiving processed libraries")
 
     if concat_libs:
         if not libs_processed:
@@ -394,21 +456,25 @@ def libraryprocess(libs):
         merged_path = os.path.join(merged_dir, f"{merged_basename}.fas")
         merged_sig = _merged_input_signature(libs_processed)
 
+        materialized_paths = _parallel_materialize_fas(
+            list(libs_processed) + [merged_path],
+            desc="Preparing libraries for concat",
+        )
         merge_inputs = []
         for fas_path in libs_processed:
-            resolved = _materialize_fas_from_gz_if_needed(fas_path)
+            resolved = materialized_paths.get(fas_path)
             if resolved and os.path.isfile(resolved):
                 merge_inputs.append(resolved)
 
-        _materialize_fas_from_gz_if_needed(merged_path)
         if cache.hit(LIBRARY_PROCESSING_SECTION, merged_path, merged_sig):
             print(f"[concat_libs] Reusing merged library: {merged_path}")
             compat_dirty = _record_compat_fasta_md5(config, merged_path) or compat_dirty
             if compat_dirty:
                 cache.flush()
-            _archive_fas_to_gz(merged_path)
-            for fas_path in libs_processed:
-                _archive_fas_to_gz(fas_path)
+            _parallel_archive_fas(
+                [merged_path] + list(libs_processed),
+                desc="Archiving processed libraries",
+            )
             return [merged_path]
 
         merged_path = libprep.merge_processed_fastas(
@@ -423,9 +489,10 @@ def libraryprocess(libs):
         cache.record(LIBRARY_PROCESSING_SECTION, merged_path, merged_sig)
         if compat_dirty:
             cache.flush()
-        _archive_fas_to_gz(merged_path)
-        for fas_path in libs_processed:
-            _archive_fas_to_gz(fas_path)
+        _parallel_archive_fas(
+            [merged_path] + list(libs_processed),
+            desc="Archiving processed libraries",
+        )
         return [merged_path]
 
     return [p for p in expected_fas if _logical_fas_available(p)]

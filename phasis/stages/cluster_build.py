@@ -55,6 +55,7 @@ CLUSTER_BUILD_SECTION = "CLUSTER_BUILD"
 CLUSTER_BUILD_RECOVERY_SUCCESS_SLICES = 2
 CLUSTER_BUILD_RECOVERY_PROGRESS_FRACTION = 0.05
 CLUSTER_BUILD_MAXTASKSPERCHILD = 16
+CLUSTER_SCAN_PROGRESS_INTERVAL = 250
 
 
 def _ensure_cluster_sections(cfg: configparser.ConfigParser) -> None:
@@ -94,6 +95,37 @@ def _cluster_build_input_signature(count_path: str, *, phase: int, clustbuffer: 
             "clustbuffer": int(clustbuffer),
         },
     )
+
+
+def _cluster_source_label(src, source_index: int, source_count: int) -> str:
+    if isinstance(src, str):
+        return os.path.basename(src) or str(src)
+    return f"in-memory source {source_index}/{source_count}"
+
+
+def _maybe_report_cluster_scan_progress(
+    source_label: str,
+    scanned: int,
+    total: int,
+    cache_hits: int,
+    queued: int,
+    *,
+    force: bool = False,
+) -> None:
+    if not force and scanned % CLUSTER_SCAN_PROGRESS_INTERVAL != 0:
+        return
+    if total > 0:
+        print(
+            f"[scan] {source_label}: planned {scanned}/{total} lib-chr groups "
+            f"(cache hits: {cache_hits}, queued: {queued})",
+            flush=True,
+        )
+    else:
+        print(
+            f"[scan] {source_label}: planned {scanned} lib-chr groups "
+            f"(cache hits: {cache_hits}, queued: {queued})",
+            flush=True,
+        )
 
 
 def _record_compat_cluster_md5(cfg: configparser.ConfigParser, lclust_path: str) -> bool:
@@ -378,13 +410,17 @@ def clusterprocess(libs_poscountdict, clustfolder):
     processed_akeys: list[str] = []
     sig_by_output: dict[str, str] = {}
     compat_dirty = False
+    total_cache_hits = 0
+    total_queued = 0
 
     CLUSTER_CHUNK_MAX = _cluster_batch_limit()
     batch = []
     batch_index = 0
 
-    for src in sources:
+    for source_index, src in enumerate(sources, start=1):
         input_sig = None
+        source_label = _cluster_source_label(src, source_index, len(sources))
+        print(f"[scan] Loading cluster inputs from {source_label}...", flush=True)
         if isinstance(src, str):
             try:
                 with open(src, "rb") as fh:
@@ -405,6 +441,15 @@ def clusterprocess(libs_poscountdict, clustfolder):
             print(f"[WARN] Unexpected type in libs_poscountdict: {type(src)} (skipping)")
             continue
 
+        source_total = len(libdict)
+        source_scanned = 0
+        source_cache_hits = 0
+        source_queued = 0
+        print(
+            f"[scan] Loaded {source_total} lib-chr groups from {source_label}; checking cache and queuing work...",
+            flush=True,
+        )
+
         for akey, positions in libdict.items():
             lclust_path, sclust_path = _cluster_output_paths_for_akey(clustfolder, akey)
 
@@ -419,6 +464,16 @@ def clusterprocess(libs_poscountdict, clustfolder):
                     compat_dirty = _record_compat_cluster_md5(cfg, lclust_path) or compat_dirty
                     results.append((akey, lclust_path, sclust_path))
                     processed_akeys.append(akey)
+                    source_scanned += 1
+                    source_cache_hits += 1
+                    total_cache_hits += 1
+                    _maybe_report_cluster_scan_progress(
+                        source_label,
+                        source_scanned,
+                        source_total,
+                        source_cache_hits,
+                        source_queued,
+                    )
                     continue
 
                 if os.path.isfile(lclust_path) and os.path.isfile(sclust_path):
@@ -431,6 +486,16 @@ def clusterprocess(libs_poscountdict, clustfolder):
                         _prune_old_clustered_entries(cfg, os.path.basename(lclust_path), lclust_path)
                         results.append((akey, lclust_path, sclust_path))
                         processed_akeys.append(akey)
+                        source_scanned += 1
+                        source_cache_hits += 1
+                        total_cache_hits += 1
+                        _maybe_report_cluster_scan_progress(
+                            source_label,
+                            source_scanned,
+                            source_total,
+                            source_cache_hits,
+                            source_queued,
+                        )
                         continue
             else:
                 if os.path.isfile(lclust_path):
@@ -440,9 +505,29 @@ def clusterprocess(libs_poscountdict, clustfolder):
                         _prune_old_clustered_entries(cfg, os.path.basename(lclust_path), lclust_path)
                         results.append((akey, lclust_path, sclust_path))
                         processed_akeys.append(akey)
+                        source_scanned += 1
+                        source_cache_hits += 1
+                        total_cache_hits += 1
+                        _maybe_report_cluster_scan_progress(
+                            source_label,
+                            source_scanned,
+                            source_total,
+                            source_cache_hits,
+                            source_queued,
+                        )
                         continue
 
             batch.append((akey, positions, clustfolder))
+            source_scanned += 1
+            source_queued += 1
+            total_queued += 1
+            _maybe_report_cluster_scan_progress(
+                source_label,
+                source_scanned,
+                source_total,
+                source_cache_hits,
+                source_queued,
+            )
             if len(batch) >= CLUSTER_CHUNK_MAX:
                 batch_index += 1
                 compat_dirty = flush_cluster_batch(
@@ -459,6 +544,15 @@ def clusterprocess(libs_poscountdict, clustfolder):
                 ) or compat_dirty
                 batch = []
                 gc.collect()
+
+        _maybe_report_cluster_scan_progress(
+            source_label,
+            source_scanned,
+            source_total,
+            source_cache_hits,
+            source_queued,
+            force=True,
+        )
 
         if loaded_from_path:
             del libdict
@@ -495,5 +589,10 @@ def clusterprocess(libs_poscountdict, clustfolder):
             pickle.dump(processed_akeys, pf)
     except Exception as e:
         print(f"[WARN] Could not write libchr-keys.p: {e}")
+
+    print(
+        f"[scan] Cluster planning finished with {total_cache_hits} cache hits and {total_queued} queued lib-chr groups.",
+        flush=True,
+    )
 
     return results

@@ -20,6 +20,7 @@ outdir = None
 memFile = MEM_FILE_DEFAULT
 
 MAPPING_SECTION = "MAPPING"
+MAPPING_IO_MAXTASKSPERCHILD = 16
 
 
 def resolve_plain_or_gz_path(path):
@@ -90,6 +91,69 @@ def archive_fas_to_gz(path):
                 pass
 
     return gz_path
+
+
+def _unique_paths(paths):
+    seen = set()
+    out = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def _resolve_plain_or_gz_job(path):
+    return path, resolve_plain_or_gz_path(path)
+
+
+def _archive_fas_job(path):
+    return path, archive_fas_to_gz(path)
+
+
+def _parallel_resolve_plain_or_gz(paths, *, desc):
+    unique_paths = _unique_paths(paths)
+    if not unique_paths:
+        return {}
+
+    results = run_parallel_with_progress(
+        _resolve_plain_or_gz_job,
+        unique_paths,
+        desc=desc,
+        unit="lib",
+        maxtasksperchild=MAPPING_IO_MAXTASKSPERCHILD,
+    )
+    runtime_errors = [res for res in results if isinstance(res, RuntimeError)]
+    if runtime_errors:
+        sys.exit("One or more FASTA materialization jobs failed; see errors above.")
+
+    resolved_by_path = {}
+    for path, resolved in results:
+        resolved_by_path[path] = resolved
+    return resolved_by_path
+
+
+def _parallel_archive_fas(paths, *, desc):
+    unique_paths = _unique_paths(paths)
+    if not unique_paths:
+        return {}
+
+    results = run_parallel_with_progress(
+        _archive_fas_job,
+        unique_paths,
+        desc=desc,
+        unit="lib",
+        maxtasksperchild=MAPPING_IO_MAXTASKSPERCHILD,
+    )
+    runtime_errors = [res for res in results if isinstance(res, RuntimeError)]
+    if runtime_errors:
+        sys.exit("One or more FASTA archive jobs failed; see errors above.")
+
+    archived_by_path = {}
+    for path, artifact_path in results:
+        archived_by_path[path] = artifact_path
+    return archived_by_path
 
 
 def _ensure_sections(cfg):
@@ -471,9 +535,13 @@ def mapprocess(
     if libs_to_map:
         print("Libraries to be mapped: %s" % (", ".join([item[0] for item in libs_to_map])))
 
+        resolved_inputs = _parallel_resolve_plain_or_gz(
+            [fas_path for fas_path, _, _ in libs_to_map],
+            desc="Preparing FASTAs for mapping",
+        )
         materialized_inputs = []
         for fas_path, bam_path, input_sig in libs_to_map:
-            resolved = resolve_plain_or_gz_path(fas_path)
+            resolved = resolved_inputs.get(fas_path)
             if not resolved or not os.path.isfile(resolved):
                 print(f"Error: input FASTA missing for mapping: {fas_path}")
                 sys.exit()
@@ -494,8 +562,9 @@ def mapprocess(
         if not legacy_sams_to_upgrade:
             print("\nNo new libraries to map this time")
 
+    archived_fastas = _parallel_archive_fas(fas_inputs, desc="Archiving mapped FASTAs")
     for fas_path in fas_inputs:
-        artifact_path = archive_fas_to_gz(fas_path)
+        artifact_path = archived_fastas.get(fas_path)
         compat_dirty = _record_compat_fasta_md5(config, artifact_path) or compat_dirty
 
     if compat_dirty:
