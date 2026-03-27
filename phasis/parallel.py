@@ -1,6 +1,101 @@
 import os, multiprocessing, gc, traceback, sys
 from tqdm import tqdm
 import phasis.runtime as rt
+
+
+def _coerce_positive_int(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        value = int(value)
+        if value <= 0:
+            return default
+        return value
+    except Exception:
+        return default
+
+
+def _effective_start_method(start_method=None):
+    if start_method is None:
+        start_method = getattr(rt, "mp_start_method", None) or os.environ.get("PHASIS_MP_START_METHOD")
+    if start_method is None:
+        start_method = "spawn" if sys.platform == "darwin" else "forkserver"
+    return start_method
+
+
+def _resolve_lib_worker_cap(ncores_local: int) -> int:
+    configured = _coerce_positive_int(
+        getattr(rt, "parallel_lib_worker_cap", None),
+        _coerce_positive_int(os.environ.get("PHASIS_LIB_WORKER_CAP"), None),
+    )
+    if configured is None:
+        configured = int(max(1, ncores_local))
+    return int(max(1, min(ncores_local, configured)))
+
+
+def _resolve_maxtasksperchild(
+    maxtasksperchild,
+    *,
+    unit: str,
+    n_data: int,
+    kind: str,
+    start_method=None,
+):
+    explicit = _coerce_positive_int(maxtasksperchild, None)
+    if explicit is not None:
+        return explicit
+
+    configured = _coerce_positive_int(
+        getattr(rt, "parallel_maxtasksperchild", None),
+        _coerce_positive_int(os.environ.get("PHASIS_MAXTASKSPERCHILD"), None),
+    )
+    if configured is not None:
+        return configured
+
+    method = _effective_start_method(start_method)
+    if kind == "plot":
+        return 8 if method == "spawn" else 4
+    if unit == "lib":
+        if n_data <= 64:
+            return 32 if method == "spawn" else 16
+        return 24 if method == "spawn" else 12
+    if n_data <= 8:
+        return 32 if method == "spawn" else 12
+    if n_data <= 64:
+        return 24 if method == "spawn" else 10
+    return 16 if method == "spawn" else 8
+
+
+def _ordered_buffered_results(buffered_results):
+    return [buffered_results[key] for key in sorted(buffered_results.keys())]
+
+
+def _commit_buffered_results(buffered_results, *, on_result, keep_results, results, pbar):
+    if not buffered_results:
+        return
+    if on_result is not None:
+        for res in buffered_results:
+            on_result(res)
+    if keep_results:
+        results.extend(buffered_results)
+    pbar.update(len(buffered_results))
+
+
+def _run_serial_chunk(func, chunk):
+    buffered_results = {}
+    for item_id, arg in chunk:
+        retry = safe_worker((func, arg))
+        if isinstance(retry, RuntimeError):
+            print(f"[ERROR] Serial retry failed for arg: {arg}\n{retry}")
+        buffered_results[item_id] = retry
+    return buffered_results
+
+
+def safe_worker_indexed(args):
+    item_id, func, arg = args
+    return item_id, arg, safe_worker((func, arg))
+
+
 def run_parallel_with_progress(
     func,
     data,
@@ -13,7 +108,7 @@ def run_parallel_with_progress(
     start_method=None,     # Optional: 'spawn' / 'fork' / 'forkserver'
     kind="compute",        # Passed to make_pool (e.g., 'plot' -> sets MPLBACKEND=Agg)
     snapshot_path=None,    # Optional explicit runtime snapshot path
-    maxtasksperchild=1,    # Reuse workers more for cheap tasks when caller opts in
+    maxtasksperchild=None, # Auto-tuned worker reuse; callers can still override explicitly
     adaptive_recovery=True,
     recovery_success_slices=2,
     recovery_progress_fraction=0.05,
@@ -22,12 +117,13 @@ def run_parallel_with_progress(
 
     """
     Parallel, streaming, and adaptive:
-      - Streams results via imap_unordered (low peak memory).
+      - Streams results via imap_unordered and buffers one slice at a time so
+        retries only commit accepted work.
       - On any pool failure, automatically retries the current slice with
         smaller (chunk_size, nworkers): [proposed] -> 10 -> 5 -> 1; workers n->8->4->2->1.
       - Optional adaptive recovery can re-expand chunk_size/workers after a
         stretch of successful reduced-mode slices.
-      - maxtasksperchild=1 to fight per-worker RSS growth.
+      - maxtasksperchild is auto-tuned unless callers override it.
       - BLAS single-threaded to avoid hidden fan-out.
 
     Tips:
@@ -40,6 +136,13 @@ def run_parallel_with_progress(
     ncores = rt.ncores
     if rt.ncores is None or rt.ncores <= 0:
         ncores = multiprocessing.cpu_count()
+    resolved_maxtasksperchild = _resolve_maxtasksperchild(
+        maxtasksperchild,
+        unit=unit,
+        n_data=n_data,
+        kind=kind,
+        start_method=start_method,
+    )
 
     # Initial chunk size & workers
     initial_chunk_size = _compute_initial_chunk_size(n_data, ncores, unit, min_chunk, batch_factor)
@@ -104,7 +207,6 @@ def run_parallel_with_progress(
             slice_completed = False
             last_exception = None
             slice_had_failure = False
-            slice_progress = 0
 
             for local_chunk_size in try_sizes:
                 end = min(start + local_chunk_size, n_data)
@@ -116,60 +218,40 @@ def run_parallel_with_progress(
                 for nw in worker_trials:
                     # Try streaming this chunk with nw workers
                     try:
+                        buffered_results = {}
                         with make_pool(
                             nw,
                             start_method=start_method,
                             kind=kind,
                             snapshot_path=snapshot_path,
-                            maxtasksperchild=maxtasksperchild,
+                            maxtasksperchild=resolved_maxtasksperchild,
                         ) as pool:
                             # Stream results; avoid big intermediate lists
-                            for res in pool.imap_unordered(safe_worker, ((func, arg) for arg in chunk), chunksize=1):
+                            indexed_chunk = list(enumerate(chunk, start=start))
+                            for item_id, arg, res in pool.imap_unordered(
+                                safe_worker_indexed,
+                                ((item_id, func, arg) for item_id, arg in indexed_chunk),
+                                chunksize=1,
+                            ):
                                 if isinstance(res, RuntimeError):
                                     slice_had_failure = True
-                                    # Retry failed item serially for deterministic logging
-                                    idx = None  # only for clarity; we stream, so idx is not needed
-                                    retry_res = safe_worker((func, chunk[0])) if False else res  # no-op placeholder
-                                    # The safe pattern: rerun the actual arg serially
-                                    # We don't have the arg here anymore; so re-run serially by index.
-                                    # To keep memory low, do a small serial retry immediately:
-                                    if hasattr(res, 'args') and res.args:
-                                        # We encoded arg in the message, but parsing isn't robust; better to rerun by value
-                                        pass
-                                    # Safer: ignore this and do exact serial retry below with a tiny loop:
-                                    if on_result is not None and return_results is False:
-                                        # We'll handle retry after the pool closes below
-                                        pass
-
-                                # Normal path: consume result
-                                if isinstance(res, RuntimeError):
-                                    # Serial retry for the specific arg (exactly), one by one
-                                    # Find the original arg by popping from the front—safe because chunksize=1 maps 1:1
-                                    # Here we can't know which arg it was due to unordered mapping; do explicit serial pass:
-                                    # Minimal overhead since failures should be rare.
-                                    for arg in chunk:
-                                        retry = safe_worker((func, arg))
-                                        if not isinstance(retry, RuntimeError):
-                                            if on_result: on_result(retry)
-                                            if keep_results: results.append(retry)
-                                        else:
-                                            # Still failing — log and keep the sentinel
-                                            print(f"[ERROR] Serial retry failed for arg: {arg}\n{retry}")
-                                            if on_result: on_result(retry)
-                                            if keep_results: results.append(retry)
-                                    slice_progress = end - start
-                                    # Break out of this chunk; move to next slice
-                                    break
-                                else:
-                                    if on_result:
-                                        on_result(res)
-                                    if keep_results:
-                                        results.append(res)
-                                    pbar.update(1)
-                                    slice_progress += 1
+                                    retry = safe_worker((func, arg))
+                                    if isinstance(retry, RuntimeError):
+                                        print(f"[ERROR] Serial retry failed for arg: {arg}\n{retry}")
+                                    buffered_results[item_id] = retry
+                                    continue
+                                buffered_results[item_id] = res
 
                             # If we reached here without exceptions, the chunk is done
                             slice_completed = True
+
+                        _commit_buffered_results(
+                            _ordered_buffered_results(buffered_results),
+                            on_result=on_result,
+                            keep_results=keep_results,
+                            results=results,
+                            pbar=pbar,
+                        )
 
                         # Adopt smaller settings if they worked
                         if local_chunk_size < chunk_size:
@@ -190,11 +272,6 @@ def run_parallel_with_progress(
                         print(f"\n[WARN] Pool error on slice [{start}:{end}] size={local_chunk_size}, nworkers={nw}: {e}\nTrying smaller.\n")
 
                 if slice_completed:
-                    remaining = (end - start) - slice_progress
-                    if remaining > 0:
-                        pbar.update(remaining)
-                        slice_progress += remaining
-
                     if slice_had_failure:
                         success_slices_since_failure = 0
                         items_since_failure = 0
@@ -206,14 +283,15 @@ def run_parallel_with_progress(
             # If pool attempts all failed for this slice, do serial for this slice
             if not slice_completed:
                 print(f"[WARN] Running slice [{start}:{end}] serially after pool failures.")
-                for arg in data[start:end]:
-                    res = safe_worker((func, arg))
-                    if on_result:
-                        on_result(res)
-                    if keep_results:
-                        results.append(res)
-                    pbar.update(1)
-                    slice_progress += 1
+                indexed_chunk = list(enumerate(data[start:end], start=start))
+                serial_results = _run_serial_chunk(func, indexed_chunk)
+                _commit_buffered_results(
+                    _ordered_buffered_results(serial_results),
+                    on_result=on_result,
+                    keep_results=keep_results,
+                    results=results,
+                    pbar=pbar,
+                )
 
                 # If even 1-worker pool attempts failed, move to the most
                 # conservative mode and let adaptive recovery climb back up later.
@@ -231,7 +309,7 @@ def run_parallel_with_progress(
 def _compute_initial_chunk_size(n_data: int, ncores_local: int, unit: str, min_chunk: int, batch_factor: float):
     #print(f"batch factor set to {batch_factor}")
     if unit == "lib":
-        worker_cap_for_lib = 20  # conservative start for lib-level work
+        worker_cap_for_lib = _resolve_lib_worker_cap(ncores_local)
         return min(ncores_local, worker_cap_for_lib) or 1
     #if n_data <= ncores_local:
         #print("n_data <= ncores_local: return 1")
@@ -330,14 +408,14 @@ def _pool_initializer(snapshot_path, kind):
 
 
 def make_pool(nworkers: int | None = None, *, processes: int | None = None, start_method: str | None = None,
-             kind: str = "compute", snapshot_path: str | None = None, maxtasksperchild: int | None = 1):
+             kind: str = "compute", snapshot_path: str | None = None, maxtasksperchild: int | None = None):
     """
     Pool with safer defaults to limit RAM spikes.
 
     - BLAS threads set to 1.
-    - maxtasksperchild defaults to 1, but callers can opt into worker reuse.
+    - maxtasksperchild is auto-tuned unless callers override it.
     - macOS: spawn by default (safe for ObjC/matplotlib).
-    - Linux: fork by default.
+    - Linux: forkserver by default.
 
     NEW:
     - Supports `processes=` kwarg as alias for nworkers.
@@ -355,12 +433,7 @@ def make_pool(nworkers: int | None = None, *, processes: int | None = None, star
     if maxtasksperchild is not None:
         maxtasksperchild = int(max(1, maxtasksperchild))
 
-    if start_method is None:
-        # Allow override from runtime/env. On Linux, prefer forkserver over fork to
-        # reduce deadlock risk with native libs that use threads (OpenMP/BLAS).
-        start_method = getattr(rt, "mp_start_method", None) or os.environ.get("PHASIS_MP_START_METHOD")
-        if start_method is None:
-            start_method = "spawn" if sys.platform == "darwin" else "forkserver"
+    start_method = _effective_start_method(start_method)
 
 
     if snapshot_path is None:
@@ -446,7 +519,8 @@ def optimize(ncores: int, nfiles: int):
     return nproc, nspread
 
 
-def PPBalance(module, alist, *, n_workers: int | None = None, start_method: str | None = None, kind: str = "compute"):
+def PPBalance(module, alist, *, n_workers: int | None = None, start_method: str | None = None, kind: str = "compute",
+             maxtasksperchild: int | None = None):
     '''
     Parallel runner used by legacy mapping: run `module(arg)` for each arg in alist.
 
@@ -465,10 +539,22 @@ def PPBalance(module, alist, *, n_workers: int | None = None, start_method: str 
             n_workers = 1
 
     n_workers = int(max(1, n_workers))
+    resolved_maxtasksperchild = _resolve_maxtasksperchild(
+        maxtasksperchild,
+        unit="task",
+        n_data=len(alist),
+        kind=kind,
+        start_method=start_method,
+    )
 
     results = []
     try:
-        with make_pool(n_workers, start_method=start_method, kind=kind) as pool:
+        with make_pool(
+            n_workers,
+            start_method=start_method,
+            kind=kind,
+            maxtasksperchild=resolved_maxtasksperchild,
+        ) as pool:
             for res in pool.imap_unordered(safe_worker, ((module, arg) for arg in alist), chunksize=1):
                 results.append(res)
         return results

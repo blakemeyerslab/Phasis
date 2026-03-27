@@ -17,7 +17,8 @@ outdir = None
 memFile = MEM_FILE_DEFAULT
 
 LIBRARY_PROCESSING_SECTION = "LIBRARY_PROCESSING"
-LIBRARY_IO_MAXTASKSPERCHILD = 16
+LIBRARY_IO_MAXTASKSPERCHILD = 64
+LIBRARY_PROCESS_MAXTASKSPERCHILD = 8
 
 
 def _runtime_errors(results):
@@ -421,7 +422,10 @@ def _check_input_formats(libs_to_process):
         check_func = libprep.isfiletagcount
     print("Checking format:")
     format_results = run_parallel_with_progress(
-        check_func, libs_to_process, desc="Checking format"
+        check_func,
+        libs_to_process,
+        desc="Checking format",
+        maxtasksperchild=LIBRARY_IO_MAXTASKSPERCHILD,
     )
     if _runtime_errors(format_results):
         sys.exit("One or more libraries failed format check; see errors above.")
@@ -445,7 +449,10 @@ def _process_input_libraries(libs_to_process):
     jobs = [(alib, _fas_output_for_input(alib)) for alib in libs_to_process]
     print("Processing libraries:")
     proc_results = run_parallel_with_progress(
-        _process_single_library_job, jobs, desc="Filtering/Converting"
+        _process_single_library_job,
+        jobs,
+        desc="Filtering/Converting",
+        maxtasksperchild=LIBRARY_PROCESS_MAXTASKSPERCHILD,
     )
     if _runtime_errors(proc_results):
         sys.exit("One or more libraries failed during filtering/conversion; see errors above.")

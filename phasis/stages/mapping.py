@@ -20,7 +20,8 @@ outdir = None
 memFile = MEM_FILE_DEFAULT
 
 MAPPING_SECTION = "MAPPING"
-MAPPING_IO_MAXTASKSPERCHILD = 16
+MAPPING_IO_MAXTASKSPERCHILD = 64
+MAPPING_PPBALANCE_MAXTASKSPERCHILD = 8
 
 
 def resolve_plain_or_gz_path(path):
@@ -524,7 +525,12 @@ def mapprocess(
             (sam_path, bam_path, nspread, getattr(rt, "reference", None))
             for _, sam_path, bam_path, _ in legacy_sams_to_upgrade
         ]
-        PPBalance(_convert_legacy_sam_to_bam, rawinputs, n_workers=nproc)
+        PPBalance(
+            _convert_legacy_sam_to_bam,
+            rawinputs,
+            n_workers=nproc,
+            maxtasksperchild=MAPPING_PPBALANCE_MAXTASKSPERCHILD,
+        )
         upgraded_paths = [bam_path for _, _, bam_path, _ in legacy_sams_to_upgrade]
         _stabilize_outputs(upgraded_paths)
         for _, _, bam_path, input_sig in legacy_sams_to_upgrade:
@@ -549,7 +555,12 @@ def mapprocess(
 
         nproc, nspread = optimize(ncores_local, len(materialized_inputs))
         rawinputs = [(alib, genoIndex, nspread, maxhits, runtype) for alib, _, _ in materialized_inputs]
-        PPBalance(mapper, rawinputs, n_workers=nproc)
+        PPBalance(
+            mapper,
+            rawinputs,
+            n_workers=nproc,
+            maxtasksperchild=MAPPING_PPBALANCE_MAXTASKSPERCHILD,
+        )
 
         produced_bams = [bam_path for _, bam_path, _ in materialized_inputs]
         _stabilize_outputs(produced_bams)
