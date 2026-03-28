@@ -128,11 +128,16 @@ def _maybe_report_cluster_scan_progress(
         )
 
 
-def _record_compat_cluster_md5(cfg: configparser.ConfigParser, lclust_path: str) -> bool:
+def _record_compat_cluster_md5(
+    cfg: configparser.ConfigParser,
+    lclust_path: str,
+    md5hex: str | None = None,
+) -> bool:
     if not lclust_path or not os.path.isfile(lclust_path):
         return False
 
-    _, md5hex = getmd5(lclust_path)
+    if md5hex is None:
+        _, md5hex = getmd5(lclust_path)
     md5hex = str(md5hex or "")
     if not md5hex:
         return False
@@ -318,6 +323,10 @@ def flush_cluster_batch(
 
     compat_dirty = False
     chunk_results = process_cluster_batch(batch_items, idx)
+    print(
+        f"[scan] Finalizing clustering batch {idx} ({len(chunk_results)} outputs)...",
+        flush=True,
+    )
     for res in chunk_results:
         if isinstance(res, RuntimeError):
             # run_parallel_with_progress returns RuntimeError sentinel on worker failure
@@ -351,7 +360,9 @@ def flush_cluster_batch(
                 except Exception:
                     pass
 
-        _, lmd5_final = getmd5(want_l)
+        lmd5_final = str(lmd5 or "")
+        if not lmd5_final:
+            _, lmd5_final = getmd5(want_l)
         new_hashes[want_l] = lmd5_final
 
         pruned = _prune_old_clustered_entries(cfg, os.path.basename(want_l), want_l)
@@ -369,7 +380,9 @@ def flush_cluster_batch(
         if cache is not None and s_sig is not None:
             cache.record(CLUSTER_BUILD_SECTION, want_s, s_sig)
 
-        compat_dirty = _record_compat_cluster_md5(cfg, want_l) or compat_dirty
+        compat_dirty = (
+            _record_compat_cluster_md5(cfg, want_l, md5hex=lmd5_final) or compat_dirty
+        )
         results.append((a, want_l, want_s))
         processed_akeys.append(a)
 
