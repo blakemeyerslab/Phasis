@@ -527,6 +527,41 @@ def compute_cache_signature(
     return _md5_of_list_str(items)
 
 
+def compute_cache_signature_from_file_manifest(
+    *,
+    file_manifest: Iterable[Tuple[str, str, int, bool]] | None = None,
+    params: Dict[str, object] | None = None,
+    extra: Iterable[str] | None = None,
+) -> str:
+    """
+    Compute a stable cache signature from precomputed file facts.
+
+    Each manifest entry is:
+      (absolute_path, fingerprint_hex, size_bytes, exists_bool)
+
+    This preserves the same item format as compute_cache_signature(), while
+    allowing callers to inspect files in parallel first.
+    """
+    items = []
+
+    for path, fp, size, exists in (file_manifest or []):
+        p = os.path.abspath(os.path.expanduser(str(path)))
+        if exists:
+            items.append(f"FILE\t{p}\t{fp}\t{size}")
+        else:
+            items.append(f"MISSING\t{p}")
+
+    if params:
+        for k in sorted(params.keys()):
+            items.append(f"PARAM\t{k}={params.get(k)}")
+
+    if extra:
+        for x in extra:
+            items.append(f"EXTRA\t{x}")
+
+    return _md5_of_list_str(items)
+
+
 def md5_file_worker(path):
     """
     Return (ABS_REALPATH, md5hex or None).
@@ -840,6 +875,7 @@ __all__ = [
     "phase2_basename",
     "getmd5",
     "compute_md5_str",
+    "compute_cache_signature_from_file_manifest",
     "md5_file_worker",
     "list_chunk_files_for_prefix",
     "assemble_candidate_from_chunks",

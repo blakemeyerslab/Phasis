@@ -22,10 +22,10 @@ from phasis.cache import (
     MEM_FILE_DEFAULT,
     MemCache,
     assemble_candidate_from_chunks,
+    compute_cache_signature_from_file_manifest,
     getmd5,
     md5_file_worker,
     sanitize_mem_md5s,
-    stage_signature,
 )
 from phasis.parallel import run_parallel_with_progress
 
@@ -208,22 +208,36 @@ def _inspect_cluster_scoring_inputs(
     *,
     initial_worker_cap: int,
     max_worker_cap: int,
+    precomputed_md5_map=None,
 ):
     if not filtered_inputs:
         return {}, {}, set()
 
-    manifest_results = run_parallel_with_progress(
-        inspect_lclust_input_for_scoring,
-        filtered_inputs,
-        desc="Inspecting .lclust inputs",
-        min_chunk=1,
-        unit="file",
-        **_cluster_scoring_parallel_kwargs(
-            maxtasksperchild=CLUSTER_SCORING_HASH_MAXTASKSPERCHILD,
-            initial_worker_cap=initial_worker_cap,
-            max_worker_cap=max_worker_cap,
-        ),
-    )
+    precomputed_md5_map = precomputed_md5_map or {}
+    manifest_results = []
+    inspect_jobs = []
+    for akey, lclust_path in filtered_inputs:
+        lclust_real = os.path.realpath(lclust_path)
+        precomputed_md5 = str(precomputed_md5_map.get(lclust_real) or "")
+        if precomputed_md5:
+            manifest_results.append((akey, lclust_real, precomputed_md5))
+        else:
+            inspect_jobs.append((akey, lclust_real))
+
+    if inspect_jobs:
+        inspected = run_parallel_with_progress(
+            inspect_lclust_input_for_scoring,
+            inspect_jobs,
+            desc="Inspecting .lclust inputs",
+            min_chunk=1,
+            unit="file",
+            **_cluster_scoring_parallel_kwargs(
+                maxtasksperchild=CLUSTER_SCORING_HASH_MAXTASKSPERCHILD,
+                initial_worker_cap=initial_worker_cap,
+                max_worker_cap=max_worker_cap,
+            ),
+        )
+        manifest_results.extend(inspected)
 
     manifest_by_path = {}
     lclust_md5_updates = {}
@@ -272,6 +286,24 @@ def _normalize_cache_file_inputs(sources):
     return sorted(set(norm))
 
 
+def inspect_cluster_scoring_signature_input(path):
+    try:
+        p = os.path.abspath(os.path.expanduser(str(path)))
+    except Exception:
+        p = str(path)
+
+    if not os.path.isfile(p):
+        return (p, "", -1, False)
+
+    _, fp = getmd5(p, wait_stable=False)
+    fp = str(fp or "")
+    try:
+        size = os.path.getsize(p)
+    except Exception:
+        size = -1
+    return (p, fp, size, True)
+
+
 def _cluster_scoring_stage_signature(
     lclust_paths,
     nestdict_sources,
@@ -281,16 +313,42 @@ def _cluster_scoring_stage_signature(
     concat_mode,
     merged_name,
     expected_outputs,
+    initial_worker_cap,
+    max_worker_cap,
 ):
     nest_paths = _normalize_cache_file_inputs(nestdict_sources)
     if nest_paths is None:
-        return None
+        return None, {}
 
     lclust_norm = [os.path.realpath(p) for p in lclust_paths]
     files = sorted(set(lclust_norm + nest_paths))
     extras = sorted({os.path.basename(str(p)) for p in expected_outputs})
-    return stage_signature(
-        files=files,
+
+    print(
+        f"[scan] Building cluster scoring stage signature from {len(files)} input file(s)...",
+        flush=True,
+    )
+    file_manifest = run_parallel_with_progress(
+        inspect_cluster_scoring_signature_input,
+        files,
+        desc="Inspecting cluster scoring stage inputs",
+        min_chunk=1,
+        unit="file",
+        **_cluster_scoring_parallel_kwargs(
+            maxtasksperchild=CLUSTER_SCORING_HASH_MAXTASKSPERCHILD,
+            initial_worker_cap=initial_worker_cap,
+            max_worker_cap=max_worker_cap,
+        ),
+    )
+
+    lclust_set = set(lclust_norm)
+    lclust_md5_map = {}
+    for path, fp, _size, exists in file_manifest:
+        if exists and path in lclust_set and fp:
+            lclust_md5_map[path] = fp
+
+    return compute_cache_signature_from_file_manifest(
+        file_manifest=file_manifest,
         params={
             "stage": "cluster_scoring",
             "phase": int(phase),
@@ -302,7 +360,7 @@ def _cluster_scoring_stage_signature(
             "domsize_cut": float(DOMSIZE_CUT),
         },
         extra=extras,
-    )
+    ), lclust_md5_map
 
 
 def _record_compat_cluster_output_md5(cfg: configparser.ConfigParser, section: str, path: str) -> bool:
@@ -907,7 +965,15 @@ def scoringprocess(
 
     # -------------------- Collect nest dict (needed keys only) ----------------
     needed_nest_keys = _cluster_scoring_needed_nest_keys(libchrs_clust_toscore)
+    print(
+        f"[scan] Loading parser nestdict sources for {len(needed_nest_keys)} cluster key(s)...",
+        flush=True,
+    )
     libchrs_nestdict = build_libchrs_nestdict(libs_nestdict, needed_keys=needed_nest_keys)
+    print(
+        f"[scan] Loaded nestdict entries for {len(libchrs_nestdict)} cluster key(s).",
+        flush=True,
+    )
 
     # -------------------- Filter: existing .lclust + available nest -----------
     filtered_inputs, missing_akeys, missing_files = [], [], []
@@ -955,7 +1021,7 @@ def scoringprocess(
             expected_outfiles.append((alib, f"{bname}.{phase}-PHAS.candidate.clusters"))
 
     # -------------------- Centralized stage-cache fast path --------------------
-    stage_sig = _cluster_scoring_stage_signature(
+    stage_sig, stage_sig_lclust_md5 = _cluster_scoring_stage_signature(
         [p for _, p in filtered_inputs],
         libs_nestdict,
         phase=phase,
@@ -963,6 +1029,8 @@ def scoringprocess(
         concat_mode=concat_mode,
         merged_name=merged_name,
         expected_outputs=[outf for _, outf in expected_outfiles],
+        initial_worker_cap=initial_worker_cap,
+        max_worker_cap=max_worker_cap,
     )
 
     if stage_sig is not None and not force_rescore and not purge_existing:
@@ -1020,6 +1088,7 @@ def scoringprocess(
         sect_lclust,
         initial_worker_cap=initial_worker_cap,
         max_worker_cap=max_worker_cap,
+        precomputed_md5_map=stage_sig_lclust_md5,
     )
     all_outputs_verified = bool(expected_outfiles) and all(
         verified_outputs.get(outf, False) for _, outf in expected_outfiles
