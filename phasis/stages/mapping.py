@@ -6,7 +6,7 @@ import gzip
 import shutil
 
 from phasis import runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, stage_signature
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, sig_key, stage_signature
 from phasis.parallel import PPBalance, optimize, run_parallel_with_progress
 
 
@@ -157,6 +157,50 @@ def _parallel_archive_fas(paths, *, desc):
     return archived_by_path
 
 
+def _inspect_mapping_cache_job(job):
+    fas_path, bam_path, genoIndex = job
+    sync_from_runtime()
+
+    artifact_path = canonical_fas_artifact(fas_path)
+    artifact_fp = compute_md5_str(artifact_path) or "" if artifact_path and os.path.isfile(artifact_path) else ""
+    bam_fp = compute_md5_str(bam_path) or "" if os.path.isfile(bam_path) else ""
+
+    legacy_sam_path = _legacy_sam_output_for_fas(fas_path)
+    legacy_sam_fp = compute_md5_str(legacy_sam_path) or "" if os.path.isfile(legacy_sam_path) else ""
+
+    return {
+        "fas_path": fas_path,
+        "bam_path": bam_path,
+        "artifact_path": artifact_path,
+        "artifact_fp": artifact_fp,
+        "bam_fp": bam_fp,
+        "legacy_sam_path": legacy_sam_path,
+        "legacy_sam_fp": legacy_sam_fp,
+        "input_sig": _mapping_input_signature(fas_path, genoIndex),
+    }
+
+
+def _parallel_inspect_mapping_cache(jobs, *, desc):
+    if not jobs:
+        return {}
+
+    results = run_parallel_with_progress(
+        _inspect_mapping_cache_job,
+        jobs,
+        desc=desc,
+        unit="lib",
+        maxtasksperchild=MAPPING_IO_MAXTASKSPERCHILD,
+    )
+    runtime_errors = [res for res in results if isinstance(res, RuntimeError)]
+    if runtime_errors:
+        sys.exit("One or more mapping-cache inspection jobs failed; see errors above.")
+
+    inspection_by_fas = {}
+    for entry in results:
+        inspection_by_fas[entry["fas_path"]] = entry
+    return inspection_by_fas
+
+
 def _ensure_sections(cfg):
     for sect in (MAPPING_SECTION, "MAPS", "FASTAS"):
         if not cfg.has_section(sect):
@@ -239,6 +283,17 @@ def _record_compat_fasta_md5(cfg, artifact_path):
     return True
 
 
+def _record_compat_fasta_fp(cfg, artifact_path, fphex):
+    fphex = str(fphex or "")
+    if not artifact_path or not fphex:
+        return False
+    prev = (cfg["FASTAS"].get(artifact_path) or "").strip()
+    if prev == fphex:
+        return False
+    cfg["FASTAS"][artifact_path] = fphex
+    return True
+
+
 def _record_compat_map_md5(cfg, bam_path):
     if not bam_path:
         return False
@@ -251,6 +306,17 @@ def _record_compat_map_md5(cfg, bam_path):
     if prev == md5hex:
         return False
     cfg["MAPS"][bam_path] = md5hex
+    return True
+
+
+def _record_compat_map_fp(cfg, bam_path, fphex):
+    fphex = str(fphex or "")
+    if not bam_path or not fphex:
+        return False
+    prev = (cfg["MAPS"].get(bam_path) or "").strip()
+    if prev == fphex:
+        return False
+    cfg["MAPS"][bam_path] = fphex
     return True
 
 
@@ -489,25 +555,52 @@ def mapprocess(
     legacy_sams_to_upgrade = []
     compat_dirty = False
 
+    cache_jobs = [(fas_path, bam_path, genoIndex) for fas_path, bam_path in zip(fas_inputs, bam_expected)]
+    cache_inspection = _parallel_inspect_mapping_cache(
+        cache_jobs,
+        desc="Inspecting mapping cache",
+    )
+
     for fas_path, bam_path in zip(fas_inputs, bam_expected):
-        artifact_path = canonical_fas_artifact(fas_path)
-        compat_dirty = _record_compat_fasta_md5(config, artifact_path) or compat_dirty
-        input_sig = _mapping_input_signature(fas_path, genoIndex)
+        inspect = cache_inspection.get(fas_path, {})
+        artifact_path = inspect.get("artifact_path")
+        artifact_fp = inspect.get("artifact_fp", "")
+        bam_fp = inspect.get("bam_fp", "")
+        legacy_sam_path = inspect.get("legacy_sam_path")
+        legacy_sam_fp = inspect.get("legacy_sam_fp", "")
+        input_sig = inspect.get("input_sig") or _mapping_input_signature(fas_path, genoIndex)
 
-        if cache.hit(MAPPING_SECTION, bam_path, input_sig):
+        compat_dirty = _record_compat_fasta_fp(config, artifact_path, artifact_fp) or compat_dirty
+
+        prev_stage_fp = cache.get(MAPPING_SECTION, bam_path, "") or ""
+        prev_stage_sig = cache.get(MAPPING_SECTION, sig_key(bam_path), "") or ""
+        if bam_fp and prev_stage_fp == bam_fp and prev_stage_sig == input_sig:
             print(f"Cache hit for mapped library: {fas_path}")
-            compat_dirty = _record_compat_map_md5(config, bam_path) or compat_dirty
+            compat_dirty = _record_compat_map_fp(config, bam_path, bam_fp) or compat_dirty
             continue
 
-        if _legacy_map_cache_hit(config, bam_path):
+        prev_legacy_bam_fp = (config["MAPS"].get(bam_path) or "").strip()
+        if bam_fp and prev_legacy_bam_fp and prev_legacy_bam_fp == bam_fp:
             print(f"Legacy cache matches for mapped library: {fas_path}")
-            cache.record(MAPPING_SECTION, bam_path, input_sig)
-            compat_dirty = _record_compat_map_md5(config, bam_path) or compat_dirty
+            cache.record(
+                MAPPING_SECTION,
+                bam_path,
+                input_sig,
+                output_fp=bam_fp,
+                wait_stable=False,
+            )
+            compat_dirty = _record_compat_map_fp(config, bam_path, bam_fp) or compat_dirty
             continue
 
-        legacy_sam_path = _legacy_sam_output_for_fas(fas_path)
         reference_path = getattr(rt, "reference", None)
-        if reference_path and os.path.isfile(reference_path) and _legacy_sam_ready_for_upgrade(config, artifact_path, legacy_sam_path):
+        prev_legacy_artifact_fp = (config["FASTAS"].get(artifact_path) or "").strip() if artifact_path else ""
+        prev_legacy_sam_fp = (config["MAPS"].get(legacy_sam_path) or "").strip() if legacy_sam_path else ""
+        legacy_upgrade_ready = (
+            bool(reference_path and os.path.isfile(reference_path))
+            and bool(artifact_path and artifact_fp and prev_legacy_artifact_fp == artifact_fp)
+            and bool(legacy_sam_path and legacy_sam_fp and prev_legacy_sam_fp == legacy_sam_fp)
+        )
+        if legacy_upgrade_ready:
             legacy_sams_to_upgrade.append((fas_path, legacy_sam_path, bam_path, input_sig))
             continue
 

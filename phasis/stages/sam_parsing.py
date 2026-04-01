@@ -11,7 +11,7 @@ from typing import Iterable, List, Sequence, Tuple
 
 import phasis.runtime as rt
 from phasis.parallel import run_parallel_with_progress
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, getmd5, stage_signature
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, getmd5, sig_key, stage_signature
 
 
 def _resolve_mem_file() -> str:
@@ -218,6 +218,72 @@ def _record_compat_md5(
     return True
 
 
+def _record_compat_fp(
+    config: configparser.ConfigParser,
+    section: str,
+    path: str,
+    fphex: str,
+) -> bool:
+    fphex = str(fphex or "")
+    if not path or not fphex:
+        return False
+
+    prev = (config[section].get(path) or "").strip()
+    if prev == fphex:
+        return False
+
+    config[section][path] = fphex
+    return True
+
+
+def _inspect_parser_cache_job(job):
+    alib, phase, maxhits, mismat, norm, norm_factor = job
+
+    alignment_path = _alignment_path_for_lib(alib)
+    dict_path, count_path = _parser_output_paths_for_lib(alib, phase)
+    input_sig = _parser_input_signature(
+        alignment_path,
+        phase=phase,
+        maxhits=maxhits,
+        mismat=mismat,
+        norm=norm,
+        norm_factor=norm_factor,
+    )
+
+    dict_fp = compute_md5_str(dict_path) or "" if os.path.isfile(dict_path) else ""
+    count_fp = compute_md5_str(count_path) or "" if os.path.isfile(count_path) else ""
+
+    return {
+        "alib": alib,
+        "alignment_path": alignment_path,
+        "dict_path": dict_path,
+        "count_path": count_path,
+        "input_sig": input_sig,
+        "dict_fp": dict_fp,
+        "count_fp": count_fp,
+    }
+
+
+def _parallel_inspect_parser_cache(jobs, *, desc):
+    if not jobs:
+        return {}
+
+    results = run_parallel_with_progress(
+        _inspect_parser_cache_job,
+        jobs,
+        desc=desc,
+        unit="lib",
+    )
+    runtime_errors = [res for res in results if isinstance(res, RuntimeError)]
+    if runtime_errors:
+        raise RuntimeError("One or more parser-cache inspection jobs failed; see errors above.")
+
+    by_lib = {}
+    for entry in results:
+        by_lib[entry["alib"]] = entry
+    return by_lib
+
+
 def _load_parsed_outputs(
     dict_paths: Sequence[str],
     count_paths: Sequence[str],
@@ -285,34 +351,79 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
     count_paths: List[str] = []
     compat_dirty = False
 
-    for alib in libs:
-        alignment_path = _alignment_path_for_lib(alib)
-        dict_path, count_path = _parser_output_paths_for_lib(alib, phase)
-        input_sig = _parser_input_signature(
-            alignment_path,
-            phase=phase,
-            maxhits=maxhits,
-            mismat=mismat,
-            norm=norm,
-            norm_factor=norm_factor,
+    parser_cache_inspection = {}
+    if not force_reparse:
+        inspect_jobs = [
+            (alib, phase, maxhits, mismat, norm, norm_factor)
+            for alib in libs
+        ]
+        parser_cache_inspection = _parallel_inspect_parser_cache(
+            inspect_jobs,
+            desc="Inspecting parser cache",
         )
+
+    for alib in libs:
+        inspect = parser_cache_inspection.get(alib, {})
+        alignment_path = inspect.get("alignment_path") or _alignment_path_for_lib(alib)
+        dict_path = inspect.get("dict_path")
+        count_path = inspect.get("count_path")
+        if not dict_path or not count_path:
+            dict_path, count_path = _parser_output_paths_for_lib(alib, phase)
+        input_sig = inspect.get("input_sig")
+        if not input_sig:
+            input_sig = _parser_input_signature(
+                alignment_path,
+                phase=phase,
+                maxhits=maxhits,
+                mismat=mismat,
+                norm=norm,
+                norm_factor=norm_factor,
+            )
+        dict_fp = inspect.get("dict_fp", "")
+        count_fp = inspect.get("count_fp", "")
 
         dict_paths.append(dict_path)
         count_paths.append(count_path)
 
         if not force_reparse:
-            dict_hit = cache.hit(SAM_PARSING_SECTION, dict_path, input_sig)
-            count_hit = cache.hit(SAM_PARSING_SECTION, count_path, input_sig)
+            prev_dict_fp = (config[SAM_PARSING_SECTION].get(dict_path) or "").strip()
+            prev_count_fp = (config[SAM_PARSING_SECTION].get(count_path) or "").strip()
+            prev_dict_sig = (config[SAM_PARSING_SECTION].get(sig_key(dict_path)) or "").strip()
+            prev_count_sig = (config[SAM_PARSING_SECTION].get(sig_key(count_path)) or "").strip()
+            dict_hit = bool(dict_fp and prev_dict_fp == dict_fp and prev_dict_sig == input_sig)
+            count_hit = bool(count_fp and prev_count_fp == count_fp and prev_count_sig == input_sig)
             if dict_hit and count_hit:
                 print(f"Cache hit for parsed library: {alib.rpartition('.')[0]}")
-                compat_dirty = _record_compat_md5(config, "PARSED", dict_path) or compat_dirty
-                compat_dirty = _record_compat_md5(config, "COUNTERS", count_path) or compat_dirty
+                compat_dirty = _record_compat_fp(config, "PARSED", dict_path, dict_fp) or compat_dirty
+                compat_dirty = _record_compat_fp(config, "COUNTERS", count_path, count_fp) or compat_dirty
                 continue
 
-            if _legacy_parser_cache_hit(config, dict_path, count_path):
+            legacy_dict_fp = (config["PARSED"].get(dict_path) or "").strip()
+            legacy_count_fp = (config["COUNTERS"].get(count_path) or "").strip()
+            legacy_hit = bool(
+                dict_fp
+                and count_fp
+                and legacy_dict_fp == dict_fp
+                and legacy_count_fp == count_fp
+            )
+            if legacy_hit:
                 print(f"Legacy cache matches for parsed library {alib.rpartition('.')[0]}")
-                cache.record(SAM_PARSING_SECTION, dict_path, input_sig)
-                cache.record(SAM_PARSING_SECTION, count_path, input_sig)
+                cache.record(
+                    SAM_PARSING_SECTION,
+                    dict_path,
+                    input_sig,
+                    output_fp=dict_fp,
+                    wait_stable=False,
+                )
+                cache.record(
+                    SAM_PARSING_SECTION,
+                    count_path,
+                    input_sig,
+                    output_fp=count_fp,
+                    wait_stable=False,
+                )
+                compat_dirty = _record_compat_fp(config, "PARSED", dict_path, dict_fp) or compat_dirty
+                compat_dirty = _record_compat_fp(config, "COUNTERS", count_path, count_fp) or compat_dirty
                 continue
 
         print(f"Added {alignment_path} to libs_to_parse")
