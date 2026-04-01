@@ -11,7 +11,7 @@ import multiprocessing
 from collections import OrderedDict
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, getmd5, stage_signature
+from phasis.cache import MEM_FILE_DEFAULT, MemCache, getmd5, sig_key, stage_signature
 from phasis.parallel import run_parallel_with_progress, make_pool
 
 
@@ -55,6 +55,7 @@ CLUSTER_BUILD_BATCH_LIMIT_MAX = 96
 CLUSTER_BUILD_RECOVERY_SUCCESS_SLICES = 2
 CLUSTER_BUILD_RECOVERY_PROGRESS_FRACTION = 0.05
 CLUSTER_BUILD_MAXTASKSPERCHILD = 32
+CLUSTER_BUILD_SCAN_MAXTASKSPERCHILD = 64
 CLUSTER_SCAN_PROGRESS_INTERVAL = 250
 
 
@@ -194,6 +195,55 @@ def _record_compat_cluster_md5(
     return True
 
 
+def _cluster_build_parallel_kwargs(*, maxtasksperchild: int) -> dict:
+    return {
+        "maxtasksperchild": maxtasksperchild,
+        "initial_worker_cap": _cluster_build_initial_worker_cap(),
+        "max_worker_cap": _cluster_build_max_worker_cap(),
+        "adaptive_recovery": True,
+        "recovery_success_slices": CLUSTER_BUILD_RECOVERY_SUCCESS_SLICES,
+        "recovery_progress_fraction": CLUSTER_BUILD_RECOVERY_PROGRESS_FRACTION,
+    }
+
+
+def inspect_cluster_cache_entry(args):
+    """
+    Read-only cache inspection for one cluster-build target.
+
+    Returns:
+      (akey, lclust_path, status, current_md5)
+
+    status values:
+      - "stage_hit": centralized cache entry is reusable
+      - "legacy_hit": legacy [CLUSTERED] entry matches current file
+      - "rebuild": output should be recomputed
+    """
+    akey, lclust_path, input_sig, prev_stage_fp, prev_stage_sig, prev_compat_fp = args
+    lclust_real = os.path.realpath(lclust_path)
+
+    if not os.path.isfile(lclust_real):
+        return (akey, lclust_real, "rebuild", "")
+
+    _, current_md5 = getmd5(lclust_real, wait_stable=False)
+    current_md5 = str(current_md5 or "")
+    if not current_md5:
+        return (akey, lclust_real, "rebuild", "")
+
+    if (
+        input_sig is not None
+        and prev_stage_fp
+        and prev_stage_sig
+        and prev_stage_fp == current_md5
+        and prev_stage_sig == input_sig
+    ):
+        return (akey, lclust_real, "stage_hit", current_md5)
+
+    if prev_compat_fp and prev_compat_fp == current_md5:
+        return (akey, lclust_real, "legacy_hit", current_md5)
+
+    return (akey, lclust_real, "rebuild", current_md5)
+
+
 
 
 def getclusters(args):
@@ -303,20 +353,13 @@ def alt_parallel_process(func, data_chunks):
 
 def process_cluster_batch(batch, batch_id):
     """Run one clustering batch and return results."""
-    initial_worker_cap = _cluster_build_initial_worker_cap()
-    max_worker_cap = _cluster_build_max_worker_cap()
     try:
         return run_parallel_with_progress(
             getclusters,
             batch,
             desc=f"Clustering batch {batch_id}",
             unit="lib-chr",
-            maxtasksperchild=CLUSTER_BUILD_MAXTASKSPERCHILD,
-            initial_worker_cap=initial_worker_cap,
-            max_worker_cap=max_worker_cap,
-            adaptive_recovery=True,
-            recovery_success_slices=CLUSTER_BUILD_RECOVERY_SUCCESS_SLICES,
-            recovery_progress_fraction=CLUSTER_BUILD_RECOVERY_PROGRESS_FRACTION,
+            **_cluster_build_parallel_kwargs(maxtasksperchild=CLUSTER_BUILD_MAXTASKSPERCHILD),
         )
     except Exception as e:
         print(f"[WARN] run_parallel_with_progress failed on batch {batch_id}: {e}")
@@ -420,7 +463,13 @@ def flush_cluster_batch(
 
         l_sig = sig_by_output.get(want_l)
         if cache is not None and l_sig is not None:
-            cache.record(CLUSTER_BUILD_SECTION, want_l, l_sig)
+            cache.record(
+                CLUSTER_BUILD_SECTION,
+                want_l,
+                l_sig,
+                output_fp=lmd5_final,
+                wait_stable=False,
+            )
 
         compat_dirty = (
             _record_compat_cluster_md5(cfg, want_l, md5hex=lmd5_final) or compat_dirty
@@ -511,82 +560,89 @@ def clusterprocess(libs_poscountdict, clustfolder):
             flush=True,
         )
 
+        planned_entries = []
+        inspect_tasks = []
         for akey, positions in libdict.items():
             lclust_path, _ = _cluster_output_paths_for_akey(clustfolder, akey)
+            planned_entries.append((akey, positions, lclust_path))
 
             if input_sig is not None:
                 sig_by_output[lclust_path] = input_sig
-
-                cached_l_md5 = cache.get(CLUSTER_BUILD_SECTION, lclust_path, "") or ""
-                l_hit = cache.hit(
-                    CLUSTER_BUILD_SECTION,
+            inspect_tasks.append(
+                (
+                    akey,
                     lclust_path,
                     input_sig,
-                    wait_stable=False,
+                    cache.get(CLUSTER_BUILD_SECTION, lclust_path, "") or "",
+                    cache.get(CLUSTER_BUILD_SECTION, sig_key(lclust_path), "") or "",
+                    cfg["CLUSTERED"].get(lclust_path, "") or "",
                 )
-                if l_hit:
-                    _prune_old_clustered_entries(cfg, os.path.basename(lclust_path), lclust_path)
-                    compat_dirty = (
-                        _record_compat_cluster_md5(cfg, lclust_path, md5hex=cached_l_md5) or compat_dirty
-                    )
-                    results.append((akey, lclust_path, None))
-                    processed_akeys.append(akey)
-                    source_scanned += 1
-                    source_cache_hits += 1
-                    total_cache_hits += 1
-                    _maybe_report_cluster_scan_progress(
-                        source_label,
-                        source_scanned,
-                        source_total,
-                        source_cache_hits,
-                        source_queued,
-                    )
-                    continue
+            )
 
-                if os.path.isfile(lclust_path):
-                    _, cur_md5 = getmd5(lclust_path, wait_stable=False)
-                    prev_md5 = cfg["CLUSTERED"].get(lclust_path, "")
-                    if prev_md5 and cur_md5 and prev_md5 == cur_md5:
-                        print(f"Legacy cache matches for clustered library-chr {akey}")
-                        cache.record(
-                            CLUSTER_BUILD_SECTION,
-                            lclust_path,
-                            input_sig,
-                            output_fp=cur_md5,
-                        )
-                        _prune_old_clustered_entries(cfg, os.path.basename(lclust_path), lclust_path)
-                        results.append((akey, lclust_path, None))
-                        processed_akeys.append(akey)
-                        source_scanned += 1
-                        source_cache_hits += 1
-                        total_cache_hits += 1
-                        _maybe_report_cluster_scan_progress(
-                            source_label,
-                            source_scanned,
-                            source_total,
-                            source_cache_hits,
-                            source_queued,
-                        )
-                        continue
-            else:
-                if os.path.isfile(lclust_path):
-                    _, cur_md5 = getmd5(lclust_path, wait_stable=False)
-                    prev_md5 = cfg["CLUSTERED"].get(lclust_path, "")
-                    if prev_md5 and cur_md5 and prev_md5 == cur_md5:
-                        _prune_old_clustered_entries(cfg, os.path.basename(lclust_path), lclust_path)
-                        results.append((akey, lclust_path, None))
-                        processed_akeys.append(akey)
-                        source_scanned += 1
-                        source_cache_hits += 1
-                        total_cache_hits += 1
-                        _maybe_report_cluster_scan_progress(
-                            source_label,
-                            source_scanned,
-                            source_total,
-                            source_cache_hits,
-                            source_queued,
-                        )
-                        continue
+        inspect_results = []
+        if inspect_tasks:
+            inspect_results = run_parallel_with_progress(
+                inspect_cluster_cache_entry,
+                inspect_tasks,
+                desc=f"Inspecting cluster cache ({source_label})",
+                min_chunk=1,
+                unit="lib-chr",
+                **_cluster_build_parallel_kwargs(
+                    maxtasksperchild=CLUSTER_BUILD_SCAN_MAXTASKSPERCHILD,
+                ),
+            )
+
+        for planned, inspected in zip(planned_entries, inspect_results):
+            akey, positions, lclust_path = planned
+            _, inspected_path, status, current_md5 = inspected
+            current_md5 = str(current_md5 or "")
+
+            if status == "stage_hit":
+                _prune_old_clustered_entries(cfg, os.path.basename(inspected_path), inspected_path)
+                compat_dirty = (
+                    _record_compat_cluster_md5(cfg, inspected_path, md5hex=current_md5) or compat_dirty
+                )
+                results.append((akey, inspected_path, None))
+                processed_akeys.append(akey)
+                source_scanned += 1
+                source_cache_hits += 1
+                total_cache_hits += 1
+                _maybe_report_cluster_scan_progress(
+                    source_label,
+                    source_scanned,
+                    source_total,
+                    source_cache_hits,
+                    source_queued,
+                )
+                continue
+
+            if status == "legacy_hit":
+                print(f"Legacy cache matches for clustered library-chr {akey}")
+                if input_sig is not None:
+                    cache.record(
+                        CLUSTER_BUILD_SECTION,
+                        inspected_path,
+                        input_sig,
+                        output_fp=current_md5,
+                        wait_stable=False,
+                    )
+                _prune_old_clustered_entries(cfg, os.path.basename(inspected_path), inspected_path)
+                compat_dirty = (
+                    _record_compat_cluster_md5(cfg, inspected_path, md5hex=current_md5) or compat_dirty
+                )
+                results.append((akey, inspected_path, None))
+                processed_akeys.append(akey)
+                source_scanned += 1
+                source_cache_hits += 1
+                total_cache_hits += 1
+                _maybe_report_cluster_scan_progress(
+                    source_label,
+                    source_scanned,
+                    source_total,
+                    source_cache_hits,
+                    source_queued,
+                )
+                continue
 
             batch.append((akey, positions, clustfolder))
             source_scanned += 1

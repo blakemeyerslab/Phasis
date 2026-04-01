@@ -22,6 +22,7 @@ from phasis.cache import (
     MEM_FILE_DEFAULT,
     MemCache,
     assemble_candidate_from_chunks,
+    getmd5,
     md5_file_worker,
     sanitize_mem_md5s,
     stage_signature,
@@ -176,6 +177,76 @@ def _verify_existing_candidate_outputs(
         previous = cfg["CLUSTERS"].get(os.path.basename(outfile))
         verified[outfile] = bool(realpath and current and previous and current == previous)
     return verified
+
+
+def inspect_lclust_input_for_scoring(arg):
+    """
+    Read-only .lclust inspection used to build a one-time scoring manifest.
+
+    Returns:
+      (akey, absolute_realpath, md5hex_or_none)
+    """
+    akey, lclust_path = arg
+    try:
+        lclust_real = os.path.realpath(lclust_path)
+    except Exception:
+        lclust_real = lclust_path
+
+    if not os.path.isfile(lclust_real):
+        return (akey, lclust_real, None)
+
+    _, md5hex = getmd5(lclust_real, wait_stable=False)
+    if not md5hex:
+        md5hex = None
+    return (akey, lclust_real, md5hex)
+
+
+def _inspect_cluster_scoring_inputs(
+    filtered_inputs,
+    cfg: configparser.ConfigParser,
+    sect_lclust: str,
+    *,
+    initial_worker_cap: int,
+    max_worker_cap: int,
+):
+    if not filtered_inputs:
+        return {}, {}, set()
+
+    manifest_results = run_parallel_with_progress(
+        inspect_lclust_input_for_scoring,
+        filtered_inputs,
+        desc="Inspecting .lclust inputs",
+        min_chunk=1,
+        unit="file",
+        **_cluster_scoring_parallel_kwargs(
+            maxtasksperchild=CLUSTER_SCORING_HASH_MAXTASKSPERCHILD,
+            initial_worker_cap=initial_worker_cap,
+            max_worker_cap=max_worker_cap,
+        ),
+    )
+
+    manifest_by_path = {}
+    lclust_md5_updates = {}
+    changed_inputs = set()
+    unchanged = 0
+
+    for akey, lclust_path, md5hex in manifest_results:
+        md5_text = str(md5hex or "")
+        prev_md5 = (cfg[sect_lclust].get(lclust_path) or "").strip()
+        is_changed = (not md5_text) or (not prev_md5) or (prev_md5 != md5_text)
+        manifest_by_path[lclust_path] = (akey, md5_text, is_changed)
+        if md5_text:
+            lclust_md5_updates[lclust_path] = md5_text
+        if is_changed:
+            changed_inputs.add(akey)
+        else:
+            unchanged += 1
+
+    print(
+        f"[scan] .lclust manifest classified {len(changed_inputs)} changed and {unchanged} unchanged input(s).",
+        flush=True,
+    )
+    return manifest_by_path, lclust_md5_updates, changed_inputs
 
 
 def _ensure_cluster_scoring_sections(cfg: configparser.ConfigParser) -> None:
@@ -943,6 +1014,23 @@ def scoringprocess(
                         best_lib, best_len = alib, len(pref)
             akey_to_lib[akey_base] = best_lib
 
+    input_manifest_by_path, lclust_md5_updates, changed_inputs_global = _inspect_cluster_scoring_inputs(
+        filtered_inputs,
+        config,
+        sect_lclust,
+        initial_worker_cap=initial_worker_cap,
+        max_worker_cap=max_worker_cap,
+    )
+    all_outputs_verified = bool(expected_outfiles) and all(
+        verified_outputs.get(outf, False) for _, outf in expected_outfiles
+    )
+    if all_outputs_verified and not changed_inputs_global and not force_rescore:
+        print(
+            "[scan] Candidate outputs verified and all .lclust inputs are unchanged; "
+            "batch scoring work will be skipped.",
+            flush=True,
+        )
+
     # -------------------- Scored chunks folder (global for clustwrite) --------
     currdir = os.getcwd()
     base_scored = os.path.join(currdir, f"{phase}_scoredClusters")
@@ -989,7 +1077,6 @@ def scoringprocess(
     sens, asens = getPhasedIndexes(WINDOW_SIZE)
 
     # Track md5 updates + libs that need re-assembly
-    lclust_md5_updates = {}
     libs_marked_stale = set()
     if purge_existing or force_rescore:
         libs_marked_stale.update(alib for (alib, _) in expected_outfiles)
@@ -1018,38 +1105,20 @@ def scoringprocess(
 
         # 3) Input MD5 check (absolute realpaths in [CLUSTERED])
         batch_pairs = []
-        batch_paths = []
         for akey, p in batch:
             p_abs = os.path.realpath(p)
             batch_pairs.append((akey, p_abs))
-            batch_paths.append(p_abs)
 
         changed_inputs = set()
-        batch_md5_map = {}
-        if batch_paths:
+        if batch_pairs:
             print(
-                f"[scan] Batch {b_idx}/{b_tot}: hashing {len(batch_paths)} .lclust input(s)...",
+                f"[scan] Batch {b_idx}/{b_tot}: consulting precomputed .lclust manifest for {len(batch_pairs)} input(s)...",
                 flush=True,
             )
-            md5_results_in = run_parallel_with_progress(
-                md5_file_worker,
-                batch_paths,
-                desc=f"Hashing .lclust (batch {b_idx}/{b_tot})",
-                min_chunk=1,
-                unit="file",
-                **hash_parallel_kwargs,
-            )
-            batch_md5_map = {p: md5 for (p, md5) in md5_results_in if md5 is not None}
             for akey, p_abs in batch_pairs:
-                curr_in = batch_md5_map.get(p_abs)
-                if curr_in is None:
+                _, _, is_changed = input_manifest_by_path.get(p_abs, (akey, "", True))
+                if force_rescore or is_changed:
                     changed_inputs.add(akey)
-                    continue
-                lclust_md5_updates[p_abs] = curr_in
-                if not force_rescore:
-                    prev_in = config[sect_lclust].get(p_abs)
-                    if not prev_in or prev_in != curr_in:
-                        changed_inputs.add(akey)
 
         # If outputs are OK and there are no changed inputs, we can skip scoring
         if batch_outputs_ok and not changed_inputs and not force_rescore:
