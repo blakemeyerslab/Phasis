@@ -33,6 +33,13 @@ def _resolve_lib_worker_cap(ncores_local: int) -> int:
     return int(max(1, min(ncores_local, configured)))
 
 
+def _resolve_worker_cap(cap_value, ncores_local: int) -> int:
+    configured = _coerce_positive_int(cap_value, None)
+    if configured is None:
+        configured = int(max(1, ncores_local))
+    return int(max(1, min(ncores_local, configured)))
+
+
 def _resolve_maxtasksperchild(
     maxtasksperchild,
     *,
@@ -109,6 +116,8 @@ def run_parallel_with_progress(
     kind="compute",        # Passed to make_pool (e.g., 'plot' -> sets MPLBACKEND=Agg)
     snapshot_path=None,    # Optional explicit runtime snapshot path
     maxtasksperchild=None, # Auto-tuned worker reuse; callers can still override explicitly
+    initial_worker_cap=None,
+    max_worker_cap=None,
     adaptive_recovery=True,
     recovery_success_slices=2,
     recovery_progress_fraction=0.05,
@@ -123,6 +132,8 @@ def run_parallel_with_progress(
         smaller (chunk_size, nworkers): [proposed] -> 10 -> 5 -> 1; workers n->8->4->2->1.
       - Optional adaptive recovery can re-expand chunk_size/workers after a
         stretch of successful reduced-mode slices.
+      - Callers can start conservatively with `initial_worker_cap` while still
+        allowing recovery to grow toward `max_worker_cap`.
       - maxtasksperchild is auto-tuned unless callers override it.
       - BLAS single-threaded to avoid hidden fan-out.
 
@@ -143,11 +154,14 @@ def run_parallel_with_progress(
         kind=kind,
         start_method=start_method,
     )
+    resolved_max_worker_cap = _resolve_worker_cap(max_worker_cap, ncores)
+    resolved_initial_worker_cap = _resolve_worker_cap(initial_worker_cap, ncores)
+    resolved_initial_worker_cap = min(resolved_initial_worker_cap, resolved_max_worker_cap)
 
     # Initial chunk size & workers
     initial_chunk_size = _compute_initial_chunk_size(n_data, ncores, unit, min_chunk, batch_factor)
     chunk_size = initial_chunk_size
-    initial_nworkers = min(ncores, chunk_size) or 1
+    initial_nworkers = min(ncores, chunk_size, resolved_initial_worker_cap) or 1
     nworkers = initial_nworkers
     success_slices_since_failure = 0
     items_since_failure = 0
@@ -163,35 +177,45 @@ def run_parallel_with_progress(
     i = 0
     with tqdm(total=n_data, desc=desc, unit=unit) as pbar:
         while i < n_data:
+            current_worker_target = min(ncores, chunk_size, resolved_max_worker_cap) or 1
             if adaptive_recovery and (
-                chunk_size < initial_chunk_size or nworkers < initial_nworkers
+                chunk_size < initial_chunk_size or nworkers < current_worker_target
             ):
-                if (
-                    success_slices_since_failure >= max(1, int(recovery_success_slices))
-                    and items_since_failure >= recovery_progress_items
-                ):
-                    prev_chunk_size = chunk_size
-                    prev_nworkers = nworkers
-                    chunk_size = _grow_parallel_setting(
-                        chunk_size,
-                        initial_chunk_size,
-                        growth_factor=recovery_growth_factor,
-                    )
-                    nworkers = min(
-                        ncores,
-                        chunk_size,
-                        _grow_parallel_setting(
-                            nworkers,
-                            initial_nworkers,
-                            growth_factor=recovery_growth_factor,
-                        ),
-                    ) or 1
+                if nworkers >= current_worker_target and chunk_size >= initial_chunk_size:
                     success_slices_since_failure = 0
                     items_since_failure = 0
-                    if chunk_size != prev_chunk_size or nworkers != prev_nworkers:
-                        print(
-                            f"[INFO] Re-expanding parallelism to chunk_size={chunk_size}, workers={nworkers}."
+                else:
+                    if (
+                        success_slices_since_failure >= max(1, int(recovery_success_slices))
+                        and items_since_failure >= recovery_progress_items
+                    ):
+                        prev_chunk_size = chunk_size
+                        prev_nworkers = nworkers
+                        chunk_size = _grow_parallel_setting(
+                            chunk_size,
+                            initial_chunk_size,
+                            growth_factor=recovery_growth_factor,
                         )
+                        worker_growth_target = min(
+                            ncores,
+                            chunk_size,
+                            resolved_max_worker_cap,
+                        ) or 1
+                        nworkers = min(
+                            ncores,
+                            worker_growth_target,
+                            _grow_parallel_setting(
+                                nworkers,
+                                worker_growth_target,
+                                growth_factor=recovery_growth_factor,
+                            ),
+                        ) or 1
+                        success_slices_since_failure = 0
+                        items_since_failure = 0
+                        if chunk_size != prev_chunk_size or nworkers != prev_nworkers:
+                            print(
+                                f"[INFO] Re-expanding parallelism to chunk_size={chunk_size}, workers={nworkers}."
+                            )
 
             start = i
             end = min(i + chunk_size, n_data)

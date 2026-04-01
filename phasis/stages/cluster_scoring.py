@@ -8,6 +8,7 @@ scored chunk folder explicitly to worker tasks.
 
 import configparser
 import gc
+import multiprocessing
 import os
 import pickle
 import re
@@ -43,6 +44,138 @@ scoredClustFolder = None
 
 
 CLUSTER_SCORING_SECTION = "CLUSTER_SCORING"
+CLUSTER_SCORING_DEFAULT_INITIAL_WORKER_CAP = 20
+CLUSTER_SCORING_BATCH_LIMIT = 256
+CLUSTER_SCORING_HASH_MAXTASKSPERCHILD = 64
+CLUSTER_SCORING_LOAD_MAXTASKSPERCHILD = 24
+CLUSTER_SCORING_SCORE_MAXTASKSPERCHILD = 8
+CLUSTER_SCORING_RECOVERY_SUCCESS_SLICES = 2
+CLUSTER_SCORING_RECOVERY_PROGRESS_FRACTION = 0.05
+
+
+def _coerce_positive_int(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        value = int(value)
+        if value <= 0:
+            return default
+        return value
+    except Exception:
+        return default
+
+
+def _cluster_scoring_ncores() -> int:
+    ncores = getattr(rt, "ncores", None)
+    try:
+        ncores = int(ncores) if ncores is not None else 0
+    except Exception:
+        ncores = 0
+    if ncores <= 0:
+        ncores = multiprocessing.cpu_count()
+    return int(max(1, ncores))
+
+
+def _resolve_cluster_scoring_worker_cap(runtime_attr: str, env_name: str, default=None) -> int:
+    configured = _coerce_positive_int(
+        getattr(rt, runtime_attr, None),
+        _coerce_positive_int(os.environ.get(env_name), default),
+    )
+    ncores = _cluster_scoring_ncores()
+    if configured is None:
+        configured = ncores
+    return int(max(1, min(ncores, configured)))
+
+
+def _cluster_scoring_initial_worker_cap() -> int:
+    return _resolve_cluster_scoring_worker_cap(
+        "cluster_scoring_initial_worker_cap",
+        "PHASIS_CLUSTER_SCORING_INITIAL_WORKER_CAP",
+        CLUSTER_SCORING_DEFAULT_INITIAL_WORKER_CAP,
+    )
+
+
+def _cluster_scoring_max_worker_cap() -> int:
+    return _resolve_cluster_scoring_worker_cap(
+        "cluster_scoring_max_worker_cap",
+        "PHASIS_CLUSTER_SCORING_MAX_WORKER_CAP",
+        None,
+    )
+
+
+def _cluster_scoring_parallel_kwargs(
+    *,
+    maxtasksperchild: int,
+    initial_worker_cap: int,
+    max_worker_cap: int,
+) -> dict:
+    return {
+        "maxtasksperchild": maxtasksperchild,
+        "initial_worker_cap": initial_worker_cap,
+        "max_worker_cap": max_worker_cap,
+        "adaptive_recovery": True,
+        "recovery_success_slices": CLUSTER_SCORING_RECOVERY_SUCCESS_SLICES,
+        "recovery_progress_fraction": CLUSTER_SCORING_RECOVERY_PROGRESS_FRACTION,
+    }
+
+
+def _cluster_scoring_batch_size(n_data: int, initial_worker_cap: int) -> int:
+    if n_data <= 0:
+        return 1
+    ncores = _cluster_scoring_ncores()
+    target = max(initial_worker_cap * 6, ncores * 4, 128)
+    target = min(CLUSTER_SCORING_BATCH_LIMIT, target)
+    return max(1, min(n_data, max(initial_worker_cap, target)))
+
+
+def _cluster_scoring_needed_nest_keys(inputs) -> set[str]:
+    keys = set()
+    for akey, _ in inputs or []:
+        akey_text = str(akey)
+        keys.add(akey_text)
+        keys.add(canonicalize_akey(akey_text))
+    return keys
+
+
+def _verify_existing_candidate_outputs(
+    cfg: configparser.ConfigParser,
+    expected_outfiles,
+    *,
+    initial_worker_cap: int,
+    max_worker_cap: int,
+) -> dict[str, bool]:
+    existing_paths = []
+    outfile_realpaths = {}
+    for _, outfile in expected_outfiles:
+        if os.path.isfile(outfile):
+            realpath = os.path.realpath(outfile)
+            outfile_realpaths[outfile] = realpath
+            existing_paths.append(realpath)
+
+    if not existing_paths:
+        return {}
+
+    md5_results = run_parallel_with_progress(
+        md5_file_worker,
+        existing_paths,
+        desc="Verifying existing candidate outputs",
+        min_chunk=1,
+        unit="file",
+        **_cluster_scoring_parallel_kwargs(
+            maxtasksperchild=CLUSTER_SCORING_HASH_MAXTASKSPERCHILD,
+            initial_worker_cap=initial_worker_cap,
+            max_worker_cap=max_worker_cap,
+        ),
+    )
+    current_md5 = {path: md5 for path, md5 in md5_results if md5}
+
+    verified = {}
+    for _, outfile in expected_outfiles:
+        realpath = outfile_realpaths.get(outfile)
+        current = current_md5.get(realpath)
+        previous = cfg["CLUSTERS"].get(os.path.basename(outfile))
+        verified[outfile] = bool(realpath and current and previous and current == previous)
+    return verified
 
 
 def _ensure_cluster_scoring_sections(cfg: configparser.ConfigParser) -> None:
@@ -698,9 +831,12 @@ def scoringprocess(
     if any(removed.values()):
         cache.flush()
 
-    # -------------------- Collect nest dict (unfiltered; robust in concat) ----
-    # Avoid losing entries by over-filtering here; we'll probe with canonical keys later.
-    libchrs_nestdict = build_libchrs_nestdict(libs_nestdict)
+    initial_worker_cap = _cluster_scoring_initial_worker_cap()
+    max_worker_cap = _cluster_scoring_max_worker_cap()
+
+    # -------------------- Collect nest dict (needed keys only) ----------------
+    needed_nest_keys = _cluster_scoring_needed_nest_keys(libchrs_clust_toscore)
+    libchrs_nestdict = build_libchrs_nestdict(libs_nestdict, needed_keys=needed_nest_keys)
 
     # -------------------- Filter: existing .lclust + available nest -----------
     filtered_inputs, missing_akeys, missing_files = [], [], []
@@ -777,6 +913,19 @@ def scoringprocess(
             print(f"cluster files are {stage_hits}")
             return stage_hits
 
+    verified_outputs = {}
+    if verify_outputs and not force_rescore and expected_outfiles:
+        print(
+            f"[scan] Preflighting {len(expected_outfiles)} candidate output(s) before scoring...",
+            flush=True,
+        )
+        verified_outputs = _verify_existing_candidate_outputs(
+            config,
+            expected_outfiles,
+            initial_worker_cap=initial_worker_cap,
+            max_worker_cap=max_worker_cap,
+        )
+
     # -------------------- Map akey (basename) -> lib path ---------------------
     akey_to_lib = {}
     if concat_mode and concat_target_lib:
@@ -813,10 +962,28 @@ def scoringprocess(
 
     # -------------------- Batch planning -------------------------------------
     n_data = len(filtered_inputs)
-    #print(f"n_data is {n_data}")
-    batch_size = max(10, min(39, n_data))  # mirrors typical chunk sizes seen in logs
+    batch_size = _cluster_scoring_batch_size(n_data, initial_worker_cap)
     batches = list(iter_batches(filtered_inputs, batch_size))
-    #print(f"n_batches set to {len(batches)}")
+    print(
+        f"[scan] Cluster scoring will start near {initial_worker_cap} worker(s), "
+        f"can grow to {max_worker_cap}, and will process batches of up to {batch_size} lib-chr inputs.",
+        flush=True,
+    )
+    hash_parallel_kwargs = _cluster_scoring_parallel_kwargs(
+        maxtasksperchild=CLUSTER_SCORING_HASH_MAXTASKSPERCHILD,
+        initial_worker_cap=initial_worker_cap,
+        max_worker_cap=max_worker_cap,
+    )
+    load_parallel_kwargs = _cluster_scoring_parallel_kwargs(
+        maxtasksperchild=CLUSTER_SCORING_LOAD_MAXTASKSPERCHILD,
+        initial_worker_cap=initial_worker_cap,
+        max_worker_cap=max_worker_cap,
+    )
+    score_parallel_kwargs = _cluster_scoring_parallel_kwargs(
+        maxtasksperchild=CLUSTER_SCORING_SCORE_MAXTASKSPERCHILD,
+        initial_worker_cap=initial_worker_cap,
+        max_worker_cap=max_worker_cap,
+    )
 
     # Precompute phased indexes
     sens, asens = getPhasedIndexes(WINDOW_SIZE)
@@ -844,44 +1011,10 @@ def scoringprocess(
             filtered = [(alib, outf) for (alib, outf) in expected_outfiles if alib in batch_libs]
             batch_outfiles = filtered or list(expected_outfiles)
 
-        # 2) Output MD5 check (bare filenames in [CLUSTERS])
-        batch_outputs_ok = False
-        outfile_md5_current = {}
-        outfile_realpaths = {}
-
-        if verify_outputs and not force_rescore and batch_outfiles:
-            existing_paths = []
-            for _, outf in batch_outfiles:
-                if os.path.isfile(outf):
-                    p = os.path.realpath(outf)
-                    outfile_realpaths[outf] = p
-                    existing_paths.append(p)
-
-            if existing_paths:
-                md5_results_out = run_parallel_with_progress(
-                    md5_file_worker,
-                    existing_paths,
-                    desc=f"Hashing existing outputs (batch {b_idx}/{b_tot})",
-                    min_chunk=1,
-                    unit="file",
-                )
-                for p_abs, md5 in md5_results_out:
-                    if md5:
-                        outfile_md5_current[p_abs] = md5
-
-                # Compare bare name keys in [CLUSTERS]
-                all_match = True
-                for _, outf in batch_outfiles:
-                    p_abs = outfile_realpaths.get(outf)
-                    if not p_abs:
-                        all_match = False
-                        break
-                    curr = outfile_md5_current.get(p_abs)
-                    prev = config[sect_clusters].get(os.path.basename(outf))
-                    if not curr or not prev or prev != curr:
-                        all_match = False
-                        break
-                batch_outputs_ok = all_match
+        # 2) Output verification (preflighted once per stage)
+        batch_outputs_ok = bool(batch_outfiles) and all(
+            verified_outputs.get(outf, False) for _, outf in batch_outfiles
+        )
 
         # 3) Input MD5 check (absolute realpaths in [CLUSTERED])
         batch_pairs = []
@@ -892,47 +1025,53 @@ def scoringprocess(
             batch_paths.append(p_abs)
 
         changed_inputs = set()
-        unknown_inputs = set()
         batch_md5_map = {}
-        if not force_rescore:
+        if batch_paths:
+            print(
+                f"[scan] Batch {b_idx}/{b_tot}: hashing {len(batch_paths)} .lclust input(s)...",
+                flush=True,
+            )
             md5_results_in = run_parallel_with_progress(
                 md5_file_worker,
                 batch_paths,
                 desc=f"Hashing .lclust (batch {b_idx}/{b_tot})",
                 min_chunk=1,
                 unit="file",
+                **hash_parallel_kwargs,
             )
             batch_md5_map = {p: md5 for (p, md5) in md5_results_in if md5 is not None}
             for akey, p_abs in batch_pairs:
                 curr_in = batch_md5_map.get(p_abs)
                 if curr_in is None:
                     changed_inputs.add(akey)
-                    unknown_inputs.add(p_abs)
                     continue
-                prev_in = config[sect_lclust].get(p_abs)
-                if not prev_in or prev_in != curr_in:
-                    changed_inputs.add(akey)
-                else:
-                    lclust_md5_updates[p_abs] = curr_in  # unchanged; refresh md5
+                lclust_md5_updates[p_abs] = curr_in
+                if not force_rescore:
+                    prev_in = config[sect_lclust].get(p_abs)
+                    if not prev_in or prev_in != curr_in:
+                        changed_inputs.add(akey)
 
         # If outputs are OK and there are no changed inputs, we can skip scoring
         if batch_outputs_ok and not changed_inputs and not force_rescore:
-            #print(f"[INFO] Batch {b_idx}/{b_tot}: outputs ok & inputs unchanged; skip scoring.")
-            # still refresh any unknown inputs
-            for p_abs in unknown_inputs:
-                md5_now = batch_md5_map.get(p_abs)
-                if md5_now:
-                    lclust_md5_updates[p_abs] = md5_now
+            print(
+                f"[scan] Batch {b_idx}/{b_tot}: candidate outputs verified and inputs unchanged; skipping scoring.",
+                flush=True,
+            )
             continue
 
         # 4) Load lclust dicts for the batch
         to_process = [(akey, p_abs) for (akey, p_abs) in batch_pairs]
+        print(
+            f"[scan] Batch {b_idx}/{b_tot}: loading {len(to_process)} .lclust file(s)...",
+            flush=True,
+        )
         loaded = run_parallel_with_progress(
             load_lclust_for_scoring,
             to_process,
             desc=f"Loading .lclust (batch {b_idx}/{b_tot}, {len(to_process)} akeys)",
             min_chunk=1,
             unit="lib-chr",
+            **load_parallel_kwargs,
         )
 
         # Build lookup tables using canonical keys for robust matching
@@ -999,29 +1138,21 @@ def scoringprocess(
 
         # 6) Score clusters -> *.cluster chunks
         if rawinputs:
+            print(
+                f"[scan] Batch {b_idx}/{b_tot}: scoring {len(rawinputs)} lib-chr cluster set(s)...",
+                flush=True,
+            )
             run_parallel_with_progress(
                 clustassemble,
                 rawinputs,
                 desc=f"Scoring clusters (batch {b_idx}/{b_tot})",
                 min_chunk=1,
                 unit="lib-chr",
+                **score_parallel_kwargs,
             )
             libs_marked_stale.update(batch_libs)
         else:
             print(f"[INFO] Batch {b_idx}/{b_tot}: nothing to score after loader/nest checks.")
-
-        # 7) Refresh input MD5s for all batch paths
-        if batch_paths:
-            md5_results_in2 = run_parallel_with_progress(
-                md5_file_worker,
-                batch_paths,
-                desc=f"Refreshing .lclust hashes (batch {b_idx}/{b_tot})",
-                min_chunk=1,
-                unit="file",
-            )
-            for p_abs, md5 in md5_results_in2:
-                if md5 is not None:
-                    lclust_md5_updates[p_abs] = md5
 
         # Free batch data
         del loaded, by_path, by_akey, rawinputs
@@ -1046,6 +1177,10 @@ def scoringprocess(
                 continue
 
             # Rebuild from chunks
+            print(
+                f"[scan] Assembling candidate output for {lib_prefix}...",
+                flush=True,
+            )
             if os.path.isfile(outfile):
                 try:
                     os.remove(outfile)
@@ -1074,6 +1209,7 @@ def scoringprocess(
             desc="Hashing regenerated outputs",
             min_chunk=1,
             unit="file",
+            **hash_parallel_kwargs,
         )
         for p_abs, md5 in md5_after:
             if md5:
@@ -1093,6 +1229,7 @@ def scoringprocess(
                 desc="Hashing .cluster chunks",
                 min_chunk=1,
                 unit="file",
+                **hash_parallel_kwargs,
             )
             for p_abs, md5 in md5_chunks:
                 if md5:

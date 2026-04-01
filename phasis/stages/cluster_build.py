@@ -52,10 +52,61 @@ def _flush_prev_cluster(prev_merged, clustid, clustlen_cutoff, clustdict_long, c
 
 
 CLUSTER_BUILD_SECTION = "CLUSTER_BUILD"
+CLUSTER_BUILD_DEFAULT_INITIAL_WORKER_CAP = 20
 CLUSTER_BUILD_RECOVERY_SUCCESS_SLICES = 2
 CLUSTER_BUILD_RECOVERY_PROGRESS_FRACTION = 0.05
 CLUSTER_BUILD_MAXTASKSPERCHILD = 32
 CLUSTER_SCAN_PROGRESS_INTERVAL = 250
+
+
+def _coerce_positive_int(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        value = int(value)
+        if value <= 0:
+            return default
+        return value
+    except Exception:
+        return default
+
+
+def _cluster_build_ncores() -> int:
+    ncores = getattr(rt, "ncores", None)
+    try:
+        ncores = int(ncores) if ncores is not None else 0
+    except Exception:
+        ncores = 0
+    if ncores <= 0:
+        ncores = multiprocessing.cpu_count()
+    return int(max(1, ncores))
+
+
+def _resolve_cluster_build_worker_cap(runtime_attr: str, env_name: str, default=None) -> int:
+    configured = _coerce_positive_int(
+        getattr(rt, runtime_attr, None),
+        _coerce_positive_int(os.environ.get(env_name), default),
+    )
+    ncores = _cluster_build_ncores()
+    if configured is None:
+        configured = ncores
+    return int(max(1, min(ncores, configured)))
+
+
+def _cluster_build_initial_worker_cap() -> int:
+    return _resolve_cluster_build_worker_cap(
+        "cluster_build_initial_worker_cap",
+        "PHASIS_CLUSTER_BUILD_INITIAL_WORKER_CAP",
+        CLUSTER_BUILD_DEFAULT_INITIAL_WORKER_CAP,
+    )
+
+
+def _cluster_build_max_worker_cap() -> int:
+    return _resolve_cluster_build_worker_cap(
+        "cluster_build_max_worker_cap",
+        "PHASIS_CLUSTER_BUILD_MAX_WORKER_CAP",
+        None,
+    )
 
 
 def _ensure_cluster_sections(cfg: configparser.ConfigParser) -> None:
@@ -69,14 +120,8 @@ def _cluster_batch_limit() -> int:
     Use larger clustering batches on high-core systems so scaffold-heavy runs
     can keep more lib-chr jobs in flight.
     """
-    ncores = getattr(rt, "ncores", None)
-    try:
-        ncores = int(ncores) if ncores is not None else 0
-    except Exception:
-        ncores = 0
-    if ncores <= 0:
-        ncores = multiprocessing.cpu_count()
-    return max(10, min(ncores * 2, 128))
+    ncores = _cluster_build_ncores()
+    return max(CLUSTER_BUILD_DEFAULT_INITIAL_WORKER_CAP, min(ncores * 4, 256))
 
 
 def _cluster_output_paths_for_akey(clustfolder: str, akey: str) -> tuple[str, str]:
@@ -254,10 +299,7 @@ def getclusters(args):
 
 def alt_parallel_process(func, data_chunks):
     """Fallback clustering runner using make_pool (spawn-safe initializer)."""
-    ncores = rt.ncores
-    if ncores is None or int(ncores) <= 0:
-        ncores = multiprocessing.cpu_count()
-    max_workers = int(ncores)
+    max_workers = _cluster_build_initial_worker_cap()
 
     with make_pool(max_workers, maxtasksperchild=CLUSTER_BUILD_MAXTASKSPERCHILD) as pool:
         for result in pool.imap_unordered(func, data_chunks, chunksize=1):
@@ -266,6 +308,8 @@ def alt_parallel_process(func, data_chunks):
 
 def process_cluster_batch(batch, batch_id):
     """Run one clustering batch and return results."""
+    initial_worker_cap = _cluster_build_initial_worker_cap()
+    max_worker_cap = _cluster_build_max_worker_cap()
     try:
         return run_parallel_with_progress(
             getclusters,
@@ -273,6 +317,8 @@ def process_cluster_batch(batch, batch_id):
             desc=f"Clustering batch {batch_id}",
             unit="lib-chr",
             maxtasksperchild=CLUSTER_BUILD_MAXTASKSPERCHILD,
+            initial_worker_cap=initial_worker_cap,
+            max_worker_cap=max_worker_cap,
             adaptive_recovery=True,
             recovery_success_slices=CLUSTER_BUILD_RECOVERY_SUCCESS_SLICES,
             recovery_progress_fraction=CLUSTER_BUILD_RECOVERY_PROGRESS_FRACTION,
@@ -429,6 +475,11 @@ def clusterprocess(libs_poscountdict, clustfolder):
     CLUSTER_CHUNK_MAX = _cluster_batch_limit()
     batch = []
     batch_index = 0
+    print(
+        f"[scan] Cluster batches will start near {_cluster_build_initial_worker_cap()} worker(s) "
+        f"and can grow to {_cluster_build_max_worker_cap()} across slices.",
+        flush=True,
+    )
 
     for source_index, src in enumerate(sources, start=1):
         input_sig = None
