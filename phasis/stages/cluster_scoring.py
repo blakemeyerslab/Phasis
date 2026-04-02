@@ -50,6 +50,8 @@ CLUSTER_SCORING_BATCH_LIMIT = 256
 CLUSTER_SCORING_HASH_MAXTASKSPERCHILD = 64
 CLUSTER_SCORING_LOAD_MAXTASKSPERCHILD = 24
 CLUSTER_SCORING_SCORE_MAXTASKSPERCHILD = 8
+CLUSTER_SCORING_NESTDICT_MAXTASKSPERCHILD = 16
+CLUSTER_SCORING_ASSEMBLY_MAXTASKSPERCHILD = 16
 CLUSTER_SCORING_RECOVERY_SUCCESS_SLICES = 2
 CLUSTER_SCORING_RECOVERY_PROGRESS_FRACTION = 0.05
 
@@ -286,6 +288,27 @@ def _normalize_cache_file_inputs(sources):
     return sorted(set(norm))
 
 
+def load_filtered_nestdict_source(job):
+    idx, src, needed_keys = job
+    try:
+        with open(src, "rb") as fh:
+            loaded = pickle.load(fh)
+    except Exception as e:
+        return idx, None, f"[WARN] Could not load dict file '{src}': {e}"
+
+    if not isinstance(loaded, dict):
+        return idx, None, f"[WARN] Dict file '{src}' did not contain a dict; got {type(loaded)}"
+
+    if needed_keys is None:
+        return idx, loaded, None
+
+    subset = {}
+    for k in needed_keys:
+        if k in loaded:
+            subset[k] = loaded[k]
+    return idx, subset, None
+
+
 def inspect_cluster_scoring_signature_input(path):
     try:
         p = os.path.abspath(os.path.expanduser(str(path)))
@@ -448,7 +471,13 @@ def canonicalize_akey(s: str) -> str:
 
     return base
 
-def build_libchrs_nestdict(sources, needed_keys=None):
+def build_libchrs_nestdict(
+    sources,
+    needed_keys=None,
+    *,
+    initial_worker_cap: int | None = None,
+    max_worker_cap: int | None = None,
+):
     """
     Build {akey: value} from a mix of:
       - dict objects (each mapping akey -> value), or
@@ -463,6 +492,12 @@ def build_libchrs_nestdict(sources, needed_keys=None):
     else:
         iterable = list(sources)
 
+    needed_keys_seq = None
+    if needed_keys is not None:
+        needed_keys_seq = tuple(sorted(str(k) for k in needed_keys))
+
+    path_jobs = []
+    path_results = {}
     for idx, src in enumerate(iterable):
         if isinstance(src, dict):
             # Direct merge, but only required keys if specified
@@ -473,28 +508,40 @@ def build_libchrs_nestdict(sources, needed_keys=None):
                     if k in needed_keys:
                         result[k] = v
         elif isinstance(src, str):
-            # Load from pickle file path
-            try:
-                with open(src, "rb") as fh:
-                    loaded = pickle.load(fh)
-            except Exception as e:
-                print(f"[WARN] Could not load dict file '{src}': {e}")
-                continue
-            if not isinstance(loaded, dict):
-                print(f"[WARN] Dict file '{src}' did not contain a dict; got {type(loaded)}")
-                continue
-            if needed_keys is None:
-                result.update(loaded)
-            else:
-                # Only keep what we need
-                for k in needed_keys:
-                    if k in loaded:
-                        result[k] = loaded[k]
-            # free per-file object ASAP
-            del loaded
-            gc.collect()
+            path_jobs.append((idx, src, needed_keys_seq))
         else:
             print(f"[WARN] Unexpected libs_nestdict element type at index {idx}: {type(src)}; skipping")
+
+    if path_jobs:
+        path_entries = run_parallel_with_progress(
+            load_filtered_nestdict_source,
+            path_jobs,
+            desc="Loading nestdict sources",
+            min_chunk=1,
+            unit="file",
+            **_cluster_scoring_parallel_kwargs(
+                maxtasksperchild=CLUSTER_SCORING_NESTDICT_MAXTASKSPERCHILD,
+                initial_worker_cap=(
+                    initial_worker_cap if initial_worker_cap is not None else _cluster_scoring_initial_worker_cap()
+                ),
+                max_worker_cap=(
+                    max_worker_cap if max_worker_cap is not None else _cluster_scoring_max_worker_cap()
+                ),
+            ),
+        )
+        for idx, loaded, warn in path_entries:
+            if warn:
+                print(warn)
+            path_results[idx] = loaded
+
+        for idx, src in enumerate(iterable):
+            if not isinstance(src, str):
+                continue
+            loaded = path_results.get(idx)
+            if not isinstance(loaded, dict):
+                continue
+            result.update(loaded)
+            gc.collect()
 
     return result
 
@@ -520,6 +567,35 @@ def load_lclust_for_scoring(arg):
     except Exception as e:
         print(f"[WARN] Could not load {lclust_path}: {e}")
         return (lclust_path, None, None)
+
+
+def assemble_candidate_output_job(job):
+    lib_prefix, outfile, scored_dir, phase_value = job
+
+    if os.path.isfile(outfile):
+        try:
+            os.remove(outfile)
+        except Exception:
+            pass
+
+    n_chunks, n_bytes = assemble_candidate_from_chunks(
+        scored_dir,
+        lib_prefix,
+        phase_value,
+        outfile,
+    )
+    exists = os.path.isfile(outfile) and os.path.getsize(outfile) > 0
+    md5hex = ""
+    if exists:
+        _, md5hex = getmd5(outfile, wait_stable=False)
+    return {
+        "outfile": outfile,
+        "lib_prefix": lib_prefix,
+        "n_chunks": int(n_chunks),
+        "n_bytes": int(n_bytes),
+        "exists": bool(exists),
+        "md5": str(md5hex or ""),
+    }
 
 def getPhasedIndexes(WINDOW_SIZE):
     '''
@@ -969,7 +1045,12 @@ def scoringprocess(
         f"[scan] Loading parser nestdict sources for {len(needed_nest_keys)} cluster key(s)...",
         flush=True,
     )
-    libchrs_nestdict = build_libchrs_nestdict(libs_nestdict, needed_keys=needed_nest_keys)
+    libchrs_nestdict = build_libchrs_nestdict(
+        libs_nestdict,
+        needed_keys=needed_nest_keys,
+        initial_worker_cap=initial_worker_cap,
+        max_worker_cap=max_worker_cap,
+    )
     print(
         f"[scan] Loaded nestdict entries for {len(libchrs_nestdict)} cluster key(s).",
         flush=True,
@@ -1063,6 +1144,11 @@ def scoringprocess(
             expected_outfiles,
             initial_worker_cap=initial_worker_cap,
             max_worker_cap=max_worker_cap,
+        )
+        verified_count = sum(1 for ok in verified_outputs.values() if ok)
+        print(
+            f"[scan] Candidate output preflight verified {verified_count}/{len(expected_outfiles)} output(s).",
+            flush=True,
         )
 
     # -------------------- Map akey (basename) -> lib path ---------------------
@@ -1299,9 +1385,11 @@ def scoringprocess(
     # -------------------- Assemble per-lib outputs ----------------------------
     clusterFiles = []
     regenerated = []
+    reused_outputs = 0
 
 
     if libs:
+        rebuild_jobs = []
         for alib, outfile in expected_outfiles:
             lib_prefix = _basename_no_ext(alib)
             must_rebuild = (
@@ -1312,47 +1400,59 @@ def scoringprocess(
 
             if not must_rebuild:
                 clusterFiles.append(outfile)
+                reused_outputs += 1
                 continue
 
-            # Rebuild from chunks
+            rebuild_jobs.append((lib_prefix, outfile, scoredClustFolder, phase))
+
+        if rebuild_jobs:
             print(
-                f"[scan] Assembling candidate output for {lib_prefix}...",
+                f"[scan] Rebuilding {len(rebuild_jobs)} candidate output(s) and reusing {reused_outputs}.",
                 flush=True,
             )
-            if os.path.isfile(outfile):
-                try:
-                    os.remove(outfile)
-                except Exception:
-                    pass
-
-            n_chunks, n_bytes = assemble_candidate_from_chunks(
-                scoredClustFolder, lib_prefix, phase, outfile
+            assembly_results = run_parallel_with_progress(
+                assemble_candidate_output_job,
+                rebuild_jobs,
+                desc="Assembling candidate outputs",
+                min_chunk=1,
+                unit="lib",
+                **_cluster_scoring_parallel_kwargs(
+                    maxtasksperchild=CLUSTER_SCORING_ASSEMBLY_MAXTASKSPERCHILD,
+                    initial_worker_cap=initial_worker_cap,
+                    max_worker_cap=max_worker_cap,
+                ),
             )
-            if n_chunks > 0 and os.path.isfile(outfile) and os.path.getsize(outfile) > 0:
-                clusterFiles.append(outfile)
-                regenerated.append(outfile)
-                #print(f"[OK] Aggregated {n_chunks} chunk(s) ({n_bytes} bytes) -> {outfile}")
-            else:
-                print(f"[WARN] No non-empty chunks aggregated for {lib_prefix}; {os.path.basename(outfile)} is empty.")
-                if os.path.isfile(outfile):
+            assembly_errors = [r for r in assembly_results if isinstance(r, RuntimeError)]
+            if assembly_errors:
+                raise assembly_errors[0]
+            for result in assembly_results:
+                outfile = result["outfile"]
+                lib_prefix = result["lib_prefix"]
+                if result["exists"]:
                     clusterFiles.append(outfile)
+                    regenerated.append(outfile)
+                    md5hex = result.get("md5", "")
+                    if md5hex:
+                        config[sect_clusters][os.path.basename(outfile)] = md5hex
+                else:
+                    print(
+                        f"[WARN] No non-empty chunks aggregated for {lib_prefix}; {os.path.basename(outfile)} is empty."
+                    )
+                    if os.path.isfile(outfile):
+                        clusterFiles.append(outfile)
+            print(
+                f"[scan] Candidate output assembly rebuilt {len(regenerated)} output(s) and reused {reused_outputs}.",
+                flush=True,
+            )
+        else:
+            print(
+                f"[scan] Candidate output assembly reused all {reused_outputs} output(s).",
+                flush=True,
+            )
     else:
         print("[WARN] No libraries passed for output assembly step.")
 
     # -------------------- Hash regenerated outputs -> [CLUSTERS] --------------
-    if regenerated:
-        md5_after = run_parallel_with_progress(
-            md5_file_worker,
-            regenerated,
-            desc="Hashing regenerated outputs",
-            min_chunk=1,
-            unit="file",
-            **hash_parallel_kwargs,
-        )
-        for p_abs, md5 in md5_after:
-            if md5:
-                config[sect_clusters][os.path.basename(p_abs)] = md5
-
     # -------------------- Hash chunk files -> [SCORED_CHUNKS] -----------------
     if os.path.isdir(scoredClustFolder):
         chunk_paths = [

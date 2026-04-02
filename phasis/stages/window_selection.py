@@ -41,6 +41,17 @@ WINDOWS_COLUMNS: List[str] = [
 ]
 
 
+def load_window_chunk_file(path: str):
+    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        return (path, None)
+
+    try:
+        frame = pd.read_csv(path, sep="\t", engine="python")
+    except Exception:
+        frame = pd.read_csv(path, sep="\t")
+    return (path, frame)
+
+
 def _safe_key(akey: str) -> str:
     """Normalize an akey to a filesystem-safe basename."""
     s = str(akey)
@@ -234,12 +245,21 @@ def select_scoring_windows(
     # Merge all chunk files (order by path for reproducibility)
     kept_paths = sorted(set(kept_paths))
     frames: List[pd.DataFrame] = []
-    for p in kept_paths:
-        if os.path.isfile(p) and os.path.getsize(p) > 0:
-            try:
-                frames.append(pd.read_csv(p, sep="\t", engine="python"))
-            except Exception:
-                frames.append(pd.read_csv(p, sep="\t"))
+    if kept_paths:
+        print(f"  - Loading {len(kept_paths)} cached/new window chunk(s) for merge")
+        loaded_chunks = run_parallel_with_progress(
+            load_window_chunk_file,
+            kept_paths,
+            desc="Loading window chunks",
+            min_chunk=1,
+            unit="file",
+        ) or []
+        worker_errors = [r for r in loaded_chunks if isinstance(r, RuntimeError)]
+        if worker_errors:
+            raise worker_errors[0]
+        for path, frame in loaded_chunks:
+            if frame is not None:
+                frames.append(frame)
 
     if frames:
         to_score = pd.concat(frames, ignore_index=True)

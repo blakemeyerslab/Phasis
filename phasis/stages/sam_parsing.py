@@ -284,6 +284,33 @@ def _parallel_inspect_parser_cache(jobs, *, desc):
     return by_lib
 
 
+def _load_parsed_output_pair(job):
+    dp, cp = job
+    dict_obj = None
+    count_obj = None
+    missing = False
+
+    try:
+        with open(dp, "rb") as f1:
+            obj = pickle.load(f1)
+            if isinstance(obj, dict):
+                dict_obj = obj
+        with open(cp, "rb") as f2:
+            obj = pickle.load(f2)
+            if isinstance(obj, dict):
+                count_obj = obj
+    except FileNotFoundError:
+        missing = True
+
+    return {
+        "dict_path": dp,
+        "count_path": cp,
+        "dict_obj": dict_obj,
+        "count_obj": count_obj,
+        "missing": missing,
+    }
+
+
 def _load_parsed_outputs(
     dict_paths: Sequence[str],
     count_paths: Sequence[str],
@@ -295,19 +322,28 @@ def _load_parsed_outputs(
 
     libs_nestdict = []
     libs_poscountdict = []
-    for dp, cp in zip(dict_paths, count_paths):
-        try:
-            with open(dp, "rb") as f1:
-                obj = pickle.load(f1)
-                if isinstance(obj, dict):
-                    libs_nestdict.append(obj)
-            with open(cp, "rb") as f2:
-                obj = pickle.load(f2)
-                if isinstance(obj, dict):
-                    libs_poscountdict.append(obj)
-        except FileNotFoundError:
-            print(f"Warning: Missing parsed file for {dp}")
-        gc.collect()
+    load_jobs = list(zip(dict_paths, count_paths))
+    if load_jobs:
+        loaded_pairs = run_parallel_with_progress(
+            _load_parsed_output_pair,
+            load_jobs,
+            desc="Loading parsed outputs",
+            min_chunk=1,
+            unit="lib",
+        ) or []
+        for item in loaded_pairs:
+            if isinstance(item, RuntimeError):
+                raise item
+            if item.get("missing"):
+                print(f"Warning: Missing parsed file for {item['dict_path']}")
+                continue
+            dict_obj = item.get("dict_obj")
+            count_obj = item.get("count_obj")
+            if isinstance(dict_obj, dict):
+                libs_nestdict.append(dict_obj)
+            if isinstance(count_obj, dict):
+                libs_poscountdict.append(count_obj)
+            gc.collect()
 
     return libs_nestdict, libs_poscountdict
 
