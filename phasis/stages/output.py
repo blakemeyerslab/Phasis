@@ -58,6 +58,39 @@ def _set_colorbar_ticks_and_labels(cbar, ticks, labels) -> None:
     cbar.set_ticklabels(labels_list)
 
 
+def _compute_finite_color_scale(data, *, fallback_min: float = 0.0, fallback_max: float = 1.0):
+    values = np.asarray(data, dtype=float)
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        return float(fallback_min), float(fallback_max)
+
+    vmin = float(np.min(finite_values))
+    vmax = float(np.max(finite_values))
+    if vmin == vmax:
+        pad = max(abs(vmin) * 0.01, 1e-6)
+        vmin -= pad
+        vmax += pad
+    return vmin, vmax
+
+
+def _build_colorbar_ticks_and_labels(vmin: float, vmax: float, *, nticks: int = 4):
+    if nticks <= 1:
+        ticks = [vmin]
+    else:
+        ticks = np.linspace(vmin, vmax, nticks).tolist()
+    labels = [f"{tick:.1f}" for tick in ticks]
+    return ticks, labels
+
+
+def _build_discrete_chromosome_cmap(unique_chromosomes):
+    nchrom = max(int(len(unique_chromosomes)), 1)
+    base_cmap = plt.get_cmap("Greys")
+    chrom_cmap = base_cmap(np.linspace(0.3, 0.9, nchrom))
+    if nchrom == 1:
+        return LinearSegmentedColormap.from_list("CustomGreysSingle", [chrom_cmap[0], chrom_cmap[0]], 2)
+    return LinearSegmentedColormap.from_list("CustomGreys", chrom_cmap, nchrom)
+
+
 def _format_runtime_parameter_lines() -> list[str]:
     libs_value = getattr(rt, "libs", None)
     if isinstance(libs_value, (list, tuple)):
@@ -317,14 +350,13 @@ def _draw_chromosome_bar(fig, ref_ax, heat_data, chrom_data, unique_chromosomes,
     bar_left = max(0.02, pos.x0 - left_pad)
     cax = fig.add_axes([bar_left, pos.y0, bar_width, pos.height])
 
-    base_cmap = plt.get_cmap("Greys")
-    chrom_cmap = base_cmap(np.linspace(0.3, 0.9, len(unique_chromosomes)))
+    chrom_cmap = _build_discrete_chromosome_cmap(unique_chromosomes)
     chrom_color_map = {chrom: idx for idx, chrom in enumerate(unique_chromosomes)}
     chrom_colors = np.array([chrom_color_map[chrom] for chrom in chrom_data]).reshape(-1, 1)
 
     cax.imshow(
         chrom_colors,
-        cmap=LinearSegmentedColormap.from_list("CustomGreys", chrom_cmap, len(unique_chromosomes)),
+        cmap=chrom_cmap,
         aspect="auto",
         interpolation="nearest",
         origin="upper",
@@ -547,14 +579,13 @@ def plot_report_heat_map(phasis_result_df, plot_type):
     cax = f.add_axes([0.17, 0.1, 0.02, 0.8])
 
     # Discrete grayscale colormap for chromosomes
-    base_cmap = plt.get_cmap("Greys")
-    chrom_cmap = base_cmap(np.linspace(0.3, 0.9, len(unique_chromosomes)))
+    chrom_cmap = _build_discrete_chromosome_cmap(unique_chromosomes)
     chrom_color_map = {chrom: idx for idx, chrom in enumerate(unique_chromosomes)}
     chrom_colors = np.array([chrom_color_map[chrom] for chrom in chrom_data]).reshape(-1, 1)
 
     cax.imshow(
         chrom_colors,
-        cmap=LinearSegmentedColormap.from_list("CustomGreys", chrom_cmap, len(unique_chromosomes)),
+        cmap=chrom_cmap,
         aspect="auto"
     )
     cax.set_xticks([])
@@ -659,14 +690,15 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
     chrom_data = [chrom_data[idx] for idx in sorted_indices]
     unique_chromosomes = sorted(np.unique(chrom_data), key=lambda x: int(x) if x.isdigit() else x)
 
-    max_value = data.max().max()
+    min_value, max_value = _compute_finite_color_scale(data)
 
     f, ax = plt.subplots(figsize=(11, 11))
 
     # Define custom colors (exact original)
     colors = ["#C3D8EA", "#3F2F13"]
     cmap = LinearSegmentedColormap.from_list("Custom", colors, 10)
-    norm = Normalize(vmin=0, vmax=max_value)
+    norm = Normalize(vmin=min_value, vmax=max_value)
+    ticks, labels = _build_colorbar_ticks_and_labels(min_value, max_value)
 
     # Colorbar axis (exact original placement)
     cax = inset_axes(
@@ -679,21 +711,20 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
         borderpad=0
     )
     cbar = plt.colorbar(plt.cm.ScalarMappable(cmap=cmap, norm=norm), cax=cax, orientation="vertical")
-    _set_colorbar_ticks_and_labels(cbar, [0, max_value/3, 2*max_value/3, max_value], [f"{0:.1f}", f"{max_value/3:.1f}", f"{2*max_value/3:.1f}", f"{max_value:.1f}"])
+    _set_colorbar_ticks_and_labels(cbar, ticks, labels)
 
     heat = sns.heatmap(data, square=False, cmap=cmap, cbar=False, norm=norm, xticklabels=True, yticklabels=False, ax=ax)
 
     # Chromosome bar
     cax2 = f.add_axes([0.17, 0.1, 0.02, 0.8])
 
-    base_cmap = plt.get_cmap("Greys")
-    chrom_cmap = base_cmap(np.linspace(0.3, 0.9, len(unique_chromosomes)))
+    chrom_cmap = _build_discrete_chromosome_cmap(unique_chromosomes)
     chrom_color_map = {chrom: idx for idx, chrom in enumerate(unique_chromosomes)}
     chrom_colors = np.array([chrom_color_map[chrom] for chrom in chrom_data]).reshape(-1, 1)
 
     cax2.imshow(
         chrom_colors,
-        cmap=LinearSegmentedColormap.from_list("CustomGreys", chrom_cmap, len(unique_chromosomes)),
+        cmap=chrom_cmap,
         aspect="auto"
     )
     cax2.set_xticks([])
@@ -777,16 +808,16 @@ def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
     chrom_data = [chrom_data[idx] for idx in sorted_indices]
     unique_chromosomes = sorted(np.unique(chrom_data), key=lambda x: int(x) if x.isdigit() else x)
 
-    max_value_phas = data_phas.max().max()
-    max_value_non_phas = data_non_phas.max().max()
+    min_value_phas, max_value_phas = _compute_finite_color_scale(data_phas)
+    min_value_non_phas, max_value_non_phas = _compute_finite_color_scale(data_non_phas)
 
     f, ax = plt.subplots(figsize=(11, 11))
 
     phas_colors = ["#D5E6D6", "#FF9999", "#FF0000"]
     non_phas_colors = ["#D5E6D6", "#9999FF", "#0000FF"]
 
-    norm_phas = Normalize(vmin=0, vmax=max_value_phas)
-    norm_non_phas = Normalize(vmin=0, vmax=max_value_non_phas)
+    norm_phas = Normalize(vmin=min_value_phas, vmax=max_value_phas)
+    norm_non_phas = Normalize(vmin=min_value_non_phas, vmax=max_value_non_phas)
 
     cmap_phas = LinearSegmentedColormap.from_list("PHAS", phas_colors, N=256)
     sns.heatmap(data_phas, square=False, cmap=cmap_phas, cbar=False, norm=norm_phas, xticklabels=True, yticklabels=False, ax=ax)
@@ -804,7 +835,8 @@ def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
         borderpad=0
     )
     cbar_phas = plt.colorbar(plt.cm.ScalarMappable(cmap=cmap_phas, norm=norm_phas), cax=cax_phas, orientation="vertical")
-    _set_colorbar_ticks_and_labels(cbar_phas, [0, max_value_phas/3, 2*max_value_phas/3, max_value_phas], [f"{0:.1f}", f"{max_value_phas/3:.1f}", f"{2*max_value_phas/3:.1f}", f"{max_value_phas:.1f}"])
+    ticks_phas, labels_phas = _build_colorbar_ticks_and_labels(min_value_phas, max_value_phas)
+    _set_colorbar_ticks_and_labels(cbar_phas, ticks_phas, labels_phas)
     cbar_phas.set_label(r"log of $\it{PHAS}$ abundance", rotation=90, labelpad=15)
 
     cax_non_phas = inset_axes(
@@ -817,17 +849,17 @@ def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
         borderpad=0
     )
     cbar_non_phas = plt.colorbar(plt.cm.ScalarMappable(cmap=cmap_non_phas, norm=norm_non_phas), cax=cax_non_phas, orientation="vertical")
-    _set_colorbar_ticks_and_labels(cbar_non_phas, [0, max_value_non_phas/3, 2*max_value_non_phas/3, max_value_non_phas], [f"{0:.1f}", f"{max_value_non_phas/3:.1f}", f"{2*max_value_non_phas/3:.1f}", f"{max_value_non_phas:.1f}"])
+    ticks_non_phas, labels_non_phas = _build_colorbar_ticks_and_labels(min_value_non_phas, max_value_non_phas)
+    _set_colorbar_ticks_and_labels(cbar_non_phas, ticks_non_phas, labels_non_phas)
     cbar_non_phas.set_label(r"log of non-$\it{PHAS}$ abundance", rotation=90, labelpad=10)
 
     # Chromosome bar (exact original, and this one was already correct)
     cax2 = f.add_axes([0.17, 0.1, 0.02, 0.8])
-    base_cmap = plt.get_cmap("Greys")
-    chrom_cmap = base_cmap(np.linspace(0.3, 0.9, len(unique_chromosomes)))
+    chrom_cmap = _build_discrete_chromosome_cmap(unique_chromosomes)
     chrom_color_map = {chrom: idx for idx, chrom in enumerate(unique_chromosomes)}
     chrom_colors = np.array([chrom_color_map[chrom] for chrom in chrom_data]).reshape(-1, 1)
 
-    cax2.imshow(chrom_colors, cmap=LinearSegmentedColormap.from_list("CustomGreys", chrom_cmap, len(unique_chromosomes)), aspect="auto")
+    cax2.imshow(chrom_colors, cmap=chrom_cmap, aspect="auto")
     cax2.set_xticks([])
     cax2.set_yticks([])
 
