@@ -14,6 +14,10 @@ clusters_scored_tsv = None      # absolute path to *_clusters_scored.tsv
 # --- NEW: include missing config knobs you already set in CLI ---
 cleanup = None
 cleanup_all = None
+cluster_build_initial_worker_cap = None
+cluster_build_max_worker_cap = None
+cluster_scoring_initial_worker_cap = None
+cluster_scoring_max_worker_cap = None
 
 # (keep your existing globals below; I’m not repeating them all)
 
@@ -25,6 +29,8 @@ _RUNTIME_KEYS = [
     "libformat","phase","phase2","phaseLen","clustbuffer","phasisScoreCutoff","minClusterLength","window_len","sliding",
     "cores","classifier","steps","class_cluster_file","max_complexity","min_Howell_score","concat_libs",
     "outdir","run_dir","memFile","clusters_scored_tsv","cleanup","cleanup_all",
+    "cluster_build_initial_worker_cap","cluster_build_max_worker_cap",
+    "cluster_scoring_initial_worker_cap","cluster_scoring_max_worker_cap",
 ]
 
 def _snapshot_path(run_dir_override: str | None = None) -> str:

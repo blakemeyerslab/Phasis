@@ -1,0 +1,4 @@
+model = "gpt-5.4"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+project_root_markers = [".git"]

@@ -58,8 +58,8 @@ class MemCache:
         with open(self.memFile, "w") as fh:
             self.cfg.write(fh)
 
-    def fingerprint(self, path: str) -> str:
-        _, fp = getmd5(path)
+    def fingerprint(self, path: str, *, wait_stable: bool = True) -> str:
+        _, fp = getmd5(path, wait_stable=wait_stable)
         return str(fp or "")
 
     def _dbg_enabled(self) -> bool:
@@ -70,7 +70,14 @@ class MemCache:
         if self._dbg_enabled():
             print(f"[PHASIS:CACHE] {msg}")
 
-    def hit(self, section: str, outpath: str, input_sig: str | None = None) -> bool:
+    def hit(
+        self,
+        section: str,
+        outpath: str,
+        input_sig: str | None = None,
+        *,
+        wait_stable: bool = True,
+    ) -> bool:
         self.ensure(section)
         if not outpath:
             self._dbg(f"MISS section={section} out=<empty> reason=empty_outpath")
@@ -78,7 +85,7 @@ class MemCache:
         if not os.path.isfile(outpath):
             self._dbg(f"MISS section={section} out={outpath} reason=missing_file")
             return False
-        cur_fp = self.fingerprint(outpath)
+        cur_fp = self.fingerprint(outpath, wait_stable=wait_stable)
         prev_fp = self.get(section, outpath)
         if not prev_fp:
             self._dbg(f"MISS section={section} out={outpath} reason=not_registered")
@@ -106,7 +113,15 @@ class MemCache:
         self._dbg(f"HIT  section={section} out={outpath} mode=hash+sig")
         return True
 
-    def record(self, section: str, outpath: str, input_sig: str | None = None) -> str:
+    def record(
+        self,
+        section: str,
+        outpath: str,
+        input_sig: str | None = None,
+        *,
+        output_fp: str | None = None,
+        wait_stable: bool = True,
+    ) -> str:
         self.ensure(section)
         if not outpath or not os.path.isfile(outpath):
             if not outpath:
@@ -114,7 +129,9 @@ class MemCache:
             else:
                 self._dbg(f"RECORD_SKIP section={section} out={outpath} reason=missing_file")
             return ""
-        cur_fp = self.fingerprint(outpath)
+        cur_fp = str(output_fp or "")
+        if not cur_fp:
+            cur_fp = self.fingerprint(outpath, wait_stable=wait_stable)
         if cur_fp:
             self.set(section, outpath, cur_fp)
         if input_sig is not None:
@@ -412,7 +429,7 @@ def _fast_file_fingerprint(path: str) -> str | None:
         return None
 
 
-def getmd5(afile):
+def getmd5(afile, *, wait_stable=True):
     """
     Return (afile, hex_str) used as a cache key.
 
@@ -422,7 +439,8 @@ def getmd5(afile):
     """
     p = afile
     try:
-        _wait_size_stable(p, checks=3, interval=0.2, timeout=5.0)
+        if wait_stable:
+            _wait_size_stable(p, checks=3, interval=0.2, timeout=5.0)
 
         for attempt in range(_MD5_RETRIES):
             try:
@@ -505,6 +523,41 @@ def compute_cache_signature(
     if extra:
         for x in extra:
             items.append(f"EXTRA	{x}")
+
+    return _md5_of_list_str(items)
+
+
+def compute_cache_signature_from_file_manifest(
+    *,
+    file_manifest: Iterable[Tuple[str, str, int, bool]] | None = None,
+    params: Dict[str, object] | None = None,
+    extra: Iterable[str] | None = None,
+) -> str:
+    """
+    Compute a stable cache signature from precomputed file facts.
+
+    Each manifest entry is:
+      (absolute_path, fingerprint_hex, size_bytes, exists_bool)
+
+    This preserves the same item format as compute_cache_signature(), while
+    allowing callers to inspect files in parallel first.
+    """
+    items = []
+
+    for path, fp, size, exists in (file_manifest or []):
+        p = os.path.abspath(os.path.expanduser(str(path)))
+        if exists:
+            items.append(f"FILE\t{p}\t{fp}\t{size}")
+        else:
+            items.append(f"MISSING\t{p}")
+
+    if params:
+        for k in sorted(params.keys()):
+            items.append(f"PARAM\t{k}={params.get(k)}")
+
+    if extra:
+        for x in extra:
+            items.append(f"EXTRA\t{x}")
 
     return _md5_of_list_str(items)
 
@@ -822,6 +875,7 @@ __all__ = [
     "phase2_basename",
     "getmd5",
     "compute_md5_str",
+    "compute_cache_signature_from_file_manifest",
     "md5_file_worker",
     "list_chunk_files_for_prefix",
     "assemble_candidate_from_chunks",
