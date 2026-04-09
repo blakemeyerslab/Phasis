@@ -1,7 +1,7 @@
 # Phasis — Phased sRNA Cluster Discovery and Annotation
 
 **Version:** v2.6  
-**Updated:** 2026-03-23
+**Updated:** 2026-04-09
 
 Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libraries. It supports:
 
@@ -141,6 +141,18 @@ In the filenames below, `{method}` is the classifier used for the run, currently
 7. **Howell score heatmaps**  
    Filename: **`{method}_{phase}_Howell_scores.pdf`**  
    This PDF contains **two heatmaps**. One shows the Peak Howell score, which summarizes phasing-support signal, and the other shows the Peak Howell score (strict), a more conservative version based on the stricter/classic scoring scheme.
+
+8. **Individual *PHAS* locus diagnostic plots**  
+   Directory: **`{phase}_{method}_PHAS_locus_plots/`**  
+   Phasis writes one PNG per final *PHAS* call, named as **`{alib}__{identifier}.png`**. Each plot has two panels for the same locus:
+   - the top panel shows strand-separated read abundance, colored by sRNA length and styled as filled/open diamonds for uni- and multi-mappers
+   - the bottom panel shows the relaxed Howell-score trace on both strands, including the exact/offset register pattern and the highest phasing score position (HPSP)
+   
+   These figures are meant to help users visually inspect the phasing register at each called locus and judge whether a run should be made more or less restrictive.
+
+   Example:
+
+   ![Example individual PHAS locus plot](docs/images/phas_locus_plot_example.png)
 
 ---
 

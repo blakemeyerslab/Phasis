@@ -131,14 +131,14 @@ def compute_scores_for_group(group_payload):
 
 def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute PHASIS scores per (chromosome, library) group in parallel.
+    Compute Phasis scores per (chromosome, library) group in parallel.
     Reads/writes {phase}_clusters_scored.tsv and uses centralized MemCache.
 
     Input expectation (from window_selection):
       columns: cluster_id, window_n, fw_pval_corr, rv_pval_corr, combined_window_p_value
       (chromosome/alib are NOT required; we infer from cluster_id)
     """
-    print("### Step: Compute PHASIS scores per (chromosome, library) ###")
+    print("### Step: Compute Phasis scores per (chromosome, library) ###")
 
     phase = getattr(rt, "phase", None)
     memFile = getattr(rt, "memFile", None) or MEM_FILE_DEFAULT

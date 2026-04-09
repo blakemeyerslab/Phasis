@@ -40,6 +40,7 @@ from phasis.stages import window_selection as st_winsel
 from phasis.stages import window_scoring as st_winscore
 from phasis.stages import feature_assembly as st_feat
 from phasis.stages import classify as st_classify
+from phasis.stages import locus_plots as st_locus_plots
 from phasis.stages import output as st_output
 
 
@@ -181,6 +182,13 @@ def run_phase2_pipeline(
             max_complexity=float(cfg.max_complexity),
             n_clusters=int(getattr(cfg, "n_clusters", 2) or 2),
         )
+        st_locus_plots.write_individual_phas_locus_plots(
+            "GMM",
+            labeled,
+            clusters_data,
+            job_outdir=cfg.outdir,
+            job_phase=cfg.phase,
+        )
         st_output.finalize_and_write_results(
             "GMM",
             labeled,
@@ -193,6 +201,13 @@ def run_phase2_pipeline(
             phasisScoreCutoff=float(cfg.phasisScoreCutoff),
             min_Howell_score=float(cfg.min_Howell_score),
             max_complexity=float(cfg.max_complexity),
+        )
+        st_locus_plots.write_individual_phas_locus_plots(
+            "KNN",
+            labeled,
+            clusters_data,
+            job_outdir=cfg.outdir,
+            job_phase=cfg.phase,
         )
         st_output.finalize_and_write_results(
             "KNN",

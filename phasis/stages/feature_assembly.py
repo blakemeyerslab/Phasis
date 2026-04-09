@@ -405,6 +405,125 @@ def _evaluate_register(window_positions, pos_abun, win_start, win_end, phase, re
     effective_positions = [p for p in window_positions if p not in ignored_positions]
     effective_total = sum(pos_abun[p] for p in effective_positions)
     return in_phase_sum, effective_total, n_filled
+
+
+def _score_relaxed_window(window_positions, pos_abun, win_start, win_end, phase, forward=True):
+    ph = int(phase)
+    if not window_positions:
+        return 0.0, 0.0, 0.0, 0, None
+
+    num_cycles = max(0, (win_end - win_start + 1) // ph)
+    if num_cycles < 4:
+        return 0.0, 0.0, 0.0, 0, None
+
+    best_reg_sum = 0.0
+    best_reg_total = 0.0
+    best_reg_filled = 0
+    best_reg = None
+
+    for reg in range(ph):
+        in_sum, eff_total, n_filled = _evaluate_register(
+            window_positions, pos_abun, win_start, win_end, ph, reg, forward=forward
+        )
+        if in_sum > best_reg_sum:
+            best_reg_sum = in_sum
+            best_reg_total = eff_total
+            best_reg_filled = n_filled
+            best_reg = reg
+
+    out_of_phase = max(0.0, best_reg_total - best_reg_sum)
+    numerator = best_reg_sum
+    denominator = 1.0 + out_of_phase
+    if numerator <= 0.0 or not (best_reg_filled > 3):
+        score = 0.0
+    else:
+        log_arg = 1.0 + 10.0 * (numerator / denominator)
+        if log_arg <= 0.0 or log_arg != log_arg:
+            score = 0.0
+        else:
+            scale = max(min(best_reg_filled, num_cycles) - 2, 0)
+            score = scale * (0.0 if log_arg <= 0 else np.log(log_arg))
+
+    return float(score), float(best_reg_sum), float(out_of_phase), int(best_reg_filled), best_reg
+
+
+def _enumerate_relaxed_trace_for_strand(pos_abun, phase, win_size, *, forward=True):
+    positions = sorted(pos_abun.keys())
+    if not positions:
+        return []
+
+    if forward:
+        anchors = positions
+    else:
+        anchors = list(reversed(positions))
+
+    trace = []
+    for anchor in anchors:
+        if forward:
+            win_start = int(anchor)
+            win_end = int(anchor) + int(win_size) - 1
+            anchor_position = int(anchor)
+        else:
+            win_end = int(anchor)
+            win_start = int(anchor) - int(win_size) + 1
+            anchor_position = int(anchor)
+
+        window_positions = [p for p in positions if win_start <= p <= win_end]
+        score, in_phase_sum, out_of_phase, n_filled, best_reg = _score_relaxed_window(
+            window_positions,
+            pos_abun,
+            win_start,
+            win_end,
+            int(phase),
+            forward=forward,
+        )
+        trace.append(
+            {
+                "anchor_position": anchor_position,
+                "window_start": int(win_start),
+                "window_end": int(win_end),
+                "score": float(score),
+                "in_phase_abund": float(in_phase_sum),
+                "out_phase_abund": float(out_of_phase),
+                "occupied_cycles": int(n_filled),
+                "best_register": best_reg,
+            }
+        )
+    return trace
+
+
+def enumerate_relaxed_howell_trace(aclust: pd.DataFrame, phase: int | None = None):
+    ph = int(phase) if phase is not None else _phase_value()
+    win_size = WINDOW_MULTIPLIER * int(ph)
+    seq_start = int(aclust["pos"].min())
+    seq_end = int(aclust["pos"].max())
+    w_mask, c_mask = _strand_masks(aclust)
+
+    w_trace = []
+    if w_mask.any():
+        w_pos_abun = _build_pos_abun_exact_phase(aclust.loc[w_mask], seq_start, seq_end, int(ph))
+        if w_pos_abun:
+            w_trace = _enumerate_relaxed_trace_for_strand(
+                w_pos_abun,
+                int(ph),
+                int(win_size),
+                forward=True,
+            )
+
+    c_trace = []
+    if c_mask.any():
+        c_pos_abun = _build_pos_abun_exact_phase(aclust.loc[c_mask], seq_start, seq_end, int(ph))
+        if c_pos_abun:
+            c_trace = _enumerate_relaxed_trace_for_strand(
+                c_pos_abun,
+                int(ph),
+                int(win_size),
+                forward=False,
+            )
+
+    return {"w": w_trace, "c": c_trace}
+
+
 def _best_sliding_window_score_generic_strict(pos_abun, phase, win_size, seq_start=None, seq_end=None, forward=True):
     positions = sorted(pos_abun.keys())
     if not positions:
@@ -643,4 +762,3 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
         ])
 
     return rows
-
