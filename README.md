@@ -147,7 +147,10 @@ In the filenames below, `{method}` is the classifier used for the run, currently
    Phasis writes one PNG per final *PHAS* call, named as **`{alib}__{identifier}.png`**. Each plot has two panels for the same locus:
    - the top panel shows strand-separated read abundance, colored by sRNA length and styled as filled/open diamonds for uni- and multi-mappers
    - the bottom panel shows the relaxed Howell-score trace on both strands, including the exact/offset register pattern and the highest phasing score position (HPSP)
-   
+   - the **phase-colored vertical bars** mark the 10-cycle register window that actually contributes to the Howell score around the HPSP for that strand
+   - the **darker extension bars** mark additional positions outside that 10-cycle window that still map to the same phased register
+   - the **red vertical bar** marks the HPSP register anchor itself
+
    These figures are meant to help users visually inspect the phasing register at each called locus and judge whether a run should be made more or less restrictive.
 
    Example:
