@@ -1,7 +1,7 @@
 # Phasis — Phased sRNA Cluster Discovery and Annotation
 
 **Version:** v2.6  
-**Updated:** 2026-04-09
+**Updated:** 2026-04-11
 
 Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libraries. It supports:
 
@@ -12,6 +12,27 @@ Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libra
 ---
 
 ## Installation
+
+### Standardized installation target
+
+Phasis is currently documented against this setup:
+
+- **Python / environment**
+  - Python **3.12**
+
+- **External executables**
+  - **HISAT2** `>= 2.2.1`
+  - **samtools** available on your `PATH`
+
+- **Python packages**
+  - **NumPy**
+  - **Pandas**
+  - **SciPy**
+  - **scikit-learn** `1.3.0`
+  - **Matplotlib**
+  - **Seaborn**
+  - **Joblib**
+  - **tqdm**
 
 ### 1) Create an environment
 
@@ -42,6 +63,16 @@ Then change into the Phasis repository root and install it with `pip`:
 cd Phasis
 python -m pip install -U pip
 python -m pip install -e .
+```
+
+Verify the installation environment:
+```bash
+python -c "import sklearn; print(sklearn.__version__)"
+```
+
+Expected output:
+```bash
+1.3.0
 ```
 
 This installs the current local copy of Phasis and should make the `phasis` command available:
@@ -183,8 +214,8 @@ In the filenames below, `{method}` is the classifier used for the run, currently
 - `-min_Howell_score` (default: 12.5): minimum Howell score used during classification/output filtering
 - `--concat_libs`: concatenate all input libraries into one virtual library before downstream analysis
 - `--outdir` (default: `{phase}_results`): directory for final outputs; supports `{phase}` in the name
-- `-cleanup`: cleanup-only mode; delete intermediate files but keep `index/`, keep the results directory, and keep only the index-related section of `phasis.mem`
-- `-cleanup_all` (alias: `-cleanup_index`): cleanup-only mode; delete intermediates, `index/`, and `phasis.mem`, while keeping the results directory
+- `-cleanup`: cleanup-only mode; delete intermediate files but keep `index/`, keep the results directory, and keep only the index-related section of `phasis.mem`; refuses to run unless the current directory looks like a real Phasis run root
+- `-cleanup_all` (alias: `-cleanup_index`): cleanup-only mode; delete intermediates, `index/`, and `phasis.mem`, while keeping the results directory; refuses to run unless the current directory looks like a real Phasis run root
 - `-version`: print the installed Phasis version and exit
 
 ---

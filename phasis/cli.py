@@ -65,13 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_group.add_argument(
         "-cleanup",
         action="store_true",
-        help="Cleanup-only mode: delete intermediate files, keep index/ and indexing metadata in phasis.mem",
+        help="Cleanup-only mode: delete intermediate files, keep index/ and indexing metadata in phasis.mem; refuses to run outside a detected Phasis run directory",
     )
     cleanup_group.add_argument(
         "-cleanup_all", "-cleanup_index",
         dest="cleanup_all",
         action="store_true",
-        help="Cleanup-only mode: delete all intermediates, index/, and phasis.mem",
+        help="Cleanup-only mode: delete all intermediates, index/, and phasis.mem; refuses to run outside a detected Phasis run directory",
     )
     parser.add_argument("-steps", default="both", type=str,
                         help="both | cfind | class [default both]")
@@ -140,10 +140,36 @@ def _validate_cleanup_only_argv(argv: List[str]) -> None:
         raise SystemExit(2)
 
 
+def _format_cleanup_markers(markers: List[str]) -> str:
+    if not markers:
+        return "<none>"
+    return ", ".join(markers)
+
+
+def _validate_cleanup_target_dir(base_dir: str) -> None:
+    from . import cache
+
+    target_dir, found, missing = cache.detect_cleanup_run_dir(base_dir)
+    if len(found) >= cache.CLEANUP_REQUIRED_MARKERS:
+        return None
+
+    print("[ERROR] Cleanup refused because this does not look like a Phasis run directory.")
+    print(f"[ERROR] Directory: {target_dir}")
+    print(f"[ERROR] Found markers: {_format_cleanup_markers(found)}")
+    print(f"[ERROR] Missing markers: {_format_cleanup_markers(missing)}")
+    print(
+        f"[ERROR] Expected at least {cache.CLEANUP_REQUIRED_MARKERS} of: "
+        f"{_format_cleanup_markers(list(cache.CLEANUP_RUN_MARKERS))}"
+    )
+    print("[ERROR] Run cleanup from the Phasis run root that contains run metadata and outputs.")
+    raise SystemExit(2)
+
+
 def _run_cleanup_mode(args: argparse.Namespace) -> int:
     from . import cache
 
     base_dir = os.path.abspath(os.getcwd())
+    _validate_cleanup_target_dir(base_dir)
 
     if getattr(args, "cleanup_all", False):
         cache.cleanup_all(base_dir)

@@ -191,6 +191,15 @@ CLEANUP_PATTERNS = [
 INDEX_ONLY_MEM_SECTIONS = ("BASIC",)
 INDEX_DIRNAME = "index"
 RESULTS_DIR_SUFFIX = "_results"
+CLEANUP_REQUIRED_MARKERS = 2
+CLEANUP_PROCESSED_LIBS_DIRNAME = "processed_libraries"
+CLEANUP_RUN_MARKERS = (
+    MEM_FILE_DEFAULT,
+    rt.RUNTIME_SNAPSHOT_NAME,
+    f"{INDEX_DIRNAME}/",
+    f"{CLEANUP_PROCESSED_LIBS_DIRNAME}/",
+    f"*{RESULTS_DIR_SUFFIX}",
+)
 
 
 def match_pattern(filename, patterns) -> bool:
@@ -228,6 +237,41 @@ def _cleanup_mem_path(target_dir: str) -> str:
     if mem_path:
         return os.path.abspath(os.path.expanduser(str(mem_path)))
     return os.path.join(target_dir, MEM_FILE_DEFAULT)
+
+
+def _cleanup_has_results_dir(target_dir: str) -> bool:
+    try:
+        with os.scandir(target_dir) as entries:
+            for entry in entries:
+                if entry.is_dir() and entry.name.endswith(RESULTS_DIR_SUFFIX):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def detect_cleanup_run_dir(base_dir: str | None = None) -> Tuple[str, list[str], list[str]]:
+    """Return cleanup target plus detected/missing run-root markers."""
+    target_dir = _cleanup_target_dir(base_dir)
+    found: list[str] = []
+
+    if os.path.isfile(os.path.join(target_dir, MEM_FILE_DEFAULT)):
+        found.append(MEM_FILE_DEFAULT)
+
+    if os.path.isfile(os.path.join(target_dir, rt.RUNTIME_SNAPSHOT_NAME)):
+        found.append(rt.RUNTIME_SNAPSHOT_NAME)
+
+    if os.path.isdir(os.path.join(target_dir, INDEX_DIRNAME)):
+        found.append(f"{INDEX_DIRNAME}/")
+
+    if os.path.isdir(os.path.join(target_dir, CLEANUP_PROCESSED_LIBS_DIRNAME)):
+        found.append(f"{CLEANUP_PROCESSED_LIBS_DIRNAME}/")
+
+    if _cleanup_has_results_dir(target_dir):
+        found.append(f"*{RESULTS_DIR_SUFFIX}")
+
+    missing = [marker for marker in CLEANUP_RUN_MARKERS if marker not in found]
+    return target_dir, found, missing
 
 
 def _should_preserve_dir(path: str, *, preserve_index: bool) -> bool:
@@ -869,7 +913,10 @@ def write_mem_basic(
 __all__ = [
     "MEM_FILE_DEFAULT",
     "CLEANUP_PATTERNS",
+    "CLEANUP_REQUIRED_MARKERS",
+    "CLEANUP_RUN_MARKERS",
     "match_pattern",
+    "detect_cleanup_run_dir",
     "cleanup",
     "cleanup_all",
     "phase2_basename",
