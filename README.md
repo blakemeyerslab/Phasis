@@ -1,7 +1,7 @@
 # Phasis — Phased sRNA Cluster Discovery and Annotation
 
 **Version:** v2.6  
-**Updated:** 2026-04-11
+**Updated:** 2026-04-13
 
 Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libraries. It supports:
 
@@ -25,7 +25,7 @@ Phasis is currently documented against this setup:
   - **samtools** available on your `PATH`
 
 - **Python packages**
-  - **NumPy**
+  - **NumPy** `1.26.4`
   - **Pandas**
   - **SciPy**
   - **scikit-learn** `1.3.0`
@@ -34,12 +34,20 @@ Phasis is currently documented against this setup:
   - **Joblib**
   - **tqdm**
 
+This NumPy / scikit-learn pairing is intentional. Phasis currently targets:
+
+- **NumPy** `1.26.4`
+- **scikit-learn** `1.3.0`
+
+Do **not** use NumPy `2.x` with the current Phasis release, because `scikit-learn 1.3.0` is not compatible with that series.
+
 ### 1) Create an environment
 
 **Conda (recommended):**
 ```bash
 conda create -n phasis python=3.12 -y
 conda activate phasis
+conda install "numpy=1.26.4" "scikit-learn=1.3.0" -y
 ```
 
 ### 2) Install external tools
@@ -67,12 +75,13 @@ python -m pip install -e .
 
 Verify the installation environment:
 ```bash
-python -c "import sklearn; print(sklearn.__version__)"
+python -c "import numpy, sklearn; print('numpy', numpy.__version__); print('sklearn', sklearn.__version__)"
 ```
 
 Expected output:
 ```bash
-1.3.0
+numpy 1.26.4
+sklearn 1.3.0
 ```
 
 This installs the current local copy of Phasis and should make the `phasis` command available:
