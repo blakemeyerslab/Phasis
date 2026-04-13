@@ -24,8 +24,14 @@ def _resolve_mindepth():
 
 
 def _open_text_maybe_gz(path):
-    if str(path).lower().endswith(".gz"):
+    path = str(path)
+    if path.lower().endswith(".gz"):
         return gzip.open(path, "rt")
+    if os.path.isfile(path):
+        return open(path, "r")
+    gz_path = f"{path}.gz"
+    if os.path.isfile(gz_path):
+        return gzip.open(gz_path, "rt")
     return open(path, "r")
 
 
@@ -226,8 +232,9 @@ def fastq_process(alib, out_fas=None, out_sum=None):
 
 def merge_processed_fastas(fas_paths, out_dir, out_basename, mindepth):
     """
-    Merge multiple .fas by summing counts per identical sequence.
-    Returns the path to the merged .fas.
+    Merge multiple processed FASTA count files by summing counts per sequence.
+    Accepts either plain `.fas` or canonical `.fas.gz` artifacts.
+    Returns the path to the merged plain `.fas`.
     """
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir, exist_ok=True)
@@ -243,12 +250,12 @@ def merge_processed_fastas(fas_paths, out_dir, out_basename, mindepth):
 
 def fas_records(path):
     """
-    Stream a .fas produced by your pipeline.
+    Stream a processed FASTA count file produced by the pipeline.
     Header: >seq_<n>|<count>
     Next line: <sequence>
     Yields (sequence, count:int).
     """
-    with open(path, 'r') as fh:
+    with _open_text_maybe_gz(path) as fh:
         count_val = None
         for line in fh:
             if line.startswith('>'):

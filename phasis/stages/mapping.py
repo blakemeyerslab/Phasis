@@ -30,15 +30,17 @@ def resolve_plain_or_gz_path(path):
       - `path` exists, or
       - `path + ".gz"` exists
 
-    Returns the plain path (`path`) when resolved.
-    Returns None if neither plain nor gzipped form exists.
+    Returns (`path`, False) when the plain FASTA already exists.
+    Returns (`path`, True) when the plain FASTA had to be materialized from
+    the canonical `.fas.gz` artifact.
+    Returns (None, False) if neither plain nor gzipped form exists.
     """
     if os.path.isfile(path):
-        return path
+        return path, False
 
     gz_path = f"{path}.gz"
     if not os.path.isfile(gz_path):
-        return None
+        return None, False
 
     tmp_path = f"{path}.tmp"
 
@@ -53,7 +55,7 @@ def resolve_plain_or_gz_path(path):
             except OSError:
                 pass
 
-    return path
+    return path, True
 
 
 def canonical_fas_artifact(path):
@@ -65,33 +67,25 @@ def canonical_fas_artifact(path):
     return None
 
 
-def archive_fas_to_gz(path):
-    """
-    Compress a plain .fas into deterministic .fas.gz bytes and remove the
-    plain file. Returns the archived path when available, else None.
-    """
-    gz_path = f"{path}.gz"
-    if not os.path.isfile(path):
-        if os.path.isfile(gz_path):
-            return gz_path
-        return None
+def _compat_fasta_keys(path):
+    path = str(path or "")
+    if not path:
+        return []
+    if path.endswith(".fas.gz"):
+        return _unique_paths([path, path[:-3]])
+    if path.endswith(".fas"):
+        return _unique_paths([f"{path}.gz", path])
+    return [path]
 
-    tmp_path = f"{gz_path}.tmp"
 
-    try:
-        with open(path, "rb") as src, open(tmp_path, "wb") as raw_dst:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0) as dst:
-                shutil.copyfileobj(src, dst)
-        os.replace(tmp_path, gz_path)
-        os.remove(path)
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-    return gz_path
+def _compat_fasta_fp(cfg, path):
+    if not cfg.has_section("FASTAS"):
+        return ""
+    for key in _compat_fasta_keys(path):
+        fp = (cfg["FASTAS"].get(key) or "").strip()
+        if fp:
+            return fp
+    return ""
 
 
 def _unique_paths(paths):
@@ -106,11 +100,8 @@ def _unique_paths(paths):
 
 
 def _resolve_plain_or_gz_job(path):
-    return path, resolve_plain_or_gz_path(path)
-
-
-def _archive_fas_job(path):
-    return path, archive_fas_to_gz(path)
+    resolved_path, materialized = resolve_plain_or_gz_path(path)
+    return path, resolved_path, materialized
 
 
 def _parallel_resolve_plain_or_gz(paths, *, desc):
@@ -130,18 +121,37 @@ def _parallel_resolve_plain_or_gz(paths, *, desc):
         sys.exit("One or more FASTA materialization jobs failed; see errors above.")
 
     resolved_by_path = {}
-    for path, resolved in results:
-        resolved_by_path[path] = resolved
+    for path, resolved, materialized in results:
+        resolved_by_path[path] = {
+            "resolved_path": resolved,
+            "materialized": bool(materialized),
+        }
     return resolved_by_path
 
 
-def _parallel_archive_fas(paths, *, desc):
+def _cleanup_materialized_fas(path):
+    if not path:
+        return False
+    if not os.path.isfile(path):
+        return False
+    try:
+        os.remove(path)
+    except OSError:
+        return False
+    return True
+
+
+def _cleanup_materialized_fas_job(path):
+    return path, _cleanup_materialized_fas(path)
+
+
+def _parallel_cleanup_materialized_fastas(paths, *, desc):
     unique_paths = _unique_paths(paths)
     if not unique_paths:
         return {}
 
     results = run_parallel_with_progress(
-        _archive_fas_job,
+        _cleanup_materialized_fas_job,
         unique_paths,
         desc=desc,
         unit="lib",
@@ -149,12 +159,12 @@ def _parallel_archive_fas(paths, *, desc):
     )
     runtime_errors = [res for res in results if isinstance(res, RuntimeError)]
     if runtime_errors:
-        sys.exit("One or more FASTA archive jobs failed; see errors above.")
+        sys.exit("One or more temporary FASTA cleanup jobs failed; see errors above.")
 
-    archived_by_path = {}
-    for path, artifact_path in results:
-        archived_by_path[path] = artifact_path
-    return archived_by_path
+    cleaned_by_path = {}
+    for path, cleaned in results:
+        cleaned_by_path[path] = bool(cleaned)
+    return cleaned_by_path
 
 
 def _inspect_mapping_cache_job(job):
@@ -554,6 +564,7 @@ def mapprocess(
     libs_to_map = []
     legacy_sams_to_upgrade = []
     compat_dirty = False
+    materialized_fastas = []
 
     cache_jobs = [(fas_path, bam_path, genoIndex) for fas_path, bam_path in zip(fas_inputs, bam_expected)]
     cache_inspection = _parallel_inspect_mapping_cache(
@@ -593,7 +604,7 @@ def mapprocess(
             continue
 
         reference_path = getattr(rt, "reference", None)
-        prev_legacy_artifact_fp = (config["FASTAS"].get(artifact_path) or "").strip() if artifact_path else ""
+        prev_legacy_artifact_fp = _compat_fasta_fp(config, artifact_path or fas_path)
         prev_legacy_sam_fp = (config["MAPS"].get(legacy_sam_path) or "").strip() if legacy_sam_path else ""
         legacy_upgrade_ready = (
             bool(reference_path and os.path.isfile(reference_path))
@@ -634,42 +645,46 @@ def mapprocess(
     if libs_to_map:
         print("Libraries to be mapped: %s" % (", ".join([item[0] for item in libs_to_map])))
 
-        resolved_inputs = _parallel_resolve_plain_or_gz(
-            [fas_path for fas_path, _, _ in libs_to_map],
-            desc="Preparing FASTAs for mapping",
-        )
-        materialized_inputs = []
-        for fas_path, bam_path, input_sig in libs_to_map:
-            resolved = resolved_inputs.get(fas_path)
-            if not resolved or not os.path.isfile(resolved):
-                print(f"Error: input FASTA missing for mapping: {fas_path}")
-                sys.exit()
-            materialized_inputs.append((resolved, bam_path, input_sig))
+        try:
+            resolved_inputs = _parallel_resolve_plain_or_gz(
+                [fas_path for fas_path, _, _ in libs_to_map],
+                desc="Materializing FASTAs for mapping",
+            )
+            materialized_inputs = []
+            for fas_path, bam_path, input_sig in libs_to_map:
+                resolved_info = resolved_inputs.get(fas_path, {})
+                resolved = resolved_info.get("resolved_path")
+                if not resolved or not os.path.isfile(resolved):
+                    print(f"Error: input FASTA missing for mapping: {fas_path}")
+                    sys.exit()
+                if resolved_info.get("materialized"):
+                    materialized_fastas.append(resolved)
+                materialized_inputs.append((resolved, bam_path, input_sig))
 
-        nproc, nspread = optimize(ncores_local, len(materialized_inputs))
-        rawinputs = [(alib, genoIndex, nspread, maxhits, runtype) for alib, _, _ in materialized_inputs]
-        PPBalance(
-            mapper,
-            rawinputs,
-            n_workers=nproc,
-            maxtasksperchild=MAPPING_PPBALANCE_MAXTASKSPERCHILD,
-        )
+            nproc, nspread = optimize(ncores_local, len(materialized_inputs))
+            rawinputs = [(alib, genoIndex, nspread, maxhits, runtype) for alib, _, _ in materialized_inputs]
+            PPBalance(
+                mapper,
+                rawinputs,
+                n_workers=nproc,
+                maxtasksperchild=MAPPING_PPBALANCE_MAXTASKSPERCHILD,
+            )
 
-        produced_bams = [bam_path for _, bam_path, _ in materialized_inputs]
-        _stabilize_outputs(produced_bams)
+            produced_bams = [bam_path for _, bam_path, _ in materialized_inputs]
+            _stabilize_outputs(produced_bams)
 
-        for _, bam_path, input_sig in materialized_inputs:
-            cache.record(MAPPING_SECTION, bam_path, input_sig)
-            compat_dirty = _record_compat_map_md5(config, bam_path) or compat_dirty
-            libs_mapped.append(bam_path)
+            for _, bam_path, input_sig in materialized_inputs:
+                cache.record(MAPPING_SECTION, bam_path, input_sig)
+                compat_dirty = _record_compat_map_md5(config, bam_path) or compat_dirty
+                libs_mapped.append(bam_path)
+        finally:
+            _parallel_cleanup_materialized_fastas(
+                materialized_fastas,
+                desc="Cleaning temporary FASTAs",
+            )
     else:
         if not legacy_sams_to_upgrade:
             print("\nNo new libraries to map this time")
-
-    archived_fastas = _parallel_archive_fas(fas_inputs, desc="Archiving mapped FASTAs")
-    for fas_path in fas_inputs:
-        artifact_path = archived_fastas.get(fas_path)
-        compat_dirty = _record_compat_fasta_md5(config, artifact_path) or compat_dirty
 
     if compat_dirty:
         cache.flush()
