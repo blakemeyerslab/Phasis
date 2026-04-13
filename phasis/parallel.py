@@ -1,4 +1,4 @@
-import os, multiprocessing, gc, traceback, sys
+import os, multiprocessing, gc, traceback, sys, re
 from tqdm import tqdm
 import phasis.runtime as rt
 
@@ -13,6 +13,44 @@ def _coerce_positive_int(value, default=None):
         return value
     except Exception:
         return default
+
+
+def _extract_first_positive_int(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        match = re.search(r"(\d+)", str(value))
+        if not match:
+            return default
+        parsed = int(match.group(1))
+        if parsed <= 0:
+            return default
+        return parsed
+    except Exception:
+        return default
+
+
+def _scheduler_cpu_limit(env=None):
+    env = os.environ if env is None else env
+    for key in (
+        "SLURM_CPUS_PER_TASK",
+        "PBS_NP",
+        "NSLOTS",
+        "LSB_DJOB_NUMPROC",
+        "SLURM_CPUS_ON_NODE",
+    ):
+        parsed = _extract_first_positive_int(env.get(key), None)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _effective_visible_cpu_count(env=None):
+    totalcores = int(multiprocessing.cpu_count())
+    scheduler_limit = _scheduler_cpu_limit(env=env)
+    if scheduler_limit is None:
+        return totalcores
+    return int(max(1, min(totalcores, scheduler_limit)))
 
 
 def _effective_start_method(start_method=None):
@@ -497,7 +535,7 @@ def coreReserve(cores):
     Kept as a canonical helper outside legacy.py so startup can reserve cores
     without routing the real logic through the compatibility layer.
     """
-    totalcores = int(multiprocessing.cpu_count())
+    totalcores = _effective_visible_cpu_count()
     if cores == 0:
         if totalcores == 4:
             ncores = 3

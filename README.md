@@ -188,6 +188,26 @@ In the filenames below, `{method}` is the classifier used for the run, currently
 
    ![Example individual PHAS locus plot](docs/images/phas_locus_plot_example.png)
 
+9. **Per-locus phased-register phasiRNA table**  
+   Filename: **`{phase}_{method}_phasiRNAs.tsv`**  
+   This TSV contains one row per exported phase-length phasiRNA that supports a final *PHAS* locus in the plotted phased register. It records the observed read position, the expected register position, the support class (`core_exact`, `core_offset`, or `extended_exact`), the abundance, the sequence, and the mapper count when available.
+
+   Small synthetic 24-nt example:
+
+   | identifier | cID | alib | phase | strand | observed_pos | expected_register_pos | register_class | abun | tag_seq | hits |
+   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+   | chr1:100..196 | cluster_1 | libA | 24 | w | 100 | 100 | core_exact | 53 | ATCG... | 1 |
+   | chr1:100..196 | cluster_1 | libA | 24 | w | 125 | 124 | core_offset | 31 | TGCA... | 1 |
+   | chr1:100..196 | cluster_1 | libA | 24 | w | 172 | 172 | extended_exact | 18 | GATC... | 2 |
+
+   How to read these columns:
+   - `expected_register_pos` is the phased genomic register position that PHASIS is tracking for that row.
+   - `core_exact` means the read mapped exactly onto one of the 10-cycle register positions used in the Howell-score quantification window.
+   - `core_offset` means there was no exact phase-length read at that core register position, so PHASIS exported the winning `+/-1` offset read instead. In the example above, the expected phased position is `124`, but the exported read was observed at `125`.
+   - `extended_exact` means the read mapped exactly to the same phased register outside the core 10-cycle Howell window. These are the reads that correspond to the darker extension guide lines in the locus plot.
+   - Offset-only reads are not exported for the extended register.
+   - A locus can have more than one exported row for the same `expected_register_pos` if multiple phase-length reads with different sequences map exactly at that same phased position.
+
 ---
 
 ## Common options
@@ -214,6 +234,7 @@ In the filenames below, `{method}` is the classifier used for the run, currently
 - `-min_Howell_score` (default: 12.5): minimum Howell score used during classification/output filtering
 - `--concat_libs`: concatenate all input libraries into one virtual library before downstream analysis
 - `--outdir` (default: `{phase}_results`): directory for final outputs; supports `{phase}` in the name
+- `--plot_staging` (default: `auto`): individual locus plot write mode; `auto` stages to local scratch when PHASIS detects an HPC-style environment or remote/distributed output path, `local` forces scratch staging, and `direct` writes plots straight to the requested output directory
 - `-cleanup`: cleanup-only mode; delete intermediate files but keep `index/`, keep the results directory, and keep only the index-related section of `phasis.mem`; refuses to run unless the current directory looks like a real Phasis run root
 - `-cleanup_all` (alias: `-cleanup_index`): cleanup-only mode; delete intermediates, `index/`, and `phasis.mem`, while keeping the results directory; refuses to run unless the current directory looks like a real Phasis run root
 - `-version`: print the installed Phasis version and exit

@@ -18,6 +18,9 @@ cluster_build_initial_worker_cap = None
 cluster_build_max_worker_cap = None
 cluster_scoring_initial_worker_cap = None
 cluster_scoring_max_worker_cap = None
+plot_staging = None
+plot_staging_mode = None
+plot_staging_root = None
 
 # (keep your existing globals below; I’m not repeating them all)
 
@@ -31,6 +34,7 @@ _RUNTIME_KEYS = [
     "outdir","run_dir","memFile","clusters_scored_tsv","cleanup","cleanup_all",
     "cluster_build_initial_worker_cap","cluster_build_max_worker_cap",
     "cluster_scoring_initial_worker_cap","cluster_scoring_max_worker_cap",
+    "plot_staging","plot_staging_mode","plot_staging_root",
 ]
 
 def _snapshot_path(run_dir_override: str | None = None) -> str:

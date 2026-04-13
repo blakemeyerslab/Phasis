@@ -84,6 +84,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--outdir", dest="outdir", metavar="DIR", type=str,
                         default="{phase}_results",
                         help="Output directory (supports {phase}); default {phase}_results")
+    parser.add_argument(
+        "--plot_staging",
+        dest="plot_staging",
+        choices=("auto", "local", "direct"),
+        default=None,
+        help="Individual PHAS locus plot write mode: auto, local scratch staging, or direct [default auto]",
+    )
 
     parser.add_argument(
         "-version", action="version",
@@ -233,6 +240,11 @@ def configure_runtime(args: argparse.Namespace) -> None:
     rt.min_Howell_score = args.min_Howell_score
     rt.concat_libs = args.concat_libs
     rt.outdir = outdir
+    rt.plot_staging = str(
+        args.plot_staging
+        if args.plot_staging is not None
+        else os.environ.get("PHASIS_PLOT_STAGING", "auto")
+    ).strip().lower()
 
     # store optional flags too
     rt.cleanup = args.cleanup
