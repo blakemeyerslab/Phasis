@@ -975,6 +975,10 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         'c_window_start': features.get('c_window_start', _fallback_series(nrows)),
         'c_window_end': features.get('c_window_end', _fallback_series(nrows)),
         'Peak_Howell_score': features.get('Peak_Howell_score', _fallback_series(nrows)),
+        'Howell_exact_support_score': features.get('Howell_exact_support_score', _fallback_series(nrows)),
+        'Howell_ambiguity_count': features.get('Howell_ambiguity_count', _fallback_series(nrows)),
+        'Howell_alt_register_count': features.get('Howell_alt_register_count', _fallback_series(nrows)),
+        'Howell_overlap_margin': features.get('Howell_overlap_margin', _fallback_series(nrows)),
         # strict (classic) Howell
         'w_Howell_score_strict': features.get('w_Howell_score_strict', _fallback_series(nrows)),
         'w_window_start_strict': features.get('w_window_start_strict', _fallback_series(nrows)),
@@ -1002,7 +1006,9 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
     # ---- Compact calls table (same as before + Peak_Howell_score_strict) ----
     calls_cols = [
         'identifier', 'phasis_score', 'achr', 'start', 'end', 'alib',
-        'Peak_Howell_score', 'Peak_Howell_score_strict'
+        'Peak_Howell_score', 'Peak_Howell_score_strict',
+        'Howell_exact_support_score',
+        'Howell_ambiguity_count', 'Howell_alt_register_count', 'Howell_overlap_margin',
     ]
     # Ensure missing columns are created as NaN so write doesn't fail
     for col in calls_cols:

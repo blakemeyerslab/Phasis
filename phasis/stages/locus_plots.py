@@ -88,6 +88,7 @@ HPSP_RED = "#D62828"
 CENTER_LINE_COLOR = "#8C8C8C"
 NON_PHASE_GREY = "#9A9A9A"
 EXTENDED_GUIDE_COLOR = "#000000"
+AMBIGUITY_PANEL_BG = "#F7F7F7"
 
 
 def _join_outdir(dirpath: str | None, name: str) -> str:
@@ -851,6 +852,110 @@ def _build_x_bounds(cluster_df: pd.DataFrame, identifier_text: str, howell_rows,
     return float(xmin), float(xmax)
 
 
+def _clean_ambiguity_count(value):
+    try:
+        if pd.isna(value):
+            return None
+        return int(round(float(value)))
+    except Exception:
+        return None
+
+
+def _clean_ambiguity_float(value):
+    try:
+        numeric = float(value)
+    except Exception:
+        return None
+    if not np.isfinite(numeric):
+        return None
+    return float(numeric)
+
+
+def _build_ambiguity_sidebar_entries(task: dict) -> list[tuple[str, str]]:
+    exact_support = _clean_ambiguity_float(task.get("Howell_exact_support_score"))
+    overlap_count = _clean_ambiguity_count(task.get("Howell_ambiguity_count"))
+    alt_register_count = _clean_ambiguity_count(task.get("Howell_alt_register_count"))
+    overlap_margin = _clean_ambiguity_float(task.get("Howell_overlap_margin"))
+    return [
+        ("Exact HPSP support", "NA" if exact_support is None else f"{exact_support:.2f}"),
+        ("Near-tied windows", "NA" if overlap_count is None else str(overlap_count)),
+        ("Alt. registers", "NA" if alt_register_count is None else str(alt_register_count)),
+        ("Overlap margin", "NA" if overlap_margin is None else f"{overlap_margin:.2f}"),
+    ]
+
+
+def _build_ambiguity_sidebar_note(task: dict) -> str:
+    exact_support = _clean_ambiguity_float(task.get("Howell_exact_support_score"))
+    if exact_support is None or exact_support <= 0.0:
+        return "Exact-only ambiguity not assessable.\nRelaxed HPSP lacks meaningful exact support."
+    return "Lower Howell panel is relaxed.\nOffset (+/-1) points are not counted here."
+
+
+def _draw_ambiguity_sidebar(ax, task: dict) -> None:
+    ax.set_facecolor(AMBIGUITY_PANEL_BG)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    ax.text(
+        0.06,
+        0.93,
+        "Exact-only Howell ambiguity",
+        fontsize=10,
+        fontweight="bold",
+        ha="left",
+        va="top",
+        color="#333333",
+        transform=ax.transAxes,
+    )
+    ax.text(
+        0.06,
+        0.83,
+        "Relaxed call, exact-only competitor summary",
+        fontsize=7.5,
+        ha="left",
+        va="top",
+        color="#666666",
+        transform=ax.transAxes,
+    )
+
+    y_positions = (0.60, 0.44, 0.28, 0.12)
+    for (label_text, value_text), ypos in zip(_build_ambiguity_sidebar_entries(task), y_positions):
+        ax.text(
+            0.06,
+            ypos + 0.08,
+            label_text,
+            fontsize=7.6,
+            ha="left",
+            va="top",
+            color="#555555",
+            transform=ax.transAxes,
+        )
+        ax.text(
+            0.06,
+            ypos,
+            value_text,
+            fontsize=12,
+            fontweight="bold",
+            ha="left",
+            va="top",
+            color="#222222",
+            transform=ax.transAxes,
+        )
+
+    ax.text(
+        0.06,
+        0.01,
+        _build_ambiguity_sidebar_note(task),
+        fontsize=7.1,
+        ha="left",
+        va="bottom",
+        color="#666666",
+        transform=ax.transAxes,
+    )
+
+
 def _placeholder_payload(task: dict, message_text: str) -> dict:
     return {
         "plot_kind": "placeholder",
@@ -952,6 +1057,10 @@ def _analyze_single_locus(task: dict) -> dict:
             "xpad": float(xpad),
             "abun_ylim": float(abun_ylim),
             "score_ylim": float(score_ylim),
+            "Howell_exact_support_score": task.get("Howell_exact_support_score"),
+            "Howell_ambiguity_count": task.get("Howell_ambiguity_count"),
+            "Howell_alt_register_count": task.get("Howell_alt_register_count"),
+            "Howell_overlap_margin": task.get("Howell_overlap_margin"),
         },
         "phasiRNA_rows": export_rows,
     }
@@ -982,16 +1091,25 @@ def _write_single_locus_plot(task: dict) -> str:
     abundance_rows = task.get("abundance_rows", [])
     howell_rows = task.get("howell_rows", [])
 
-    fig, axes = plt.subplots(
+    fig = plt.figure(figsize=(12.0, 6.8))
+    grid = fig.add_gridspec(
         2,
-        1,
-        figsize=(10.5, 6.8),
-        sharex=True,
-        gridspec_kw={"height_ratios": [1.1, 1.0], "hspace": 0.08},
+        2,
+        width_ratios=[5.6, 1.5],
+        height_ratios=[1.1, 1.0],
+        hspace=0.08,
+        wspace=0.16,
     )
+    ax_abun = fig.add_subplot(grid[0, 0])
+    ax_howell = fig.add_subplot(grid[1, 0], sharex=ax_abun)
+    ax_blank = fig.add_subplot(grid[0, 1])
+    ax_ambiguity = fig.add_subplot(grid[1, 1])
+    axes = [ax_abun, ax_howell]
     fig.patch.set_facecolor("white")
     axes[0].set_facecolor("#F1F1F1")
     axes[1].set_facecolor("#F1F1F1")
+    ax_blank.axis("off")
+    _draw_ambiguity_sidebar(ax_ambiguity, task)
 
     fig.suptitle(task["title_text"], fontsize=12, y=0.98)
     _add_grouped_legends(fig, phase_value)
@@ -1064,7 +1182,7 @@ def _write_single_locus_plot(task: dict) -> str:
         ax.spines["right"].set_visible(False)
         ax.grid(axis="y", color="#D8D8D8", linewidth=0.8, linestyle="-", zorder=0)
 
-    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.09, top=0.82, hspace=0.08)
+    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.09, top=0.82, hspace=0.08, wspace=0.16)
     fig.savefig(plot_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return plot_path
@@ -1153,6 +1271,10 @@ def write_individual_phas_locus_plots(
                 "cid_value": cid_value,
                 "alib_value": alib_value,
                 "phase": int(phase_value),
+                "Howell_exact_support_score": getattr(row, "Howell_exact_support_score", np.nan),
+                "Howell_ambiguity_count": getattr(row, "Howell_ambiguity_count", np.nan),
+                "Howell_alt_register_count": getattr(row, "Howell_alt_register_count", np.nan),
+                "Howell_overlap_margin": getattr(row, "Howell_overlap_margin", np.nan),
                 "cluster_rows": [] if cluster_df is None else cluster_df.to_dict("records"),
             }
         )

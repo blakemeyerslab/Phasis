@@ -14,6 +14,8 @@ from phasis.parallel import run_parallel_with_progress
 
 DCL_OVERHANG = 3          # 2-nt 3' overhang in duplex -> 3-nt genomic offset
 WINDOW_MULTIPLIER = 10    # 10 cycles per window
+FEATURE_SCHEMA_VERSION = 3
+HOWELL_AMBIGUITY_FRACTION = 0.90
 
 
 # ---- legacy schema (KNN-compatible) ---------------------------------------
@@ -34,6 +36,10 @@ FEATURE_COLS = ['identifier',
  'c_window_start',
  'c_window_end',
  'Peak_Howell_score',
+ 'Howell_exact_support_score',
+ 'Howell_ambiguity_count',
+ 'Howell_alt_register_count',
+ 'Howell_overlap_margin',
  'w_Howell_score_strict',
  'w_window_start_strict',
  'w_window_end_strict',
@@ -127,7 +133,11 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
 
     input_sig = stage_signature(
         files=[phas_path, scored_path],
-        params={"phase": phase, "concat_libs": bool(concat_libs)},
+        params={
+            "phase": phase,
+            "concat_libs": bool(concat_libs),
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        },
     )
 
     cache = MemCache.load(memFile)
@@ -232,14 +242,180 @@ def _build_pos_abun_exact_phase(df: pd.DataFrame, seq_start: int, seq_end: int, 
             d[pos] = d.get(pos, 0.0) + float(row['abun'])
     return d
 
+
+def _compute_howell_score_from_register(
+    in_phase_sum: float,
+    effective_total: float,
+    n_filled: int,
+    num_cycles: int,
+):
+    out_of_phase = max(0.0, float(effective_total) - float(in_phase_sum))
+    numerator = float(in_phase_sum)
+    denominator = 1.0 + out_of_phase
+    if numerator <= 0.0 or not (int(n_filled) > 3):
+        return 0.0, out_of_phase
+
+    log_arg = 1.0 + 10.0 * (numerator / denominator)
+    if log_arg <= 0.0 or log_arg != log_arg:
+        return 0.0, out_of_phase
+
+    scale = max(min(int(n_filled), int(num_cycles)) - 2, 0)
+    return float(scale * (0.0 if log_arg <= 0 else np.log(log_arg))), float(out_of_phase)
+
+
+def _score_window_registers(window_positions, pos_abun, win_start, win_end, phase, *, forward=True, exact_only: bool = False):
+    ph = int(phase)
+    if not window_positions:
+        return {
+            "score": 0.0,
+            "best_register": None,
+            "best_in_phase_sum": 0.0,
+            "best_out_of_phase": 0.0,
+            "best_filled": 0,
+            "register_scores": [0.0] * ph,
+        }
+
+    num_cycles = max(0, (win_end - win_start + 1) // ph)
+    if num_cycles < 4:
+        return {
+            "score": 0.0,
+            "best_register": None,
+            "best_in_phase_sum": 0.0,
+            "best_out_of_phase": 0.0,
+            "best_filled": 0,
+            "register_scores": [0.0] * ph,
+        }
+
+    best_score = -float("inf")
+    best_reg_sum = 0.0
+    best_reg_out = 0.0
+    best_reg_filled = 0
+    best_reg = None
+    register_scores: list[float] = []
+    evaluator = _evaluate_register_strict_exact if exact_only else _evaluate_register
+
+    for reg in range(ph):
+        in_sum, eff_total, n_filled = evaluator(
+            window_positions, pos_abun, win_start, win_end, ph, reg, forward=forward
+        )
+        reg_score, out_of_phase = _compute_howell_score_from_register(
+            in_sum,
+            eff_total,
+            n_filled,
+            num_cycles,
+        )
+        register_scores.append(float(reg_score))
+        if reg_score > best_score:
+            best_score = reg_score
+            best_reg_sum = float(in_sum)
+            best_reg_out = float(out_of_phase)
+            best_reg_filled = int(n_filled)
+            best_reg = reg
+
+    return {
+        "score": float(0.0 if best_score == -float("inf") else best_score),
+        "best_register": best_reg,
+        "best_in_phase_sum": float(best_reg_sum),
+        "best_out_of_phase": float(best_reg_out),
+        "best_filled": int(best_reg_filled),
+        "register_scores": register_scores,
+    }
+
+
+def _windows_overlap(start_a, end_a, start_b, end_b) -> bool:
+    return int(max(start_a, start_b)) <= int(min(end_a, end_b))
+
+
+def _summarize_peak_howell_ambiguity(
+    best_window_detail: dict | None,
+    candidate_windows,
+    *,
+    threshold_fraction: float = HOWELL_AMBIGUITY_FRACTION,
+):
+    if not best_window_detail:
+        return None
+
+    exact_support_score = float(best_window_detail.get("exact_score", 0.0) or 0.0)
+    winner_register = best_window_detail.get("exact_best_register")
+    register_scores = best_window_detail.get("exact_register_scores") or []
+    result = {
+        "winner_strand": best_window_detail.get("strand"),
+        "winner_window_start": best_window_detail.get("window_start"),
+        "winner_window_end": best_window_detail.get("window_end"),
+        "winner_register": best_window_detail.get("best_register"),
+        "exact_winner_register": winner_register,
+        "Howell_exact_support_score": float(exact_support_score),
+        "best_overlapping_competitor_score": np.nan,
+        "Howell_ambiguity_count": np.nan,
+        "Howell_alt_register_count": np.nan,
+        "Howell_overlap_margin": np.nan,
+    }
+
+    if exact_support_score <= 0.0:
+        return result
+
+    threshold_score = float(threshold_fraction) * exact_support_score
+    overlap_best_score = None
+    overlap_count = 0
+    for candidate in candidate_windows or []:
+        if str(candidate.get("strand")) != str(best_window_detail.get("strand")):
+            continue
+        if (
+            int(candidate.get("window_start")) == int(best_window_detail.get("window_start"))
+            and int(candidate.get("window_end")) == int(best_window_detail.get("window_end"))
+        ):
+            continue
+        if not _windows_overlap(
+            candidate.get("window_start"),
+            candidate.get("window_end"),
+            best_window_detail.get("window_start"),
+            best_window_detail.get("window_end"),
+        ):
+            continue
+        candidate_score = float(candidate.get("exact_score", 0.0) or 0.0)
+        if candidate_score < threshold_score:
+            continue
+        overlap_count += 1
+        if overlap_best_score is None or candidate_score > overlap_best_score:
+            overlap_best_score = candidate_score
+
+    alt_register_count = 0
+    if winner_register is not None:
+        for reg_idx, reg_score in enumerate(register_scores):
+            if int(reg_idx) == int(winner_register):
+                continue
+            if float(reg_score) >= threshold_score:
+                alt_register_count += 1
+
+    result["best_overlapping_competitor_score"] = (
+        np.nan if overlap_best_score is None else float(overlap_best_score)
+    )
+    result["Howell_ambiguity_count"] = int(overlap_count)
+    result["Howell_alt_register_count"] = int(alt_register_count)
+    result["Howell_overlap_margin"] = (
+        np.nan if overlap_best_score is None else float(exact_support_score - float(overlap_best_score))
+    )
+    return result
+
 # ---------- RELAXED Howell (positional ±1 wobble allowed) ----------
-def _best_sliding_window_score_generic(pos_abun, phase, win_size, seq_start=None, seq_end=None, forward=True):
+def _best_sliding_window_score_generic(
+    pos_abun,
+    phase,
+    win_size,
+    seq_start=None,
+    seq_end=None,
+    forward=True,
+    *,
+    return_detail: bool = False,
+):
     """
     Generic window scan (relaxed Howell with ±1 wobble).
     Expects pos_abun already filtered to len == phase.
     """
     positions = sorted(pos_abun.keys())
     if not positions:
+        if return_detail:
+            return 0.0, None, None, None
         return 0.0, None, None
 
     lower_bound = seq_start if seq_start is not None else positions[0]
@@ -250,49 +426,68 @@ def _best_sliding_window_score_generic(pos_abun, phase, win_size, seq_start=None
 
     best_score = -float("inf")
     best_window = (None, None)
+    best_detail = None
+    candidate_windows = [] if return_detail else None
 
     for win_start in range(lower_bound, upper_bound + 1):
         win_end = win_start + win_size - 1
         window_positions = [p for p in positions if win_start <= p <= win_end]
-        if not window_positions:
-            score = 0.0
-        else:
-            # Require at least 4 cycles possible in the window (n>3 guard)
-            num_cycles = max(0, (win_end - win_start + 1) // int(phase))
-            if num_cycles < 4:
-                score = 0.0
-            else:
-                best_reg_sum = 0.0
-                best_reg_total = 0.0
-                best_reg_filled = 0
+        relaxed_summary = _score_window_registers(
+            window_positions,
+            pos_abun,
+            win_start,
+            win_end,
+            int(phase),
+            forward=forward,
+        )
+        score = float(relaxed_summary["score"])
+        exact_summary = None
+        if return_detail:
+            exact_summary = _score_window_registers(
+                window_positions,
+                pos_abun,
+                win_start,
+                win_end,
+                int(phase),
+                forward=forward,
+                exact_only=True,
+            )
 
-                for reg in range(int(phase)):
-                    in_sum, eff_total, n_filled = _evaluate_register(
-                        window_positions, pos_abun, win_start, win_end, int(phase), reg, forward=forward
-                    )
-                    if in_sum > best_reg_sum:
-                        best_reg_sum = in_sum
-                        best_reg_total = eff_total
-                        best_reg_filled = n_filled
-
-                out_of_phase = max(0.0, best_reg_total - best_reg_sum)  # U
-                numerator = best_reg_sum
-                denominator = 1.0 + out_of_phase
-                if numerator <= 0.0 or not (best_reg_filled > 3):
-                    score = 0.0
-                else:
-                    log_arg = 1.0 + 10.0 * (numerator / denominator)
-                    if log_arg <= 0.0 or log_arg != log_arg:  # NaN guard
-                        score = 0.0
-                    else:
-                        scale = max(min(best_reg_filled, num_cycles) - 2, 0)
-                        score = scale * (0.0 if log_arg <= 0 else np.log(log_arg))
+        if return_detail:
+            candidate_windows.append(
+                {
+                    "strand": "w" if forward else "c",
+                    "window_start": int(win_start),
+                    "window_end": int(win_end),
+                    "score": float(score),
+                    "best_register": relaxed_summary.get("best_register"),
+                    "exact_score": float(exact_summary["score"]),
+                    "exact_best_register": exact_summary.get("best_register"),
+                }
+            )
 
         if score > best_score:
             best_score = score
             best_window = (win_start, win_end)
+            if return_detail:
+                best_detail = {
+                    "strand": "w" if forward else "c",
+                    "window_start": int(win_start),
+                    "window_end": int(win_end),
+                    "score": float(score),
+                    "best_register": relaxed_summary.get("best_register"),
+                    "register_scores": list(relaxed_summary.get("register_scores") or []),
+                    "exact_score": float(exact_summary["score"]),
+                    "exact_best_register": exact_summary.get("best_register"),
+                    "exact_register_scores": list(exact_summary.get("register_scores") or []),
+                }
 
-    return best_score if best_score != -float("inf") else 0.0, best_window[0], best_window[1]
+    resolved_score = best_score if best_score != -float("inf") else 0.0
+    if not return_detail:
+        return resolved_score, best_window[0], best_window[1]
+
+    detail = _summarize_peak_howell_ambiguity(best_detail, candidate_windows)
+    return resolved_score, best_window[0], best_window[1], detail
 
 def best_sliding_window_score_forward(pos_abun, phase, win_size, seq_start=None, seq_end=None):
     return _best_sliding_window_score_generic(
@@ -304,10 +499,24 @@ def best_sliding_window_score_reverse(pos_abun, phase, win_size, seq_start=None,
         pos_abun, phase, win_size, seq_start=seq_start, seq_end=seq_end, forward=False
     )
 
-def compute_phasing_score_Howell(aclust: pd.DataFrame):
+def _pick_peak_howell_detail(w_detail: dict | None, c_detail: dict | None):
+    if w_detail is None:
+        return c_detail
+    if c_detail is None:
+        return w_detail
+
+    w_score = float(w_detail.get("score", 0.0) or 0.0)
+    c_score = float(c_detail.get("score", 0.0) or 0.0)
+    if c_score > w_score:
+        return c_detail
+    return w_detail
+
+
+def compute_phasing_score_Howell(aclust: pd.DataFrame, *, return_detail: bool = False):
     """
     Howell-like phasing WITH positional wobble (±1), but ONLY len == phase reads.
     Returns: (w_score,(w_start,w_end), c_score,(c_start,c_end))
+    When return_detail=True, appends the peak-window ambiguity summary.
     """
     ph = _phase_value()
     win_size  = WINDOW_MULTIPLIER * int(ph)
@@ -317,24 +526,56 @@ def compute_phasing_score_Howell(aclust: pd.DataFrame):
     # Forward “w”
     if w_mask.any():
         w_pos_abun = _build_pos_abun_exact_phase(aclust.loc[w_mask], seq_start, seq_end, int(ph))
-        w_score, w_s, w_e = (
-            best_sliding_window_score_forward(w_pos_abun, int(ph), win_size, seq_start, seq_end)
-            if w_pos_abun else (0.0, None, None)
-        )
+        if w_pos_abun:
+            if return_detail:
+                w_score, w_s, w_e, w_detail = _best_sliding_window_score_generic(
+                    w_pos_abun,
+                    int(ph),
+                    win_size,
+                    seq_start=seq_start,
+                    seq_end=seq_end,
+                    forward=True,
+                    return_detail=True,
+                )
+            else:
+                w_score, w_s, w_e = best_sliding_window_score_forward(
+                    w_pos_abun, int(ph), win_size, seq_start, seq_end
+                )
+                w_detail = None
+        else:
+            w_score, w_s, w_e, w_detail = 0.0, None, None, None
     else:
-        w_score, w_s, w_e = None, None, None
+        w_score, w_s, w_e, w_detail = None, None, None, None
 
     # Reverse “c”
     if c_mask.any():
         c_pos_abun = _build_pos_abun_exact_phase(aclust.loc[c_mask], seq_start, seq_end, int(ph))
-        c_score, c_s, c_e = (
-            best_sliding_window_score_reverse(c_pos_abun, int(ph), win_size, seq_start, seq_end)
-            if c_pos_abun else (0.0, None, None)
-        )
+        if c_pos_abun:
+            if return_detail:
+                c_score, c_s, c_e, c_detail = _best_sliding_window_score_generic(
+                    c_pos_abun,
+                    int(ph),
+                    win_size,
+                    seq_start=seq_start,
+                    seq_end=seq_end,
+                    forward=False,
+                    return_detail=True,
+                )
+            else:
+                c_score, c_s, c_e = best_sliding_window_score_reverse(
+                    c_pos_abun, int(ph), win_size, seq_start, seq_end
+                )
+                c_detail = None
+        else:
+            c_score, c_s, c_e, c_detail = 0.0, None, None, None
     else:
-        c_score, c_s, c_e = None, None, None
+        c_score, c_s, c_e, c_detail = None, None, None, None
 
-    return (w_score, (w_s, w_e), c_score, (c_s, c_e))
+    if not return_detail:
+        return (w_score, (w_s, w_e), c_score, (c_s, c_e))
+
+    peak_detail = _pick_peak_howell_detail(w_detail, c_detail)
+    return (w_score, (w_s, w_e), c_score, (c_s, c_e), peak_detail)
 
 def _evaluate_register_strict_exact(window_positions, pos_abun, win_start, win_end, phase, reg, forward=True):
     """Count ONLY exact register hits (no ±1). Returns: (in_phase_sum, total_in_window, n_filled_cycles)"""
@@ -408,43 +649,21 @@ def _evaluate_register(window_positions, pos_abun, win_start, win_end, phase, re
 
 
 def _score_relaxed_window(window_positions, pos_abun, win_start, win_end, phase, forward=True):
-    ph = int(phase)
-    if not window_positions:
-        return 0.0, 0.0, 0.0, 0, None
-
-    num_cycles = max(0, (win_end - win_start + 1) // ph)
-    if num_cycles < 4:
-        return 0.0, 0.0, 0.0, 0, None
-
-    best_reg_sum = 0.0
-    best_reg_total = 0.0
-    best_reg_filled = 0
-    best_reg = None
-
-    for reg in range(ph):
-        in_sum, eff_total, n_filled = _evaluate_register(
-            window_positions, pos_abun, win_start, win_end, ph, reg, forward=forward
-        )
-        if in_sum > best_reg_sum:
-            best_reg_sum = in_sum
-            best_reg_total = eff_total
-            best_reg_filled = n_filled
-            best_reg = reg
-
-    out_of_phase = max(0.0, best_reg_total - best_reg_sum)
-    numerator = best_reg_sum
-    denominator = 1.0 + out_of_phase
-    if numerator <= 0.0 or not (best_reg_filled > 3):
-        score = 0.0
-    else:
-        log_arg = 1.0 + 10.0 * (numerator / denominator)
-        if log_arg <= 0.0 or log_arg != log_arg:
-            score = 0.0
-        else:
-            scale = max(min(best_reg_filled, num_cycles) - 2, 0)
-            score = scale * (0.0 if log_arg <= 0 else np.log(log_arg))
-
-    return float(score), float(best_reg_sum), float(out_of_phase), int(best_reg_filled), best_reg
+    summary = _score_window_registers(
+        window_positions,
+        pos_abun,
+        win_start,
+        win_end,
+        phase,
+        forward=forward,
+    )
+    return (
+        float(summary["score"]),
+        float(summary["best_in_phase_sum"]),
+        float(summary["best_out_of_phase"]),
+        int(summary["best_filled"]),
+        summary["best_register"],
+    )
 
 
 def _enumerate_relaxed_trace_for_strand(pos_abun, phase, win_size, *, forward=True):
@@ -742,8 +961,19 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
 
         # Howell (wobble-tolerant)
         (w_Howell, (w_s, w_e),
-         c_Howell, (c_s, c_e)) = compute_phasing_score_Howell(aclust)
+         c_Howell, (c_s, c_e),
+         peak_howell_detail) = compute_phasing_score_Howell(aclust, return_detail=True)
         Peak_Howell = None if (w_Howell is None and c_Howell is None) else max([x for x in (w_Howell, c_Howell) if x is not None])
+        if peak_howell_detail:
+            exact_support_score = peak_howell_detail.get("Howell_exact_support_score", np.nan)
+            ambiguity_count = peak_howell_detail.get("Howell_ambiguity_count", np.nan)
+            alt_register_count = peak_howell_detail.get("Howell_alt_register_count", np.nan)
+            overlap_margin = peak_howell_detail.get("Howell_overlap_margin", np.nan)
+        else:
+            exact_support_score = np.nan
+            ambiguity_count = np.nan
+            alt_register_count = np.nan
+            overlap_margin = np.nan
 
         # Howell (classic strict)
         (w_Howell_strict, (w_s_strict, w_e_strict),
@@ -757,6 +987,7 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
             float(total_abund),
             # wobble-tolerant
             w_Howell, w_s, w_e, c_Howell, c_s, c_e, Peak_Howell,
+            exact_support_score, ambiguity_count, alt_register_count, overlap_margin,
             # classic (strict)
             w_Howell_strict, w_s_strict, w_e_strict, c_Howell_strict, c_s_strict, c_e_strict, Peak_Howell_strict
         ])
