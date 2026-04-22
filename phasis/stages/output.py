@@ -979,6 +979,14 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         'Howell_ambiguity_count': features.get('Howell_ambiguity_count', _fallback_series(nrows)),
         'Howell_alt_register_count': features.get('Howell_alt_register_count', _fallback_series(nrows)),
         'Howell_overlap_margin': features.get('Howell_overlap_margin', _fallback_series(nrows)),
+        'Howell_extension_window_count': features.get('Howell_extension_window_count', _fallback_series(nrows)),
+        'Howell_extension_span_nt': features.get('Howell_extension_span_nt', _fallback_series(nrows)),
+        'Howell_origin_window_count': features.get('Howell_origin_window_count', _fallback_series(nrows)),
+        'Howell_origin_frame_count': features.get('Howell_origin_frame_count', _fallback_series(nrows)),
+        'Howell_origin_margin': features.get('Howell_origin_margin', _fallback_series(nrows)),
+        'Howell_origin_class': features.get('Howell_origin_class', pd.Series([np.nan] * int(nrows))),
+        'Howell_additional_peak_count': features.get('Howell_additional_peak_count', _fallback_series(nrows)),
+        'Howell_additional_peak_best_score': features.get('Howell_additional_peak_best_score', _fallback_series(nrows)),
         # strict (classic) Howell
         'w_Howell_score_strict': features.get('w_Howell_score_strict', _fallback_series(nrows)),
         'w_window_start_strict': features.get('w_window_start_strict', _fallback_series(nrows)),
@@ -1009,6 +1017,10 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         'Peak_Howell_score', 'Peak_Howell_score_strict',
         'Howell_exact_support_score',
         'Howell_ambiguity_count', 'Howell_alt_register_count', 'Howell_overlap_margin',
+        'Howell_extension_window_count', 'Howell_extension_span_nt',
+        'Howell_origin_window_count', 'Howell_origin_frame_count',
+        'Howell_origin_margin', 'Howell_origin_class',
+        'Howell_additional_peak_count', 'Howell_additional_peak_best_score',
     ]
     # Ensure missing columns are created as NaN so write doesn't fail
     for col in calls_cols:

@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import tempfile
+import textwrap
 from multiprocessing import cpu_count
 
 import matplotlib.pyplot as plt
@@ -88,7 +89,34 @@ HPSP_RED = "#D62828"
 CENTER_LINE_COLOR = "#8C8C8C"
 NON_PHASE_GREY = "#9A9A9A"
 EXTENDED_GUIDE_COLOR = "#000000"
-AMBIGUITY_PANEL_BG = "#F7F7F7"
+DETACHABLE_STRIP_BG = "#FAFAFA"
+DETACHABLE_SEPARATOR_COLOR = "#9A9A9A"
+DETACHABLE_SEPARATOR_STYLE = (0, (1.2, 2.2))
+ORIGIN_CLASS_LABELS = {
+    "insufficient_exact_support": "Insufficient exact support",
+    "unique_origin": "Unique origin",
+    "coherent_extension": "Coherent extension",
+    "ambiguous_origin": "Ambiguous origin",
+    "mixed_extension_and_ambiguity": "Mixed extension + ambiguity",
+}
+LOCUS_LAYOUT = {
+    "figsize": (13.2, 6.8),
+    "main_left": 0.08,
+    "main_right": 0.80,
+    "strip_left": 0.835,
+    "strip_right": 0.98,
+    "abun_bottom": 0.50,
+    "abun_height": 0.28,
+    "howell_bottom": 0.11,
+    "howell_height": 0.28,
+    "strip_bottom": 0.13,
+    "strip_top": 0.80,
+    "separator_x": 0.818,
+    "separator_bottom": 0.085,
+    "separator_top": 0.895,
+    "legend_y": 0.915,
+    "title_y": 0.975,
+}
 
 
 def _join_outdir(dirpath: str | None, name: str) -> str:
@@ -410,7 +438,7 @@ def _build_plot_legend_groups(phase_value: int):
     }
 
 
-def _add_grouped_legends(fig, phase_value: int) -> None:
+def _add_grouped_legends(fig, phase_value: int, *, main_left: float, main_right: float, legend_y: float) -> None:
     legend_groups = _build_plot_legend_groups(phase_value)
     legend_common = {
         "frameon": False,
@@ -419,32 +447,39 @@ def _add_grouped_legends(fig, phase_value: int) -> None:
         "columnspacing": 1.0,
         "borderaxespad": 0.0,
     }
+    main_width = float(main_right) - float(main_left)
+    anchor_positions = (
+        float(main_left),
+        float(main_left) + main_width * 0.23,
+        float(main_left) + main_width * 0.43,
+        float(main_left) + main_width * 0.60,
+    )
 
     legend_read = fig.legend(
         handles=legend_groups["read_lengths"],
         loc="upper left",
-        bbox_to_anchor=(0.08, 0.915),
+        bbox_to_anchor=(anchor_positions[0], legend_y),
         ncol=2,
         **legend_common,
     )
     legend_abundance = fig.legend(
         handles=legend_groups["abundance"],
         loc="upper left",
-        bbox_to_anchor=(0.40, 0.915),
+        bbox_to_anchor=(anchor_positions[1], legend_y),
         ncol=1,
         **legend_common,
     )
     legend_howell = fig.legend(
         handles=legend_groups["howell"],
         loc="upper left",
-        bbox_to_anchor=(0.55, 0.915),
+        bbox_to_anchor=(anchor_positions[2], legend_y),
         ncol=1,
         **legend_common,
     )
     legend_hpsp = fig.legend(
         handles=legend_groups["hpsp"],
         loc="upper left",
-        bbox_to_anchor=(0.70, 0.915),
+        bbox_to_anchor=(anchor_positions[3], legend_y),
         ncol=1,
         **legend_common,
     )
@@ -871,89 +906,188 @@ def _clean_ambiguity_float(value):
     return float(numeric)
 
 
-def _build_ambiguity_sidebar_entries(task: dict) -> list[tuple[str, str]]:
+def _clean_ambiguity_text(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() == "nan":
+            return None
+        return text
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return str(value)
+
+
+def _format_origin_class(value) -> str:
+    raw_value = _clean_ambiguity_text(value)
+    if raw_value is None:
+        return "NA"
+    return ORIGIN_CLASS_LABELS.get(raw_value, raw_value.replace("_", " ").capitalize())
+
+
+def _howell_peak_cutoff_text() -> str:
+    try:
+        return f"{float(getattr(rt, 'min_Howell_score', 12.5)):.2f}"
+    except Exception:
+        return "12.50"
+
+
+def _coalesce_task_metric(primary_value, fallback_value):
+    cleaned_primary = _clean_ambiguity_text(primary_value)
+    if cleaned_primary is not None:
+        return primary_value
+    return fallback_value
+
+
+def _wrap_strip_text(text_value: str, *, width: int = 24) -> str:
+    text_local = str(text_value or "").strip()
+    if not text_local:
+        return ""
+    return "\n".join(
+        textwrap.wrap(
+            text_local,
+            width=width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    )
+
+
+def _build_ambiguity_sidebar_payload(task: dict) -> dict:
     exact_support = _clean_ambiguity_float(task.get("Howell_exact_support_score"))
     overlap_count = _clean_ambiguity_count(task.get("Howell_ambiguity_count"))
     alt_register_count = _clean_ambiguity_count(task.get("Howell_alt_register_count"))
     overlap_margin = _clean_ambiguity_float(task.get("Howell_overlap_margin"))
-    return [
-        ("Exact HPSP support", "NA" if exact_support is None else f"{exact_support:.2f}"),
-        ("Near-tied windows", "NA" if overlap_count is None else str(overlap_count)),
-        ("Alt. registers", "NA" if alt_register_count is None else str(alt_register_count)),
-        ("Overlap margin", "NA" if overlap_margin is None else f"{overlap_margin:.2f}"),
-    ]
+    extension_window_count = _clean_ambiguity_count(task.get("Howell_extension_window_count"))
+    extension_span_nt = _clean_ambiguity_count(task.get("Howell_extension_span_nt"))
+    origin_window_count = _clean_ambiguity_count(task.get("Howell_origin_window_count"))
+    origin_frame_count = _clean_ambiguity_count(task.get("Howell_origin_frame_count"))
+    origin_margin = _clean_ambiguity_float(task.get("Howell_origin_margin"))
+    origin_class = _format_origin_class(task.get("Howell_origin_class"))
+    additional_peak_count = _clean_ambiguity_count(task.get("Howell_additional_peak_count"))
+    additional_peak_best_score = _clean_ambiguity_float(task.get("Howell_additional_peak_best_score"))
+
+    return {
+        "exact_support": "NA" if exact_support is None else f"{exact_support:.2f}",
+        "origin_class": origin_class,
+        "extension_window_count": "NA" if extension_window_count is None else str(extension_window_count),
+        "extension_span_nt": "NA" if extension_span_nt is None else str(extension_span_nt),
+        "origin_window_count": "NA" if origin_window_count is None else str(origin_window_count),
+        "origin_frame_count": "NA" if origin_frame_count is None else str(origin_frame_count),
+        "origin_margin": "NA" if origin_margin is None else f"{origin_margin:.2f}",
+        "additional_peak_count": "NA" if additional_peak_count is None else str(additional_peak_count),
+        "additional_peak_best_score": "NA" if additional_peak_best_score is None else f"{additional_peak_best_score:.2f}",
+        "additional_peak_cutoff": _howell_peak_cutoff_text(),
+        "raw_overlap_count": "NA" if overlap_count is None else str(overlap_count),
+        "raw_alt_register_count": "NA" if alt_register_count is None else str(alt_register_count),
+        "raw_overlap_margin": "NA" if overlap_margin is None else f"{overlap_margin:.2f}",
+    }
 
 
 def _build_ambiguity_sidebar_note(task: dict) -> str:
     exact_support = _clean_ambiguity_float(task.get("Howell_exact_support_score"))
     if exact_support is None or exact_support <= 0.0:
-        return "Exact-only ambiguity not assessable.\nRelaxed HPSP lacks meaningful exact support."
-    return "Lower Howell panel is relaxed.\nOffset (+/-1) points are not counted here."
+        return "Exact-only interpretation unavailable.\nRelaxed HPSP lacks exact support."
+    return "Howell panel is relaxed.\nOffsets are excluded here."
 
 
-def _draw_ambiguity_sidebar(ax, task: dict) -> None:
-    ax.set_facecolor(AMBIGUITY_PANEL_BG)
+def _draw_strip_line(
+    ax,
+    y_value: float,
+    text_value: str,
+    *,
+    fontsize: float,
+    fontweight: str = "normal",
+    color: str = "#333333",
+    line_gap: float = 0.037,
+    paragraph_gap: float = 0.008,
+) -> float:
+    wrapped_text = str(text_value)
+    ax.text(
+        0.07,
+        y_value,
+        wrapped_text,
+        fontsize=fontsize,
+        fontweight=fontweight,
+        ha="left",
+        va="top",
+        color=color,
+        transform=ax.transAxes,
+        clip_on=True,
+    )
+    line_count = max(wrapped_text.count("\n") + 1, 1)
+    return y_value - (line_gap * line_count) - paragraph_gap
+
+
+def _draw_detachable_strip(fig, task: dict, layout: dict) -> None:
+    strip_left = float(layout["strip_left"])
+    strip_bottom = float(layout["strip_bottom"])
+    strip_width = float(layout["strip_right"]) - strip_left
+    strip_height = float(layout["strip_top"]) - strip_bottom
+    ax = fig.add_axes([strip_left, strip_bottom, strip_width, strip_height])
+    ax.set_facecolor(DETACHABLE_STRIP_BG)
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
 
-    ax.text(
-        0.06,
-        0.93,
-        "Exact-only Howell ambiguity",
-        fontsize=10,
-        fontweight="bold",
-        ha="left",
-        va="top",
-        color="#333333",
-        transform=ax.transAxes,
-    )
-    ax.text(
-        0.06,
-        0.83,
-        "Relaxed call, exact-only competitor summary",
-        fontsize=7.5,
-        ha="left",
-        va="top",
-        color="#666666",
-        transform=ax.transAxes,
-    )
+    payload = _build_ambiguity_sidebar_payload(task)
+    class_line = f"Class: {payload['origin_class']}"
+    if len(class_line) > 23:
+        class_line = f"Class:\n{_wrap_strip_text(payload['origin_class'], width=21)}"
 
-    y_positions = (0.60, 0.44, 0.28, 0.12)
-    for (label_text, value_text), ypos in zip(_build_ambiguity_sidebar_entries(task), y_positions):
-        ax.text(
-            0.06,
-            ypos + 0.08,
-            label_text,
-            fontsize=7.6,
-            ha="left",
-            va="top",
-            color="#555555",
-            transform=ax.transAxes,
-        )
-        ax.text(
-            0.06,
-            ypos,
-            value_text,
-            fontsize=12,
-            fontweight="bold",
-            ha="left",
-            va="top",
-            color="#222222",
-            transform=ax.transAxes,
-        )
+    y_cursor = 0.95
+    y_cursor = _draw_strip_line(ax, y_cursor, "Exact-only Howell", fontsize=8.6, fontweight="bold")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Support: {payload['exact_support']}", fontsize=8.0, fontweight="bold")
+    y_cursor = _draw_strip_line(ax, y_cursor, class_line, fontsize=7.6, fontweight="bold", paragraph_gap=0.022)
+
+    y_cursor = _draw_strip_line(ax, y_cursor, "Coherent extension", fontsize=8.0, fontweight="bold", color="#444444")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Windows: {payload['extension_window_count']}", fontsize=7.2, color="#555555")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Span: {payload['extension_span_nt']} nt", fontsize=7.2, color="#555555", paragraph_gap=0.022)
+
+    y_cursor = _draw_strip_line(ax, y_cursor, "Origin ambiguity", fontsize=8.0, fontweight="bold", color="#444444")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Windows: {payload['origin_window_count']}", fontsize=7.2, color="#555555")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Frames: {payload['origin_frame_count']}", fontsize=7.2, color="#555555")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Margin: {payload['origin_margin']}", fontsize=7.2, color="#555555", paragraph_gap=0.022)
+
+    y_cursor = _draw_strip_line(ax, y_cursor, "Other local peaks", fontsize=8.0, fontweight="bold", color="#444444")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Count: {payload['additional_peak_count']}", fontsize=7.2, color="#555555")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Best: {payload['additional_peak_best_score']}", fontsize=7.2, color="#555555")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Cutoff: {payload['additional_peak_cutoff']}", fontsize=7.2, color="#555555", paragraph_gap=0.022)
+
+    y_cursor = _draw_strip_line(ax, y_cursor, "Raw context", fontsize=7.8, fontweight="bold", color="#555555")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Near-tied: {payload['raw_overlap_count']}", fontsize=7.0, color="#666666")
+    y_cursor = _draw_strip_line(ax, y_cursor, f"Alt regs: {payload['raw_alt_register_count']}", fontsize=7.0, color="#666666")
+    _draw_strip_line(ax, y_cursor, f"Raw margin: {payload['raw_overlap_margin']}", fontsize=7.0, color="#666666")
 
     ax.text(
-        0.06,
-        0.01,
+        0.07,
+        0.02,
         _build_ambiguity_sidebar_note(task),
-        fontsize=7.1,
+        fontsize=6.2,
         ha="left",
         va="bottom",
         color="#666666",
         transform=ax.transAxes,
+        clip_on=True,
     )
+
+
+def _draw_detachable_separator(fig, layout: dict) -> None:
+    separator = Line2D(
+        [float(layout["separator_x"]), float(layout["separator_x"])],
+        [float(layout["separator_bottom"]), float(layout["separator_top"])],
+        transform=fig.transFigure,
+        color=DETACHABLE_SEPARATOR_COLOR,
+        linewidth=1.0,
+        linestyle=DETACHABLE_SEPARATOR_STYLE,
+        zorder=20,
+    )
+    fig.add_artist(separator)
 
 
 def _placeholder_payload(task: dict, message_text: str) -> dict:
@@ -1001,6 +1135,10 @@ def _analyze_single_locus(task: dict) -> dict:
     howell_rows = howell_rows_w + howell_rows_c
     guide_specs_w = _build_score_exact_guide_specs(hpsp_row_w, phase_value, w_trace, "w")
     guide_specs_c = _build_score_exact_guide_specs(hpsp_row_c, phase_value, c_trace, "c")
+    additional_peak_summary = st_feat.summarize_relaxed_trace_subregions(
+        trace,
+        score_cutoff=float(getattr(rt, "min_Howell_score", 12.5) or 12.5),
+    )
 
     base_positions_w, register_origin_w = _build_scored_register_positions(hpsp_row_w, phase_value, "w")
     base_positions_c, register_origin_c = _build_scored_register_positions(hpsp_row_c, phase_value, "c")
@@ -1061,6 +1199,20 @@ def _analyze_single_locus(task: dict) -> dict:
             "Howell_ambiguity_count": task.get("Howell_ambiguity_count"),
             "Howell_alt_register_count": task.get("Howell_alt_register_count"),
             "Howell_overlap_margin": task.get("Howell_overlap_margin"),
+            "Howell_extension_window_count": task.get("Howell_extension_window_count"),
+            "Howell_extension_span_nt": task.get("Howell_extension_span_nt"),
+            "Howell_origin_window_count": task.get("Howell_origin_window_count"),
+            "Howell_origin_frame_count": task.get("Howell_origin_frame_count"),
+            "Howell_origin_margin": task.get("Howell_origin_margin"),
+            "Howell_origin_class": task.get("Howell_origin_class"),
+            "Howell_additional_peak_count": _coalesce_task_metric(
+                task.get("Howell_additional_peak_count"),
+                additional_peak_summary.get("Howell_additional_peak_count"),
+            ),
+            "Howell_additional_peak_best_score": _coalesce_task_metric(
+                task.get("Howell_additional_peak_best_score"),
+                additional_peak_summary.get("Howell_additional_peak_best_score"),
+            ),
         },
         "phasiRNA_rows": export_rows,
     }
@@ -1090,29 +1242,46 @@ def _write_single_locus_plot(task: dict) -> str:
     phase_value = int(task["phase"])
     abundance_rows = task.get("abundance_rows", [])
     howell_rows = task.get("howell_rows", [])
+    layout = dict(LOCUS_LAYOUT)
 
-    fig = plt.figure(figsize=(12.0, 6.8))
-    grid = fig.add_gridspec(
-        2,
-        2,
-        width_ratios=[5.6, 1.5],
-        height_ratios=[1.1, 1.0],
-        hspace=0.08,
-        wspace=0.16,
+    fig = plt.figure(figsize=layout["figsize"])
+    ax_abun = fig.add_axes(
+        [
+            layout["main_left"],
+            layout["abun_bottom"],
+            layout["main_right"] - layout["main_left"],
+            layout["abun_height"],
+        ]
     )
-    ax_abun = fig.add_subplot(grid[0, 0])
-    ax_howell = fig.add_subplot(grid[1, 0], sharex=ax_abun)
-    ax_blank = fig.add_subplot(grid[0, 1])
-    ax_ambiguity = fig.add_subplot(grid[1, 1])
+    ax_howell = fig.add_axes(
+        [
+            layout["main_left"],
+            layout["howell_bottom"],
+            layout["main_right"] - layout["main_left"],
+            layout["howell_height"],
+        ],
+        sharex=ax_abun,
+    )
     axes = [ax_abun, ax_howell]
     fig.patch.set_facecolor("white")
     axes[0].set_facecolor("#F1F1F1")
     axes[1].set_facecolor("#F1F1F1")
-    ax_blank.axis("off")
-    _draw_ambiguity_sidebar(ax_ambiguity, task)
+    _draw_detachable_strip(fig, task, layout)
+    _draw_detachable_separator(fig, layout)
 
-    fig.suptitle(task["title_text"], fontsize=12, y=0.98)
-    _add_grouped_legends(fig, phase_value)
+    fig.suptitle(
+        task["title_text"],
+        fontsize=12,
+        y=layout["title_y"],
+        x=(float(layout["main_left"]) + float(layout["main_right"])) / 2.0,
+    )
+    _add_grouped_legends(
+        fig,
+        phase_value,
+        main_left=float(layout["main_left"]),
+        main_right=float(layout["main_right"]),
+        legend_y=float(layout["legend_y"]),
+    )
 
     _draw_centerline(axes[0])
     _draw_centerline(axes[1])
@@ -1182,7 +1351,6 @@ def _write_single_locus_plot(task: dict) -> str:
         ax.spines["right"].set_visible(False)
         ax.grid(axis="y", color="#D8D8D8", linewidth=0.8, linestyle="-", zorder=0)
 
-    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.09, top=0.82, hspace=0.08, wspace=0.16)
     fig.savefig(plot_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return plot_path
@@ -1275,6 +1443,14 @@ def write_individual_phas_locus_plots(
                 "Howell_ambiguity_count": getattr(row, "Howell_ambiguity_count", np.nan),
                 "Howell_alt_register_count": getattr(row, "Howell_alt_register_count", np.nan),
                 "Howell_overlap_margin": getattr(row, "Howell_overlap_margin", np.nan),
+                "Howell_extension_window_count": getattr(row, "Howell_extension_window_count", np.nan),
+                "Howell_extension_span_nt": getattr(row, "Howell_extension_span_nt", np.nan),
+                "Howell_origin_window_count": getattr(row, "Howell_origin_window_count", np.nan),
+                "Howell_origin_frame_count": getattr(row, "Howell_origin_frame_count", np.nan),
+                "Howell_origin_margin": getattr(row, "Howell_origin_margin", np.nan),
+                "Howell_origin_class": getattr(row, "Howell_origin_class", np.nan),
+                "Howell_additional_peak_count": getattr(row, "Howell_additional_peak_count", np.nan),
+                "Howell_additional_peak_best_score": getattr(row, "Howell_additional_peak_best_score", np.nan),
                 "cluster_rows": [] if cluster_df is None else cluster_df.to_dict("records"),
             }
         )

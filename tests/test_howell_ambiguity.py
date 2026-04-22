@@ -28,7 +28,27 @@ class _DummyPool:
 
 
 class HowellAmbiguityScoringTests(unittest.TestCase):
-    def test_summarize_peak_howell_ambiguity_counts_only_same_strand_overlapping_near_ties(self):
+    def test_summarize_relaxed_trace_subregions_counts_additional_regions_above_cutoff(self):
+        trace = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 8.0},
+                {"anchor_position": 120, "window_start": 120, "window_end": 329, "score": 15.0},
+                {"anchor_position": 140, "window_start": 140, "window_end": 349, "score": 13.0},
+                {"anchor_position": 600, "window_start": 600, "window_end": 809, "score": 14.0},
+                {"anchor_position": 620, "window_start": 620, "window_end": 829, "score": 17.0},
+            ],
+            "c": [
+                {"anchor_position": 1200, "window_start": 991, "window_end": 1200, "score": 12.6},
+                {"anchor_position": 1220, "window_start": 1011, "window_end": 1220, "score": 11.0},
+            ],
+        }
+
+        summary = feature_assembly.summarize_relaxed_trace_subregions(trace, score_cutoff=12.5)
+
+        self.assertEqual(summary["Howell_additional_peak_count"], 2)
+        self.assertAlmostEqual(summary["Howell_additional_peak_best_score"], 15.0, places=6)
+
+    def test_summarize_peak_howell_ambiguity_separates_extension_and_origin_frames(self):
         winner = {
             "strand": "w",
             "window_start": 100,
@@ -39,22 +59,58 @@ class HowellAmbiguityScoringTests(unittest.TestCase):
             "exact_score": 8.0,
             "exact_best_register": 0,
             "exact_register_scores": [8.0, 7.3, 3.0],
+            "exact_frame": 16,
         }
         candidates = [
             dict(winner),
-            {"strand": "w", "window_start": 120, "window_end": 329, "score": 9.8, "best_register": 2, "exact_score": 7.4, "exact_best_register": 2},
-            {"strand": "w", "window_start": 125, "window_end": 334, "score": 9.7, "best_register": 4, "exact_score": 7.19, "exact_best_register": 4},
-            {"strand": "w", "window_start": 400, "window_end": 609, "score": 9.8, "best_register": 7, "exact_score": 7.8, "exact_best_register": 7},
-            {"strand": "c", "window_start": 120, "window_end": 329, "score": 9.7, "best_register": 1, "exact_score": 7.6, "exact_best_register": 1},
+            {"strand": "w", "window_start": 120, "window_end": 329, "score": 9.8, "best_register": 2, "exact_score": 7.4, "exact_best_register": 2, "exact_frame": 16},
+            {"strand": "w", "window_start": 125, "window_end": 334, "score": 9.7, "best_register": 4, "exact_score": 7.3, "exact_best_register": 4, "exact_frame": 4},
+            {"strand": "w", "window_start": 130, "window_end": 339, "score": 9.6, "best_register": 5, "exact_score": 7.2, "exact_best_register": 5, "exact_frame": 7},
+            {"strand": "w", "window_start": 400, "window_end": 609, "score": 9.8, "best_register": 7, "exact_score": 7.8, "exact_best_register": 7, "exact_frame": 16},
+            {"strand": "c", "window_start": 120, "window_end": 329, "score": 9.7, "best_register": 1, "exact_score": 7.6, "exact_best_register": 1, "exact_frame": 6},
         ]
 
         summary = feature_assembly._summarize_peak_howell_ambiguity(winner, candidates)
 
-        self.assertEqual(summary["Howell_ambiguity_count"], 1)
+        self.assertEqual(summary["Howell_ambiguity_count"], 3)
         self.assertEqual(summary["Howell_alt_register_count"], 1)
         self.assertAlmostEqual(summary["Howell_exact_support_score"], 8.0, places=6)
         self.assertAlmostEqual(summary["Howell_overlap_margin"], 0.6, places=6)
         self.assertAlmostEqual(summary["best_overlapping_competitor_score"], 7.4, places=6)
+        self.assertEqual(summary["Howell_extension_window_count"], 1)
+        self.assertEqual(summary["Howell_extension_span_nt"], 230)
+        self.assertEqual(summary["Howell_origin_window_count"], 2)
+        self.assertEqual(summary["Howell_origin_frame_count"], 2)
+        self.assertAlmostEqual(summary["Howell_origin_margin"], 0.7, places=6)
+        self.assertEqual(summary["Howell_origin_class"], "mixed_extension_and_ambiguity")
+
+    def test_summarize_peak_howell_ambiguity_marks_same_frame_plateau_as_coherent_extension(self):
+        winner = {
+            "strand": "w",
+            "window_start": 500,
+            "window_end": 709,
+            "score": 12.0,
+            "best_register": 0,
+            "register_scores": [12.0, 4.0],
+            "exact_score": 10.0,
+            "exact_best_register": 0,
+            "exact_register_scores": [10.0, 3.0],
+            "exact_frame": 17,
+        }
+        candidates = [
+            dict(winner),
+            {"strand": "w", "window_start": 520, "window_end": 729, "score": 11.5, "best_register": 1, "exact_score": 9.8, "exact_best_register": 1, "exact_frame": 17},
+            {"strand": "w", "window_start": 540, "window_end": 749, "score": 11.3, "best_register": 2, "exact_score": 9.4, "exact_best_register": 2, "exact_frame": 17},
+        ]
+
+        summary = feature_assembly._summarize_peak_howell_ambiguity(winner, candidates)
+
+        self.assertEqual(summary["Howell_extension_window_count"], 2)
+        self.assertEqual(summary["Howell_extension_span_nt"], 250)
+        self.assertEqual(summary["Howell_origin_window_count"], 0)
+        self.assertEqual(summary["Howell_origin_frame_count"], 0)
+        self.assertTrue(np.isnan(summary["Howell_origin_margin"]))
+        self.assertEqual(summary["Howell_origin_class"], "coherent_extension")
 
     def test_compute_phasing_score_howell_uses_exact_only_ambiguity_for_adjacent_relaxed_ties(self):
         aclust = pd.DataFrame(
@@ -81,6 +137,12 @@ class HowellAmbiguityScoringTests(unittest.TestCase):
         self.assertEqual(detail["Howell_ambiguity_count"], 0)
         self.assertEqual(detail["Howell_alt_register_count"], 0)
         self.assertTrue(np.isnan(detail["Howell_overlap_margin"]))
+        self.assertEqual(detail["Howell_extension_window_count"], 0)
+        self.assertEqual(detail["Howell_extension_span_nt"], 210)
+        self.assertEqual(detail["Howell_origin_window_count"], 0)
+        self.assertEqual(detail["Howell_origin_frame_count"], 0)
+        self.assertTrue(np.isnan(detail["Howell_origin_margin"]))
+        self.assertEqual(detail["Howell_origin_class"], "unique_origin")
 
     def test_compute_phasing_score_howell_marks_exact_only_ambiguity_unassessable_for_rescue_driven_case(self):
         aclust = pd.DataFrame(
@@ -106,28 +168,45 @@ class HowellAmbiguityScoringTests(unittest.TestCase):
         self.assertTrue(np.isnan(detail["Howell_ambiguity_count"]))
         self.assertTrue(np.isnan(detail["Howell_alt_register_count"]))
         self.assertTrue(np.isnan(detail["Howell_overlap_margin"]))
+        self.assertTrue(np.isnan(detail["Howell_extension_window_count"]))
+        self.assertTrue(np.isnan(detail["Howell_extension_span_nt"]))
+        self.assertTrue(np.isnan(detail["Howell_origin_window_count"]))
+        self.assertTrue(np.isnan(detail["Howell_origin_frame_count"]))
+        self.assertTrue(np.isnan(detail["Howell_origin_margin"]))
+        self.assertEqual(detail["Howell_origin_class"], "insufficient_exact_support")
 
 
 class HowellAmbiguityPlotTests(unittest.TestCase):
-    def test_build_ambiguity_sidebar_entries_formats_values(self):
-        entries = locus_plots._build_ambiguity_sidebar_entries(
+    def test_build_ambiguity_sidebar_payload_formats_values(self):
+        payload = locus_plots._build_ambiguity_sidebar_payload(
             {
                 "Howell_exact_support_score": 5.2,
                 "Howell_ambiguity_count": 3,
                 "Howell_alt_register_count": 1,
                 "Howell_overlap_margin": 1.234,
+                "Howell_extension_window_count": 2,
+                "Howell_extension_span_nt": 288,
+                "Howell_origin_window_count": 1,
+                "Howell_origin_frame_count": 1,
+                "Howell_origin_margin": -0.456,
+                "Howell_origin_class": "mixed_extension_and_ambiguity",
+                "Howell_additional_peak_count": 2,
+                "Howell_additional_peak_best_score": 14.2,
             }
         )
 
-        self.assertEqual(
-            entries,
-            [
-                ("Exact HPSP support", "5.20"),
-                ("Near-tied windows", "3"),
-                ("Alt. registers", "1"),
-                ("Overlap margin", "1.23"),
-            ],
-        )
+        self.assertEqual(payload["exact_support"], "5.20")
+        self.assertEqual(payload["origin_class"], "Mixed extension + ambiguity")
+        self.assertEqual(payload["extension_window_count"], "2")
+        self.assertEqual(payload["extension_span_nt"], "288")
+        self.assertEqual(payload["origin_window_count"], "1")
+        self.assertEqual(payload["origin_frame_count"], "1")
+        self.assertEqual(payload["origin_margin"], "-0.46")
+        self.assertEqual(payload["additional_peak_count"], "2")
+        self.assertEqual(payload["additional_peak_best_score"], "14.20")
+        self.assertEqual(payload["raw_overlap_count"], "3")
+        self.assertEqual(payload["raw_alt_register_count"], "1")
+        self.assertEqual(payload["raw_overlap_margin"], "1.23")
 
     def test_analyze_single_locus_preserves_precomputed_ambiguity_metrics(self):
         result = locus_plots._analyze_single_locus(
@@ -142,6 +221,14 @@ class HowellAmbiguityPlotTests(unittest.TestCase):
                 "Howell_ambiguity_count": 4,
                 "Howell_alt_register_count": 2,
                 "Howell_overlap_margin": 0.75,
+                "Howell_extension_window_count": 3,
+                "Howell_extension_span_nt": 252,
+                "Howell_origin_window_count": 1,
+                "Howell_origin_frame_count": 1,
+                "Howell_origin_margin": -0.5,
+                "Howell_origin_class": "mixed_extension_and_ambiguity",
+                "Howell_additional_peak_count": 2,
+                "Howell_additional_peak_best_score": 13.2,
                 "cluster_rows": [
                     {"pos": 100, "abun": 12, "len": 21, "strand": "w", "tag_seq": "A1", "hits": 1},
                     {"pos": 121, "abun": 11, "len": 21, "strand": "w", "tag_seq": "A2", "hits": 1},
@@ -156,6 +243,52 @@ class HowellAmbiguityPlotTests(unittest.TestCase):
         self.assertEqual(payload["Howell_ambiguity_count"], 4)
         self.assertEqual(payload["Howell_alt_register_count"], 2)
         self.assertAlmostEqual(payload["Howell_overlap_margin"], 0.75, places=6)
+        self.assertEqual(payload["Howell_extension_window_count"], 3)
+        self.assertEqual(payload["Howell_extension_span_nt"], 252)
+        self.assertEqual(payload["Howell_origin_window_count"], 1)
+        self.assertEqual(payload["Howell_origin_frame_count"], 1)
+        self.assertAlmostEqual(payload["Howell_origin_margin"], -0.5, places=6)
+        self.assertEqual(payload["Howell_origin_class"], "mixed_extension_and_ambiguity")
+        self.assertEqual(payload["Howell_additional_peak_count"], 2)
+        self.assertAlmostEqual(payload["Howell_additional_peak_best_score"], 13.2, places=6)
+
+    def test_write_single_locus_plot_renders_detachable_metrics_strip(self):
+        result = locus_plots._analyze_single_locus(
+            {
+                "plot_path": "/tmp/test_plot.png",
+                "title_text": "libA | chr1:100..163 | 21-PHAS",
+                "identifier_text": "chr1:100..163",
+                "cid_value": "cluster_1",
+                "alib_value": "libA",
+                "phase": 21,
+                "Howell_exact_support_score": 6.5,
+                "Howell_ambiguity_count": 4,
+                "Howell_alt_register_count": 2,
+                "Howell_overlap_margin": 0.75,
+                "Howell_extension_window_count": 3,
+                "Howell_extension_span_nt": 252,
+                "Howell_origin_window_count": 1,
+                "Howell_origin_frame_count": 1,
+                "Howell_origin_margin": -0.5,
+                "Howell_origin_class": "mixed_extension_and_ambiguity",
+                "Howell_additional_peak_count": 2,
+                "Howell_additional_peak_best_score": 13.2,
+                "cluster_rows": [
+                    {"pos": 100, "abun": 12, "len": 21, "strand": "w", "tag_seq": "A1", "hits": 1},
+                    {"pos": 121, "abun": 11, "len": 21, "strand": "w", "tag_seq": "A2", "hits": 1},
+                    {"pos": 142, "abun": 13, "len": 21, "strand": "w", "tag_seq": "A3", "hits": 1},
+                    {"pos": 163, "abun": 10, "len": 21, "strand": "w", "tag_seq": "A4", "hits": 1},
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plot_path = os.path.join(tmpdir, "locus.png")
+            payload = dict(result["plot_payload"])
+            payload["plot_path"] = plot_path
+            locus_plots._write_single_locus_plot(payload)
+            self.assertTrue(os.path.isfile(plot_path))
+            self.assertGreater(os.path.getsize(plot_path), 0)
 
 
 class HowellAmbiguityOutputTests(unittest.TestCase):
@@ -184,6 +317,14 @@ class HowellAmbiguityOutputTests(unittest.TestCase):
                     "Howell_ambiguity_count": 2,
                     "Howell_alt_register_count": 1,
                     "Howell_overlap_margin": 0.9,
+                    "Howell_extension_window_count": 1,
+                    "Howell_extension_span_nt": 230,
+                    "Howell_origin_window_count": 1,
+                    "Howell_origin_frame_count": 1,
+                    "Howell_origin_margin": 0.4,
+                    "Howell_origin_class": "mixed_extension_and_ambiguity",
+                    "Howell_additional_peak_count": 2,
+                    "Howell_additional_peak_best_score": 15.5,
                     "w_Howell_score_strict": 10.1,
                     "w_window_start_strict": 100,
                     "w_window_end_strict": 309,
@@ -215,6 +356,14 @@ class HowellAmbiguityOutputTests(unittest.TestCase):
                     "Howell_ambiguity_count": np.nan,
                     "Howell_alt_register_count": np.nan,
                     "Howell_overlap_margin": np.nan,
+                    "Howell_extension_window_count": np.nan,
+                    "Howell_extension_span_nt": np.nan,
+                    "Howell_origin_window_count": np.nan,
+                    "Howell_origin_frame_count": np.nan,
+                    "Howell_origin_margin": np.nan,
+                    "Howell_origin_class": "insufficient_exact_support",
+                    "Howell_additional_peak_count": 0,
+                    "Howell_additional_peak_best_score": np.nan,
                     "w_Howell_score_strict": 0.0,
                     "w_window_start_strict": np.nan,
                     "w_window_end_strict": np.nan,
@@ -253,6 +402,14 @@ class HowellAmbiguityOutputTests(unittest.TestCase):
                 "Howell_ambiguity_count",
                 "Howell_alt_register_count",
                 "Howell_overlap_margin",
+                "Howell_extension_window_count",
+                "Howell_extension_span_nt",
+                "Howell_origin_window_count",
+                "Howell_origin_frame_count",
+                "Howell_origin_margin",
+                "Howell_origin_class",
+                "Howell_additional_peak_count",
+                "Howell_additional_peak_best_score",
             ):
                 self.assertIn(column, all_df.columns)
                 self.assertIn(column, calls_df.columns)
@@ -262,6 +419,14 @@ class HowellAmbiguityOutputTests(unittest.TestCase):
             self.assertEqual(int(calls_df.loc[0, "Howell_ambiguity_count"]), 2)
             self.assertEqual(int(calls_df.loc[0, "Howell_alt_register_count"]), 1)
             self.assertAlmostEqual(float(calls_df.loc[0, "Howell_overlap_margin"]), 0.9, places=6)
+            self.assertEqual(int(calls_df.loc[0, "Howell_extension_window_count"]), 1)
+            self.assertEqual(int(calls_df.loc[0, "Howell_extension_span_nt"]), 230)
+            self.assertEqual(int(calls_df.loc[0, "Howell_origin_window_count"]), 1)
+            self.assertEqual(int(calls_df.loc[0, "Howell_origin_frame_count"]), 1)
+            self.assertAlmostEqual(float(calls_df.loc[0, "Howell_origin_margin"]), 0.4, places=6)
+            self.assertEqual(str(calls_df.loc[0, "Howell_origin_class"]), "mixed_extension_and_ambiguity")
+            self.assertEqual(int(calls_df.loc[0, "Howell_additional_peak_count"]), 2)
+            self.assertAlmostEqual(float(calls_df.loc[0, "Howell_additional_peak_best_score"]), 15.5, places=6)
 
 
 if __name__ == "__main__":

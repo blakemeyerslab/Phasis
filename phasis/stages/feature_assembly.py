@@ -14,7 +14,7 @@ from phasis.parallel import run_parallel_with_progress
 
 DCL_OVERHANG = 3          # 2-nt 3' overhang in duplex -> 3-nt genomic offset
 WINDOW_MULTIPLIER = 10    # 10 cycles per window
-FEATURE_SCHEMA_VERSION = 3
+FEATURE_SCHEMA_VERSION = 5
 HOWELL_AMBIGUITY_FRACTION = 0.90
 
 
@@ -40,6 +40,14 @@ FEATURE_COLS = ['identifier',
  'Howell_ambiguity_count',
  'Howell_alt_register_count',
  'Howell_overlap_margin',
+ 'Howell_extension_window_count',
+ 'Howell_extension_span_nt',
+ 'Howell_origin_window_count',
+ 'Howell_origin_frame_count',
+ 'Howell_origin_margin',
+ 'Howell_origin_class',
+ 'Howell_additional_peak_count',
+ 'Howell_additional_peak_best_score',
  'w_Howell_score_strict',
  'w_window_start_strict',
  'w_window_end_strict',
@@ -48,8 +56,8 @@ FEATURE_COLS = ['identifier',
  'c_window_end_strict',
  'Peak_Howell_score_strict']
 
-# Numeric columns (all except id-like fields)
-NUMERIC_COLS = set(FEATURE_COLS) - {"identifier", "cID", "alib"}
+# Numeric columns (all except id-like/text fields)
+NUMERIC_COLS = set(FEATURE_COLS) - {"identifier", "cID", "alib", "Howell_origin_class"}
 
 
 def _phase_value(default: int = 21) -> int:
@@ -61,6 +69,17 @@ def _phase_value(default: int = 21) -> int:
         return int(v)
     except Exception:
         return int(default)
+
+
+def _min_howell_score_value(default: float = 12.5) -> float:
+    """Return rt.min_Howell_score as a float, falling back safely."""
+    try:
+        value = getattr(rt, "min_Howell_score", None)
+        if value is None:
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
 
 
 def _get_memfile() -> str:
@@ -326,6 +345,35 @@ def _windows_overlap(start_a, end_a, start_b, end_b) -> bool:
     return int(max(start_a, start_b)) <= int(min(end_a, end_b))
 
 
+def _canonical_exact_frame(
+    *,
+    window_start: int | None,
+    window_end: int | None,
+    exact_best_register,
+    strand_code: str | None,
+    phase: int,
+) -> int | None:
+    try:
+        reg_value = int(exact_best_register)
+    except Exception:
+        return None
+
+    try:
+        phase_local = int(phase)
+    except Exception:
+        return None
+    if phase_local <= 0:
+        return None
+
+    strand_text = str(strand_code or "").strip().lower()
+    try:
+        if strand_text == "c":
+            return int((int(window_end) - reg_value) % phase_local)
+        return int((int(window_start) + reg_value) % phase_local)
+    except Exception:
+        return None
+
+
 def _summarize_peak_howell_ambiguity(
     best_window_detail: dict | None,
     candidate_windows,
@@ -344,19 +392,33 @@ def _summarize_peak_howell_ambiguity(
         "winner_window_end": best_window_detail.get("window_end"),
         "winner_register": best_window_detail.get("best_register"),
         "exact_winner_register": winner_register,
+        "winner_exact_frame": best_window_detail.get("exact_frame"),
         "Howell_exact_support_score": float(exact_support_score),
         "best_overlapping_competitor_score": np.nan,
         "Howell_ambiguity_count": np.nan,
         "Howell_alt_register_count": np.nan,
         "Howell_overlap_margin": np.nan,
+        "Howell_extension_window_count": np.nan,
+        "Howell_extension_span_nt": np.nan,
+        "Howell_origin_window_count": np.nan,
+        "Howell_origin_frame_count": np.nan,
+        "Howell_origin_margin": np.nan,
+        "Howell_origin_class": "insufficient_exact_support",
     }
 
-    if exact_support_score <= 0.0:
+    winner_exact_frame = result.get("winner_exact_frame")
+    if exact_support_score <= 0.0 or winner_exact_frame is None:
         return result
 
     threshold_score = float(threshold_fraction) * exact_support_score
     overlap_best_score = None
     overlap_count = 0
+    same_frame_count = 0
+    competing_frame_count = 0
+    competing_frames = set()
+    best_competing_frame_score = None
+    extension_min_start = int(best_window_detail.get("window_start"))
+    extension_max_end = int(best_window_detail.get("window_end"))
     for candidate in candidate_windows or []:
         if str(candidate.get("strand")) != str(best_window_detail.get("strand")):
             continue
@@ -378,6 +440,17 @@ def _summarize_peak_howell_ambiguity(
         overlap_count += 1
         if overlap_best_score is None or candidate_score > overlap_best_score:
             overlap_best_score = candidate_score
+        candidate_exact_frame = candidate.get("exact_frame")
+        if candidate_exact_frame == winner_exact_frame:
+            same_frame_count += 1
+            extension_min_start = min(extension_min_start, int(candidate.get("window_start")))
+            extension_max_end = max(extension_max_end, int(candidate.get("window_end")))
+        else:
+            competing_frame_count += 1
+            if candidate_exact_frame is not None:
+                competing_frames.add(int(candidate_exact_frame))
+            if best_competing_frame_score is None or candidate_score > best_competing_frame_score:
+                best_competing_frame_score = candidate_score
 
     alt_register_count = 0
     if winner_register is not None:
@@ -395,6 +468,23 @@ def _summarize_peak_howell_ambiguity(
     result["Howell_overlap_margin"] = (
         np.nan if overlap_best_score is None else float(exact_support_score - float(overlap_best_score))
     )
+    result["Howell_extension_window_count"] = int(same_frame_count)
+    result["Howell_extension_span_nt"] = int(extension_max_end - extension_min_start + 1)
+    result["Howell_origin_window_count"] = int(competing_frame_count)
+    result["Howell_origin_frame_count"] = int(len(competing_frames))
+    result["Howell_origin_margin"] = (
+        np.nan
+        if best_competing_frame_score is None
+        else float(exact_support_score - float(best_competing_frame_score))
+    )
+    if overlap_count == 0:
+        result["Howell_origin_class"] = "unique_origin"
+    elif same_frame_count > 0 and competing_frame_count == 0:
+        result["Howell_origin_class"] = "coherent_extension"
+    elif same_frame_count == 0 and competing_frame_count > 0:
+        result["Howell_origin_class"] = "ambiguous_origin"
+    else:
+        result["Howell_origin_class"] = "mixed_extension_and_ambiguity"
     return result
 
 # ---------- RELAXED Howell (positional ±1 wobble allowed) ----------
@@ -428,6 +518,7 @@ def _best_sliding_window_score_generic(
     best_window = (None, None)
     best_detail = None
     candidate_windows = [] if return_detail else None
+    phase_local = int(phase)
 
     for win_start in range(lower_bound, upper_bound + 1):
         win_end = win_start + win_size - 1
@@ -463,6 +554,13 @@ def _best_sliding_window_score_generic(
                     "best_register": relaxed_summary.get("best_register"),
                     "exact_score": float(exact_summary["score"]),
                     "exact_best_register": exact_summary.get("best_register"),
+                    "exact_frame": _canonical_exact_frame(
+                        window_start=win_start,
+                        window_end=win_end,
+                        exact_best_register=exact_summary.get("best_register"),
+                        strand_code="w" if forward else "c",
+                        phase=phase_local,
+                    ),
                 }
             )
 
@@ -480,6 +578,13 @@ def _best_sliding_window_score_generic(
                     "exact_score": float(exact_summary["score"]),
                     "exact_best_register": exact_summary.get("best_register"),
                     "exact_register_scores": list(exact_summary.get("register_scores") or []),
+                    "exact_frame": _canonical_exact_frame(
+                        window_start=win_start,
+                        window_end=win_end,
+                        exact_best_register=exact_summary.get("best_register"),
+                        strand_code="w" if forward else "c",
+                        phase=phase_local,
+                    ),
                 }
 
     resolved_score = best_score if best_score != -float("inf") else 0.0
@@ -709,6 +814,134 @@ def _enumerate_relaxed_trace_for_strand(pos_abun, phase, win_size, *, forward=Tr
             }
         )
     return trace
+
+
+def _find_relaxed_trace_peak_row(trace_rows) -> dict | None:
+    best_row = None
+    best_score = float("-inf")
+    for row in trace_rows or []:
+        try:
+            score = float(row.get("score", 0.0) or 0.0)
+        except Exception:
+            score = 0.0
+        if score >= best_score:
+            best_score = score
+            best_row = row
+    return best_row
+
+
+def _same_trace_window(a: dict | None, b: dict | None) -> bool:
+    if not a or not b:
+        return False
+    try:
+        return (
+            int(a.get("anchor_position")) == int(b.get("anchor_position"))
+            and int(a.get("window_start")) == int(b.get("window_start"))
+            and int(a.get("window_end")) == int(b.get("window_end"))
+        )
+    except Exception:
+        return False
+
+
+def _group_trace_rows_by_overlap(trace_rows, *, score_cutoff: float) -> list[dict]:
+    qualifying_rows = []
+    for row in trace_rows or []:
+        try:
+            score = float(row.get("score", 0.0) or 0.0)
+        except Exception:
+            continue
+        if score < float(score_cutoff):
+            continue
+        qualifying_rows.append(row)
+
+    qualifying_rows.sort(
+        key=lambda row: (
+            int(row.get("window_start")),
+            int(row.get("window_end")),
+            int(row.get("anchor_position")),
+        )
+    )
+
+    groups = []
+    for row in qualifying_rows:
+        window_start = int(row.get("window_start"))
+        window_end = int(row.get("window_end"))
+        if not groups or window_start > groups[-1]["max_end"]:
+            groups.append(
+                {
+                    "rows": [row],
+                    "min_start": window_start,
+                    "max_end": window_end,
+                }
+            )
+        else:
+            groups[-1]["rows"].append(row)
+            groups[-1]["min_start"] = min(groups[-1]["min_start"], window_start)
+            groups[-1]["max_end"] = max(groups[-1]["max_end"], window_end)
+    return groups
+
+
+def summarize_relaxed_trace_subregions(trace: dict, *, score_cutoff: float | None = None) -> dict:
+    """
+    Summarize additional relaxed Howell peak regions across the whole locus.
+
+    These are intentionally separate from the exact-only HPSP ambiguity metrics:
+    we group supra-threshold relaxed trace windows by genomic overlap on each
+    strand, identify the region containing the relaxed trace HPSP as the main
+    region, and count any other supra-threshold regions as alternative
+    phased-like subregions.
+    """
+    cutoff = _min_howell_score_value() if score_cutoff is None else float(score_cutoff)
+    additional_region_scores = []
+    global_peak_strand = None
+    global_peak_row = None
+    global_peak_score = float("-inf")
+
+    for strand_code in ("w", "c"):
+        strand_peak = _find_relaxed_trace_peak_row(trace.get(strand_code, []) or [])
+        if strand_peak is None:
+            continue
+        try:
+            strand_peak_score = float(strand_peak.get("score", 0.0) or 0.0)
+        except Exception:
+            strand_peak_score = 0.0
+        if strand_peak_score >= global_peak_score:
+            global_peak_score = strand_peak_score
+            global_peak_strand = strand_code
+            global_peak_row = strand_peak
+
+    for strand_code in ("w", "c"):
+        strand_rows = list(trace.get(strand_code, []) or [])
+        if not strand_rows:
+            continue
+
+        groups = _group_trace_rows_by_overlap(strand_rows, score_cutoff=cutoff)
+        if not groups:
+            continue
+
+        main_group_index = None
+        for idx, group in enumerate(groups):
+            if strand_code == global_peak_strand and any(_same_trace_window(row, global_peak_row) for row in group["rows"]):
+                main_group_index = idx
+                break
+
+        for idx, group in enumerate(groups):
+            if main_group_index is not None and idx == main_group_index:
+                continue
+            group_peak = _find_relaxed_trace_peak_row(group["rows"])
+            if group_peak is None:
+                continue
+            try:
+                additional_region_scores.append(float(group_peak.get("score", 0.0) or 0.0))
+            except Exception:
+                continue
+
+    return {
+        "Howell_additional_peak_count": int(len(additional_region_scores)),
+        "Howell_additional_peak_best_score": (
+            np.nan if not additional_region_scores else float(max(additional_region_scores))
+        ),
+    }
 
 
 def enumerate_relaxed_howell_trace(aclust: pd.DataFrame, phase: int | None = None):
@@ -964,16 +1197,35 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
          c_Howell, (c_s, c_e),
          peak_howell_detail) = compute_phasing_score_Howell(aclust, return_detail=True)
         Peak_Howell = None if (w_Howell is None and c_Howell is None) else max([x for x in (w_Howell, c_Howell) if x is not None])
+        relaxed_trace = enumerate_relaxed_howell_trace(aclust, phase=ph)
+        additional_peak_summary = summarize_relaxed_trace_subregions(
+            relaxed_trace,
+            score_cutoff=_min_howell_score_value(),
+        )
         if peak_howell_detail:
             exact_support_score = peak_howell_detail.get("Howell_exact_support_score", np.nan)
             ambiguity_count = peak_howell_detail.get("Howell_ambiguity_count", np.nan)
             alt_register_count = peak_howell_detail.get("Howell_alt_register_count", np.nan)
             overlap_margin = peak_howell_detail.get("Howell_overlap_margin", np.nan)
+            extension_window_count = peak_howell_detail.get("Howell_extension_window_count", np.nan)
+            extension_span_nt = peak_howell_detail.get("Howell_extension_span_nt", np.nan)
+            origin_window_count = peak_howell_detail.get("Howell_origin_window_count", np.nan)
+            origin_frame_count = peak_howell_detail.get("Howell_origin_frame_count", np.nan)
+            origin_margin = peak_howell_detail.get("Howell_origin_margin", np.nan)
+            origin_class = peak_howell_detail.get("Howell_origin_class", np.nan)
         else:
             exact_support_score = np.nan
             ambiguity_count = np.nan
             alt_register_count = np.nan
             overlap_margin = np.nan
+            extension_window_count = np.nan
+            extension_span_nt = np.nan
+            origin_window_count = np.nan
+            origin_frame_count = np.nan
+            origin_margin = np.nan
+            origin_class = np.nan
+        additional_peak_count = additional_peak_summary.get("Howell_additional_peak_count", np.nan)
+        additional_peak_best_score = additional_peak_summary.get("Howell_additional_peak_best_score", np.nan)
 
         # Howell (classic strict)
         (w_Howell_strict, (w_s_strict, w_e_strict),
@@ -988,6 +1240,8 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
             # wobble-tolerant
             w_Howell, w_s, w_e, c_Howell, c_s, c_e, Peak_Howell,
             exact_support_score, ambiguity_count, alt_register_count, overlap_margin,
+            extension_window_count, extension_span_nt, origin_window_count, origin_frame_count, origin_margin, origin_class,
+            additional_peak_count, additional_peak_best_score,
             # classic (strict)
             w_Howell_strict, w_s_strict, w_e_strict, c_Howell_strict, c_s_strict, c_e_strict, Peak_Howell_strict
         ])
