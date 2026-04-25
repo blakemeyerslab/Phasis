@@ -6,7 +6,7 @@ import hashlib
 
 from phasis import libprep
 from phasis import runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, sig_key, stage_signature
+from phasis.cache import MemCache, compute_md5_str, default_memfile_path, sig_key, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 # Stage-local globals (only what libraryprocess needs)
@@ -14,7 +14,7 @@ mindepth = None
 libformat = None
 concat_libs = None
 outdir = None
-memFile = MEM_FILE_DEFAULT
+memFile = default_memfile_path()
 
 LIBRARY_PROCESSING_SECTION = "LIBRARY_PROCESSING"
 LIBRARY_IO_MAXTASKSPERCHILD = 64
@@ -514,10 +514,7 @@ def sync_from_runtime() -> None:
     if mem_override:
         memFile = mem_override
     else:
-        if outdir:
-            memFile = os.path.join(outdir, MEM_FILE_DEFAULT)
-        else:
-            memFile = MEM_FILE_DEFAULT
+        memFile = default_memfile_path()
         rt.memFile = memFile
 
 

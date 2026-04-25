@@ -15,6 +15,15 @@ import re
 MEM_FILE_DEFAULT = "phasis.mem"
 
 
+def default_memfile_path(run_dir: str | None = None) -> str:
+    """Return the canonical default memFile location in the run directory."""
+    base_dir = run_dir or getattr(rt, "run_dir", None) or os.getcwd()
+    return os.path.join(
+        os.path.abspath(os.path.expanduser(str(base_dir))),
+        MEM_FILE_DEFAULT,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Centralized cache API (Phase II)
 # ---------------------------------------------------------------------------

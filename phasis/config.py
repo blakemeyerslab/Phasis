@@ -30,6 +30,9 @@ class Phase2Config:
     phasisScoreCutoff: float = 0.0
     min_Howell_score: float = 0.0
     max_complexity: float = 1.0
+    legacy_classification: bool = False
+    classification_overrides: Optional[str] = None
+    locus_plot_mode: str = "clean"
 
     # cache
     memFile: Optional[str] = None
@@ -49,5 +52,8 @@ class Phase2Config:
             phasisScoreCutoff=float(getattr(rt, "phasisScoreCutoff", 0.0) or 0.0),
             min_Howell_score=float(getattr(rt, "min_Howell_score", 0.0) or 0.0),
             max_complexity=float(getattr(rt, "max_complexity", 1.0) or 1.0),
+            legacy_classification=bool(getattr(rt, "legacy_classification", False)),
+            classification_overrides=getattr(rt, "classification_overrides", None),
+            locus_plot_mode=str(getattr(rt, "locus_plot_mode", "clean") or "clean"),
             memFile=getattr(rt, "memFile", None),
         )

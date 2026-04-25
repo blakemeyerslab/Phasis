@@ -91,6 +91,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Individual PHAS locus plot write mode: auto, local scratch staging, or direct [default auto]",
     )
+    parser.add_argument(
+        "--legacy_classification",
+        dest="legacy_classification",
+        action="store_true",
+        help="Restore the legacy binary PHAS/non-PHAS labeling without the default 2.7 QC reclassification layer",
+    )
+    parser.add_argument(
+        "--classification_overrides",
+        dest="classification_overrides",
+        metavar="PATH",
+        type=str,
+        default=None,
+        help="Optional TSV with per-detection final_class overrides keyed by identifier and alib",
+    )
+    parser.add_argument(
+        "--locus_plot_mode",
+        dest="locus_plot_mode",
+        choices=("clean", "debug"),
+        default="clean",
+        help="Locus Howell panel mode: clean hides relaxed off-lattice trace points; debug preserves the full relaxed trace [default clean]",
+    )
 
     parser.add_argument(
         "-version", action="version",
@@ -245,6 +266,13 @@ def configure_runtime(args: argparse.Namespace) -> None:
         if args.plot_staging is not None
         else os.environ.get("PHASIS_PLOT_STAGING", "auto")
     ).strip().lower()
+    rt.legacy_classification = bool(args.legacy_classification)
+    rt.classification_overrides = (
+        os.path.abspath(os.path.expanduser(args.classification_overrides))
+        if args.classification_overrides
+        else None
+    )
+    rt.locus_plot_mode = str(args.locus_plot_mode or "clean").strip().lower()
 
     # store optional flags too
     rt.cleanup = args.cleanup

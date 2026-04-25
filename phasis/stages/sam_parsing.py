@@ -11,12 +11,12 @@ from typing import Iterable, List, Sequence, Tuple
 
 import phasis.runtime as rt
 from phasis.parallel import run_parallel_with_progress
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, getmd5, sig_key, stage_signature
+from phasis.cache import MemCache, compute_md5_str, default_memfile_path, getmd5, sig_key, stage_signature
 
 
 def _resolve_mem_file() -> str:
     mem = getattr(rt, "memFile", None)
-    return mem if mem else MEM_FILE_DEFAULT
+    return mem if mem else default_memfile_path()
 
 
 def updatedsets(config: configparser.ConfigParser) -> List[str]:

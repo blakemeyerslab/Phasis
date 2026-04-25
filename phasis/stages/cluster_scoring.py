@@ -19,10 +19,10 @@ from scipy.stats import combine_pvalues, hypergeom, mannwhitneyu
 
 import phasis.runtime as rt
 from phasis.cache import (
-    MEM_FILE_DEFAULT,
     MemCache,
     assemble_candidate_from_chunks,
     compute_cache_signature_from_file_manifest,
+    default_memfile_path,
     getmd5,
     md5_file_worker,
     sanitize_mem_md5s,
@@ -418,11 +418,7 @@ def sync_from_runtime() -> None:
     if mem_override:
         memFile = mem_override
     else:
-        outdir = getattr(rt, "outdir", None)
-        if outdir:
-            memFile = os.path.join(outdir, MEM_FILE_DEFAULT)
-        else:
-            memFile = MEM_FILE_DEFAULT
+        memFile = default_memfile_path()
 
 
 def candidate_output_needs_rebuild(path: str) -> bool:

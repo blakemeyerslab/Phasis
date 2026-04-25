@@ -9,13 +9,13 @@ import gzip
 from phasis import runtime as rt
 import phasis.cache as cache
 import phasis.index_integrity as index_integrity
-from phasis.cache import MEM_FILE_DEFAULT, compute_md5_str, read_mem_verbose
+from phasis.cache import compute_md5_str, default_memfile_path, read_mem_verbose
 
 
 # Stage-local globals
 reference = None
 outdir = None
-memFile = MEM_FILE_DEFAULT
+memFile = default_memfile_path()
 ncores = None
 runtype = None
 mindepth = None
@@ -52,10 +52,7 @@ def sync_from_runtime() -> None:
     if mem_override:
         memFile = mem_override
     else:
-        if outdir:
-            memFile = os.path.join(outdir, MEM_FILE_DEFAULT)
-        else:
-            memFile = MEM_FILE_DEFAULT
+        memFile = default_memfile_path()
         rt.memFile = memFile
 
 

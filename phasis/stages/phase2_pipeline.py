@@ -182,6 +182,12 @@ def run_phase2_pipeline(
             max_complexity=float(cfg.max_complexity),
             n_clusters=int(getattr(cfg, "n_clusters", 2) or 2),
         )
+        labeled = st_classify.apply_qc_reclassification(
+            labeled,
+            phase=cfg.phase,
+            legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
+            overrides_path=getattr(cfg, "classification_overrides", None),
+        )
         st_locus_plots.write_individual_phas_locus_plots(
             "GMM",
             labeled,
@@ -201,6 +207,12 @@ def run_phase2_pipeline(
             phasisScoreCutoff=float(cfg.phasisScoreCutoff),
             min_Howell_score=float(cfg.min_Howell_score),
             max_complexity=float(cfg.max_complexity),
+        )
+        labeled = st_classify.apply_qc_reclassification(
+            labeled,
+            phase=cfg.phase,
+            legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
+            overrides_path=getattr(cfg, "classification_overrides", None),
         )
         st_locus_plots.write_individual_phas_locus_plots(
             "KNN",

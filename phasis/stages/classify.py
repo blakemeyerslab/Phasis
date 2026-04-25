@@ -8,6 +8,7 @@ IMPORTANT:
 """
 
 import os
+import re
 from typing import Optional
 
 import numpy as np
@@ -31,6 +32,19 @@ KNN_FEATURE_COLS = [
     "ratio_abund_len_phase",
     "phasis_score",
 ]
+FINAL_CLASS_VALUES = {"PHAS", "PHAS-like", "non-PHAS"}
+NON_PHAS = "non-PHAS"
+PHAS = "PHAS"
+PHAS_LIKE = "PHAS-like"
+QC_REASON_PASS = "pass"
+QC_REASON_CLASSIFIER_NON_PHAS = "classifier_non_phas"
+QC_REASON_INSUFFICIENT_EXACT_SUPPORT = "insufficient_exact_support"
+QC_REASON_LOW_SCORE_CROWDED = "low_score_crowded_window_context"
+QC_REASON_LEGACY = "legacy_classification"
+QC_REASON_MANUAL_OVERRIDE = "manual_override"
+PHAS_LIKE_MIN_RELAXED_SCORE = 12.5
+PHAS_LIKE_MAX_RELAXED_SCORE = 20.0
+PHAS_LIKE_MIN_CROWDING_WINDOWS = 5
 
 
 def _default_knn_model_path() -> str:
@@ -43,6 +57,190 @@ def _default_knn_model_path() -> str:
     """
     phasis_pkg_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     return os.path.join(phasis_pkg_dir, "data", "knn_model.pkl")
+
+
+def _safe_float(value) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float("nan")
+
+
+def _safe_int(value, *, default: int = 0) -> int:
+    try:
+        fvalue = float(value)
+    except Exception:
+        return int(default)
+    if np.isnan(fvalue):
+        return int(default)
+    return int(fvalue)
+
+
+def _safe_ratio(numerator, denominator) -> float:
+    num = _safe_float(numerator)
+    den = _safe_float(denominator)
+    if np.isnan(num) or np.isnan(den) or den <= 0.0:
+        return float("nan")
+    return float(num / den)
+
+
+def _normalize_override_class(value) -> str:
+    text = str(value or "").strip()
+    lookup = {
+        "phas": PHAS,
+        "phas-like": PHAS_LIKE,
+        "phas_like": PHAS_LIKE,
+        "phas like": PHAS_LIKE,
+        "non-phas": NON_PHAS,
+        "non_phas": NON_PHAS,
+        "non phas": NON_PHAS,
+    }
+    normalized = lookup.get(text.lower())
+    if normalized is None:
+        raise ValueError(
+            f"Unsupported final_class override value {value!r}. "
+            f"Allowed values: {sorted(FINAL_CLASS_VALUES)}"
+        )
+    return normalized
+
+
+def _normalize_qc_alib(alib_value, *, phase) -> str:
+    if alib_value is None:
+        return ""
+    if phase is None:
+        return str(alib_value)
+    return re.sub(
+        rf"\.{re.escape(str(phase))}-PHAS\.candidate$",
+        "",
+        str(alib_value),
+    )
+
+
+def _build_detection_key(identifier_value, alib_value, *, phase) -> tuple[str, str]:
+    return (
+        str(identifier_value or "").strip(),
+        _normalize_qc_alib(alib_value, phase=phase).strip(),
+    )
+
+
+def _read_classification_overrides(
+    overrides_path: Optional[str],
+    *,
+    phase,
+) -> dict[tuple[str, str], dict]:
+    if not overrides_path:
+        return {}
+
+    path = os.path.abspath(os.path.expanduser(str(overrides_path)))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Classification override file not found: {path}")
+    if os.path.getsize(path) == 0:
+        return {}
+
+    overrides_df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    required = {"identifier", "alib", "final_class"}
+    missing = sorted(required - set(overrides_df.columns))
+    if missing:
+        raise ValueError(
+            f"Classification override file {path} is missing required columns: {missing}"
+        )
+
+    seen = set()
+    lookup = {}
+    for row in overrides_df.itertuples(index=False):
+        key = _build_detection_key(
+            getattr(row, "identifier", ""),
+            getattr(row, "alib", ""),
+            phase=phase,
+        )
+        if key in seen:
+            raise ValueError(
+                f"Duplicate classification override key detected for identifier={key[0]!r}, alib={key[1]!r}"
+            )
+        seen.add(key)
+        qc_reason = str(getattr(row, "qc_reason", "") or "").strip() or QC_REASON_MANUAL_OVERRIDE
+        note = str(getattr(row, "note", "") or "").strip()
+        lookup[key] = {
+            "final_class": _normalize_override_class(getattr(row, "final_class", "")),
+            "qc_reason": qc_reason,
+            "note": note,
+        }
+    return lookup
+
+
+def _automatic_qc_classification(row) -> tuple[str, str]:
+    pre_qc_label = str(row.get("pre_qc_label", NON_PHAS) or NON_PHAS)
+    if pre_qc_label != PHAS:
+        return NON_PHAS, QC_REASON_CLASSIFIER_NON_PHAS
+
+    exact_support = _safe_float(row.get("Howell_exact_support_score"))
+    origin_class = str(row.get("Howell_origin_class", "") or "").strip()
+    if (not np.isnan(exact_support) and exact_support <= 0.0) or origin_class == QC_REASON_INSUFFICIENT_EXACT_SUPPORT:
+        return NON_PHAS, QC_REASON_INSUFFICIENT_EXACT_SUPPORT
+
+    relaxed_peak_score = _safe_float(row.get("Peak_Howell_score"))
+    crowding_window_count = _safe_int(row.get("Howell_crowding_window_count"), default=0)
+    if (
+        not np.isnan(exact_support)
+        and exact_support > 0.0
+        and not np.isnan(relaxed_peak_score)
+        and PHAS_LIKE_MIN_RELAXED_SCORE < relaxed_peak_score < PHAS_LIKE_MAX_RELAXED_SCORE
+        and crowding_window_count >= PHAS_LIKE_MIN_CROWDING_WINDOWS
+    ):
+        return PHAS_LIKE, QC_REASON_LOW_SCORE_CROWDED
+
+    return PHAS, QC_REASON_PASS
+
+
+def apply_qc_reclassification(
+    features: pd.DataFrame,
+    *,
+    phase=None,
+    legacy_classification: bool = False,
+    overrides_path: Optional[str] = None,
+) -> pd.DataFrame:
+    out = features.copy()
+    if "label" not in out.columns:
+        raise ValueError("QC reclassification requires a 'label' column from the classifier stage")
+
+    out["pre_qc_label"] = out["label"].astype(str)
+    out["secondary_peak_ratio"] = [
+        _safe_ratio(best_score, peak_score)
+        for best_score, peak_score in zip(
+            out.get("Howell_additional_peak_best_score", pd.Series(index=out.index, dtype=float)),
+            out.get("Peak_Howell_score", pd.Series(index=out.index, dtype=float)),
+        )
+    ]
+
+    final_classes = []
+    qc_reasons = []
+    for row in out.to_dict("records"):
+        if legacy_classification:
+            final_class = PHAS if str(row.get("pre_qc_label", NON_PHAS) or NON_PHAS) == PHAS else NON_PHAS
+            qc_reason = QC_REASON_LEGACY
+        else:
+            final_class, qc_reason = _automatic_qc_classification(row)
+        final_classes.append(final_class)
+        qc_reasons.append(qc_reason)
+
+    out["final_class"] = final_classes
+    out["qc_reason"] = qc_reasons
+    out["override_note"] = ""
+
+    overrides = _read_classification_overrides(overrides_path, phase=phase)
+    if overrides:
+        for idx, row in out.iterrows():
+            key = _build_detection_key(row.get("identifier"), row.get("alib"), phase=phase)
+            override = overrides.get(key)
+            if not override:
+                continue
+            out.at[idx, "final_class"] = override["final_class"]
+            out.at[idx, "qc_reason"] = override["qc_reason"]
+            out.at[idx, "override_note"] = override["note"]
+
+    out["report_label"] = np.where(out["final_class"] == PHAS, PHAS, NON_PHAS)
+    out["label"] = out["report_label"]
+    return out
 
 
 def _apply_post_filters(

@@ -8,7 +8,7 @@ import pandas as pd
 from scipy.stats import combine_pvalues
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
+from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 from .. import state as st
@@ -141,7 +141,7 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
     print("### Step: Compute Phasis scores per (chromosome, library) ###")
 
     phase = getattr(rt, "phase", None)
-    memFile = getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
+    memFile = getattr(rt, "memFile", None) or default_memfile_path()
     outfname = phase2_basename("clusters_scored.tsv")
     windows_path = phase2_basename("clusters_windows_to_score.tsv")
 

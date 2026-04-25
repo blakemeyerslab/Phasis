@@ -21,7 +21,7 @@ import pandas as pd
 from scipy.stats import combine_pvalues
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
+from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 import phasis.ids as ids
 
@@ -156,7 +156,7 @@ def build_and_save_phas_clusters(
 
     # Prefer explicit args; fall back to runtime snapshot
     phase_local = phase if phase is not None else getattr(rt, "phase", None)
-    memfile_local = memFile if memFile is not None else (getattr(rt, "memFile", None) or MEM_FILE_DEFAULT)
+    memfile_local = memFile if memFile is not None else (getattr(rt, "memFile", None) or default_memfile_path())
     concat_local = concat_libs if concat_libs is not None else getattr(rt, "concat_libs", False)
 
     output_file = phase2_basename("PHAS_to_detect.tab")

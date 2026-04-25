@@ -50,6 +50,18 @@ def _fallback_series(nrows: int) -> pd.Series:
     return pd.Series([np.nan] * int(nrows))
 
 
+def _fallback_text_series(nrows: int, value: str = "") -> pd.Series:
+    return pd.Series([value] * int(nrows), dtype="object")
+
+
+def _format_phas_plot_text(text_value: str) -> str:
+    text_local = str(text_value or "")
+    text_local = text_local.replace("non-PHAS", "__NON_PHAS__")
+    text_local = text_local.replace("PHAS", r"$\it{PHAS}$")
+    text_local = text_local.replace("__NON_PHAS__", r"non-$\it{PHAS}$")
+    return text_local
+
+
 def _set_colorbar_ticks_and_labels(cbar, ticks, labels) -> None:
     ticks_list = list(ticks)
     labels_list = list(labels)
@@ -278,7 +290,7 @@ def _filter_plot_df(phasis_result_df):
 def _empty_plot_placeholder(outfile, message):
     f, ax = plt.subplots(figsize=(6, 2))
     ax.axis("off")
-    ax.text(0.01, 0.5, message, fontsize=12)
+    ax.text(0.01, 0.5, _format_phas_plot_text(message), fontsize=12)
     f.savefig(outfile, dpi=300)
     plt.close(f)
     return None
@@ -522,7 +534,7 @@ def plot_report_heat_map(phasis_result_df, plot_type):
             # Nothing to plot; write a small placeholder PDF to avoid errors
             f, ax = plt.subplots(figsize=(6, 2))
             ax.axis("off")
-            ax.text(0.01, 0.5, "No 24-PHAS loci detected.", fontsize=12)
+            ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
             f.savefig(_join_outdir(outdir, f"{phase}_{plot_type}_PHAS.pdf"), dpi=300)
             plt.close(f)
             return
@@ -656,7 +668,7 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
         if df.empty:
             f, ax = plt.subplots(figsize=(6, 2))
             ax.axis("off")
-            ax.text(0.01, 0.5, "No 24-PHAS loci detected.", fontsize=12)
+            ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
             f.savefig(_join_outdir(outdir, f"{plot_type}_{phase}_Abundance_PHAS.pdf"), dpi=300)
             plt.close(f)
             return None
@@ -770,7 +782,7 @@ def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
         if df.empty:
             f, ax = plt.subplots(figsize=(6, 2))
             ax.axis("off")
-            ax.text(0.01, 0.5, "No 24-PHAS loci detected.", fontsize=12)
+            ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
             f.savefig(_join_outdir(outdir, f"{plot_type}_{phase}_Abundance_PHAS_and_nonPHAS.pdf"), dpi=300)
             plt.close(f)
             return None
@@ -987,6 +999,9 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         'Howell_origin_class': features.get('Howell_origin_class', pd.Series([np.nan] * int(nrows))),
         'Howell_additional_peak_count': features.get('Howell_additional_peak_count', _fallback_series(nrows)),
         'Howell_additional_peak_best_score': features.get('Howell_additional_peak_best_score', _fallback_series(nrows)),
+        'Howell_crowding_window_count': features.get('Howell_crowding_window_count', _fallback_series(nrows)),
+        'Howell_crowding_best_score': features.get('Howell_crowding_best_score', _fallback_series(nrows)),
+        'Howell_crowding_score_gap': features.get('Howell_crowding_score_gap', _fallback_series(nrows)),
         # strict (classic) Howell
         'w_Howell_score_strict': features.get('w_Howell_score_strict', _fallback_series(nrows)),
         'w_window_start_strict': features.get('w_window_start_strict', _fallback_series(nrows)),
@@ -1001,12 +1016,38 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
     all_out   = _join_outdir(outdir, f"{phase}_{method_name}_all_clusters.tsv")
     calls_out = _join_outdir(outdir, f"{phase}_{method_name}_calls.tsv")
     gff_out   = _join_outdir(outdir, f"{phase}_PHAS.gff")
+    qc_out    = _join_outdir(outdir, f"{phase}_{method_name}_classification_qc.tsv")
  
     # Write all clusters with labels
     all_df.to_csv(all_out, sep="\t", index=False)
 
-    # Keep only PHAS
-    phas_df = all_df[all_df['label'] == 'PHAS'].copy()
+    qc_df = pd.DataFrame({
+        "identifier": features["identifier"],
+        "alib": alib_ids,
+        "cID": features.get("cID", _fallback_text_series(nrows)),
+        "pre_qc_label": features.get("pre_qc_label", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
+        "report_label": features.get("report_label", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
+        "final_class": features.get("final_class", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
+        "qc_reason": features.get("qc_reason", _fallback_text_series(nrows, "")),
+        "Peak_Howell_score": features.get("Peak_Howell_score", _fallback_series(nrows)),
+        "Howell_exact_support_score": features.get("Howell_exact_support_score", _fallback_series(nrows)),
+        "Howell_origin_class": features.get("Howell_origin_class", _fallback_text_series(nrows)),
+        "Howell_origin_window_count": features.get("Howell_origin_window_count", _fallback_series(nrows)),
+        "Howell_origin_frame_count": features.get("Howell_origin_frame_count", _fallback_series(nrows)),
+        "Howell_alt_register_count": features.get("Howell_alt_register_count", _fallback_series(nrows)),
+        "Howell_additional_peak_count": features.get("Howell_additional_peak_count", _fallback_series(nrows)),
+        "Howell_additional_peak_best_score": features.get("Howell_additional_peak_best_score", _fallback_series(nrows)),
+        "Howell_crowding_window_count": features.get("Howell_crowding_window_count", _fallback_series(nrows)),
+        "Howell_crowding_best_score": features.get("Howell_crowding_best_score", _fallback_series(nrows)),
+        "Howell_crowding_score_gap": features.get("Howell_crowding_score_gap", _fallback_series(nrows)),
+        "secondary_peak_ratio": features.get("secondary_peak_ratio", _fallback_series(nrows)),
+        "override_note": features.get("override_note", _fallback_text_series(nrows)),
+    })
+    qc_df.to_csv(qc_out, sep="\t", index=False)
+
+    final_class_series = features.get("final_class", features["label"]).astype(str)
+    phas_mask = final_class_series == "PHAS"
+    phas_df = all_df.loc[phas_mask].copy()
 
     # Write GFF
     write_gff(phas_df,gff_out)
@@ -1047,5 +1088,5 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         raise
     _print_final_detection_summary(
         phas_df,
-        wrote_line=f"  - Wrote: {all_out}, {calls_out}, and {gff_out}",
+        wrote_line=f"  - Wrote: {all_out}, {calls_out}, {qc_out}, and {gff_out}",
     )

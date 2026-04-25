@@ -21,6 +21,7 @@ MAX_LOCUS_PLOT_WORKERS = 10
 REMOTE_DIRECT_LOCUS_PLOT_WORKER_CAP = 4
 GUIDE_CYCLES = 10
 PLOT_STAGING_CHOICES = frozenset({"auto", "local", "direct"})
+LOCUS_PLOT_MODE_CHOICES = frozenset({"clean", "debug"})
 REMOTE_FILESYSTEM_TYPES = frozenset(
     {
         "beegfs",
@@ -169,6 +170,22 @@ def _normalize_strand_code(strand_code: str) -> str:
     return "w"
 
 
+def _format_phas_text(text_value: str) -> str:
+    text_local = str(text_value or "").strip()
+    if text_local == "PHAS":
+        return r"$\it{PHAS}$"
+    if text_local == "PHAS-like":
+        return r"$\it{PHAS}$-like"
+    if text_local == "non-PHAS":
+        return r"non-$\it{PHAS}$"
+    text_local = text_local.replace("PHAS-like", "__PHAS_LIKE__")
+    text_local = text_local.replace("non-PHAS", "__NON_PHAS__")
+    text_local = text_local.replace("PHAS", r"$\it{PHAS}$")
+    text_local = text_local.replace("__PHAS_LIKE__", r"$\it{PHAS}$-like")
+    text_local = text_local.replace("__NON_PHAS__", r"non-$\it{PHAS}$")
+    return text_local
+
+
 def _find_hpsp_trace_row(trace_rows) -> dict | None:
     best_row = None
     best_score = float("-inf")
@@ -203,6 +220,17 @@ def _classify_register_relation(anchor_position: int, register_origin: int | Non
     if remainder == phase_local - 1:
         return "offset", anchor_local + 1
     return "other", None
+
+
+def _normalize_locus_plot_mode(value) -> str:
+    mode = str(value or "clean").strip().lower()
+    if mode not in LOCUS_PLOT_MODE_CHOICES:
+        return "clean"
+    return mode
+
+
+def _current_locus_plot_mode() -> str:
+    return _normalize_locus_plot_mode(getattr(rt, "locus_plot_mode", "clean"))
 
 
 def _build_scored_register_positions(hpsp_row: dict | None, phase_value: int, strand_code: str):
@@ -353,30 +381,41 @@ def _build_abundance_rows(cluster_df: pd.DataFrame):
     return rows
 
 
-def _build_howell_rows(trace_rows, phase_value: int, strand_code: str):
+def _build_howell_rows(
+    trace_rows,
+    phase_value: int,
+    strand_code: str,
+    *,
+    plot_mode: str = "debug",
+    trace_context=None,
+):
     rows = []
-    hpsp_row = _find_hpsp_trace_row(trace_rows)
-    _base_positions, register_origin = _build_scored_register_positions(hpsp_row, phase_value, strand_code)
+    strand_local = _normalize_strand_code(strand_code)
+    if trace_context is None:
+        trace_context = st_feat.classify_browser_style_relaxed_trace(
+            {strand_local: list(trace_rows or [])},
+            phase=phase_value,
+        )
+    strand_rows = list(trace_context.get(strand_local, []) or [])
+    hpsp_row = (trace_context.get("strand_hpsp_rows") or {}).get(strand_local)
+    register_origin = (trace_context.get("strand_register_origins") or {}).get(strand_local)
     hpsp_position = None if register_origin is None else int(register_origin)
     phase_color = _phase_color_hex(phase_value)
     direction = 1.0 if _is_forward_strand(strand_code) else -1.0
 
-    for row in trace_rows or []:
+    for row in strand_rows:
         anchor_position = int(row["anchor_position"])
         plot_position = float(anchor_position)
         score_value = float(row.get("score", 0.0) or 0.0)
-        relation, _expected_position = _classify_register_relation(
-            anchor_position,
-            register_origin,
-            int(phase_value),
-        )
-        edgecolor = HPSP_RED if hpsp_row is not None and anchor_position == int(hpsp_row["anchor_position"]) else phase_color
+        relation = str(row.get("phase_relation", "other") or "other")
+        is_hpsp = bool(row.get("is_hpsp", False))
+        edgecolor = HPSP_RED if is_hpsp else phase_color
         facecolor = "none"
         alpha_value = 1.0
         linewidth = 0.9
         size = 22
 
-        if hpsp_row is not None and anchor_position == int(hpsp_row["anchor_position"]):
+        if is_hpsp:
             plot_position = float(hpsp_position)
             facecolor = HPSP_RED
             alpha_value = 1.0
@@ -391,7 +430,7 @@ def _build_howell_rows(trace_rows, phase_value: int, strand_code: str):
         else:
             edgecolor = NON_PHASE_GREY
             facecolor = "none"
-            alpha_value = 0.7
+            alpha_value = 0.78 if _normalize_locus_plot_mode(plot_mode) == "debug" else 0.88
             linewidth = 0.7
             size = 18
 
@@ -404,16 +443,17 @@ def _build_howell_rows(trace_rows, phase_value: int, strand_code: str):
                 "alpha": alpha_value,
                 "linewidth": linewidth,
                 "size": size,
-                "strand": _normalize_strand_code(strand_code),
+                "strand": strand_local,
                 "phase_relation": relation,
-                "is_hpsp": bool(hpsp_row is not None and anchor_position == int(hpsp_row["anchor_position"])),
+                "is_hpsp": is_hpsp,
             }
         )
     return rows, hpsp_position, hpsp_row
 
 
-def _build_plot_legend_groups(phase_value: int):
+def _build_plot_legend_groups(phase_value: int, *, plot_mode: str = "clean"):
     phase_color = _phase_color_hex(phase_value)
+    howell_third_label = "Non-in-phase phased window"
     return {
         "read_lengths": [
             Line2D([0], [0], marker="D", color="none", markeredgecolor=LIGHT_GREY, markerfacecolor=LIGHT_GREY, markersize=5, label="<=20 nt"),
@@ -430,7 +470,7 @@ def _build_plot_legend_groups(phase_value: int):
         "howell": [
             Line2D([0], [0], marker="o", color="none", markeredgecolor=phase_color, markerfacecolor=phase_color, markersize=6, label="Exact in-phase"),
             Line2D([0], [0], marker="o", color="none", markeredgecolor=phase_color, markerfacecolor="none", markersize=6, label="Offset (+/-1)"),
-            Line2D([0], [0], marker="o", color="none", markeredgecolor=NON_PHASE_GREY, markerfacecolor="none", markersize=6, label="Out-of-phase"),
+            Line2D([0], [0], marker="o", color="none", markeredgecolor=NON_PHASE_GREY, markerfacecolor="none", markersize=6, label=howell_third_label),
         ],
         "hpsp": [
             Line2D([0], [0], marker="o", color="none", markeredgecolor=HPSP_RED, markerfacecolor=HPSP_RED, markersize=6, label="Highest phasing score position / register anchor (HPSP)"),
@@ -438,8 +478,16 @@ def _build_plot_legend_groups(phase_value: int):
     }
 
 
-def _add_grouped_legends(fig, phase_value: int, *, main_left: float, main_right: float, legend_y: float) -> None:
-    legend_groups = _build_plot_legend_groups(phase_value)
+def _add_grouped_legends(
+    fig,
+    phase_value: int,
+    *,
+    main_left: float,
+    main_right: float,
+    legend_y: float,
+    plot_mode: str = "clean",
+) -> None:
+    legend_groups = _build_plot_legend_groups(phase_value, plot_mode=plot_mode)
     legend_common = {
         "frameon": False,
         "fontsize": 8,
@@ -957,7 +1005,60 @@ def _wrap_strip_text(text_value: str, *, width: int = 24) -> str:
     )
 
 
-def _build_ambiguity_sidebar_payload(task: dict) -> dict:
+def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
+    final_class = _clean_ambiguity_text(task.get("final_class")) or "non-PHAS"
+    origin_class_raw = _clean_ambiguity_text(task.get("Howell_origin_class")) or ""
+    relaxed_peak_score = _clean_ambiguity_float(task.get("Peak_Howell_score"))
+    exact_support = payload["exact_support_value"]
+    extension_window_count = payload["extension_window_count_value"] or 0
+    origin_window_count = payload["origin_window_count_value"] or 0
+    alt_register_count = payload["raw_alt_register_count_value"] or 0
+    crowding_window_count = payload["crowding_window_count_value"] or 0
+
+    lines = []
+    if final_class == "non-PHAS" and (
+        exact_support is None
+        or exact_support <= 0.0
+        or origin_class_raw == "insufficient_exact_support"
+    ):
+        return [
+            "Relaxed HPSP detected",
+            "Exact-only support absent",
+            "No reliable exact frame",
+            _format_phas_text("Classified as non-PHAS"),
+        ]
+
+    if exact_support is not None and exact_support > 0.0:
+        support_label = "Strong" if exact_support >= 20.0 else "Moderate"
+        lines.append(f"{support_label} exact support")
+    if origin_window_count == 0:
+        lines.append("No competing exact frames")
+    if alt_register_count == 0:
+        lines.append("No alternate strong registers")
+    if origin_class_raw == "coherent_extension" and extension_window_count > 0:
+        lines.append("Broad same-frame extension")
+    if final_class == "PHAS-like":
+        if relaxed_peak_score is not None and relaxed_peak_score < 20.0:
+            lines.append("Modest relaxed Howell support")
+        if crowding_window_count > 0:
+            lines.append("Crowded nearby non-in-phase windows")
+        lines.append(_format_phas_text("Classified as PHAS-like"))
+    elif final_class == "PHAS":
+        lines.append(_format_phas_text("Classified as PHAS"))
+    elif final_class == "non-PHAS":
+        lines.append(_format_phas_text("Classified as non-PHAS"))
+
+    deduped = []
+    seen = set()
+    for line in lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        deduped.append(line)
+    return deduped[:5]
+
+
+def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") -> dict:
     exact_support = _clean_ambiguity_float(task.get("Howell_exact_support_score"))
     overlap_count = _clean_ambiguity_count(task.get("Howell_ambiguity_count"))
     alt_register_count = _clean_ambiguity_count(task.get("Howell_alt_register_count"))
@@ -970,29 +1071,173 @@ def _build_ambiguity_sidebar_payload(task: dict) -> dict:
     origin_class = _format_origin_class(task.get("Howell_origin_class"))
     additional_peak_count = _clean_ambiguity_count(task.get("Howell_additional_peak_count"))
     additional_peak_best_score = _clean_ambiguity_float(task.get("Howell_additional_peak_best_score"))
-
-    return {
+    crowding_window_count = _clean_ambiguity_count(task.get("Howell_crowding_window_count"))
+    crowding_best_score = _clean_ambiguity_float(task.get("Howell_crowding_best_score"))
+    crowding_score_gap = _clean_ambiguity_float(task.get("Howell_crowding_score_gap"))
+    payload = {
         "exact_support": "NA" if exact_support is None else f"{exact_support:.2f}",
+        "exact_support_value": exact_support,
         "origin_class": origin_class,
         "extension_window_count": "NA" if extension_window_count is None else str(extension_window_count),
+        "extension_window_count_value": extension_window_count,
         "extension_span_nt": "NA" if extension_span_nt is None else str(extension_span_nt),
+        "extension_span_nt_value": extension_span_nt,
         "origin_window_count": "NA" if origin_window_count is None else str(origin_window_count),
+        "origin_window_count_value": origin_window_count,
         "origin_frame_count": "NA" if origin_frame_count is None else str(origin_frame_count),
+        "origin_frame_count_value": origin_frame_count,
         "origin_margin": "NA" if origin_margin is None else f"{origin_margin:.2f}",
+        "origin_margin_value": origin_margin,
         "additional_peak_count": "NA" if additional_peak_count is None else str(additional_peak_count),
+        "additional_peak_count_value": additional_peak_count,
         "additional_peak_best_score": "NA" if additional_peak_best_score is None else f"{additional_peak_best_score:.2f}",
+        "additional_peak_best_score_value": additional_peak_best_score,
         "additional_peak_cutoff": _howell_peak_cutoff_text(),
+        "crowding_window_count": "NA" if crowding_window_count is None else str(crowding_window_count),
+        "crowding_window_count_value": crowding_window_count,
+        "crowding_best_score": "NA" if crowding_best_score is None else f"{crowding_best_score:.2f}",
+        "crowding_best_score_value": crowding_best_score,
+        "crowding_score_gap": "NA" if crowding_score_gap is None else f"{crowding_score_gap:.2f}",
+        "crowding_score_gap_value": crowding_score_gap,
         "raw_overlap_count": "NA" if overlap_count is None else str(overlap_count),
+        "raw_overlap_count_value": overlap_count,
         "raw_alt_register_count": "NA" if alt_register_count is None else str(alt_register_count),
+        "raw_alt_register_count_value": alt_register_count,
         "raw_overlap_margin": "NA" if overlap_margin is None else f"{overlap_margin:.2f}",
+        "raw_overlap_margin_value": overlap_margin,
+        "plot_mode": _normalize_locus_plot_mode(plot_mode),
     }
+    payload["interpretation_lines"] = _build_interpretation_lines(task, payload)
+    return payload
 
 
-def _build_ambiguity_sidebar_note(task: dict) -> str:
+def _build_ambiguity_sidebar_note(task: dict, *, plot_mode: str = "clean") -> str:
     exact_support = _clean_ambiguity_float(task.get("Howell_exact_support_score"))
     if exact_support is None or exact_support <= 0.0:
         return "Exact-only interpretation unavailable.\nRelaxed HPSP lacks exact support."
-    return "Howell panel is relaxed.\nOffsets are excluded here."
+    if _normalize_locus_plot_mode(plot_mode) == "clean":
+        return "Grey points show non-in-phase phased windows.\nUse debug mode for raw context metrics."
+    return "Grey points show non-in-phase phased windows.\nRaw context is shown below."
+
+
+def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean") -> list[dict]:
+    sections = [
+        {
+            "title": "Exact-only Howell",
+            "title_fontsize": 8.6,
+            "line_fontsize": 7.8,
+            "lines": [
+                f"Support: {payload['exact_support']}",
+                f"Class: {payload['origin_class']}",
+            ],
+        }
+    ]
+
+    if payload["interpretation_lines"]:
+        sections.append(
+            {
+                "title": "Interpretation",
+                "title_fontsize": 8.0,
+                "line_fontsize": 7.1,
+                "lines": payload["interpretation_lines"],
+            }
+        )
+
+    if (
+        payload["extension_window_count_value"] is not None
+        or payload["extension_span_nt_value"] is not None
+    ):
+        sections.append(
+            {
+                "title": "Coherent extension",
+                "title_fontsize": 8.0,
+                "line_fontsize": 7.2,
+                "lines": [
+                    f"Windows: {payload['extension_window_count']}",
+                    f"Span: {payload['extension_span_nt']} nt",
+                ],
+            }
+        )
+
+    if (
+        payload["origin_window_count_value"] is not None
+        or payload["origin_frame_count_value"] is not None
+        or payload["origin_margin_value"] is not None
+    ):
+        sections.append(
+            {
+                "title": "Origin ambiguity",
+                "title_fontsize": 8.0,
+                "line_fontsize": 7.2,
+                "lines": [
+                    f"Windows: {payload['origin_window_count']}",
+                    f"Frames: {payload['origin_frame_count']}",
+                    f"Margin: {payload['origin_margin']}",
+                ],
+            }
+        )
+
+    if (
+        (payload["additional_peak_count_value"] or 0) > 0
+        or payload["additional_peak_best_score_value"] is not None
+    ):
+        sections.append(
+            {
+                "title": "Other local peaks",
+                "title_fontsize": 8.0,
+                "line_fontsize": 7.2,
+                "lines": [
+                    f"Count: {payload['additional_peak_count']}",
+                    f"Best: {payload['additional_peak_best_score']}",
+                    f"Cutoff: {payload['additional_peak_cutoff']}",
+                ],
+            }
+        )
+
+    if (
+        (payload["crowding_window_count_value"] or 0) > 0
+        or payload["crowding_best_score_value"] is not None
+        or payload["crowding_score_gap_value"] is not None
+    ):
+        sections.append(
+            {
+                "title": "Crowding context",
+                "title_fontsize": 8.0,
+                "line_fontsize": 7.2,
+                "lines": [
+                    f"Windows: {payload['crowding_window_count']}",
+                    f"Best: {payload['crowding_best_score']}",
+                    f"Gap: {payload['crowding_score_gap']}",
+                ],
+            }
+        )
+
+    if _normalize_locus_plot_mode(plot_mode) == "debug":
+        sections.append(
+            {
+                "title": "Raw context",
+                "title_fontsize": 7.8,
+                "line_fontsize": 7.0,
+                "lines": [
+                    f"Near-tied: {payload['raw_overlap_count']}",
+                    f"Alt regs: {payload['raw_alt_register_count']}",
+                    f"Raw margin: {payload['raw_overlap_margin']}",
+                ],
+            }
+        )
+
+    note_text = _build_ambiguity_sidebar_note(task, plot_mode=plot_mode)
+    if note_text:
+        sections.append(
+            {
+                "title": "Notes",
+                "title_fontsize": 7.8,
+                "line_fontsize": 6.4,
+                "lines": note_text.splitlines(),
+                "color": "#666666",
+            }
+        )
+    return sections
 
 
 def _draw_strip_line(
@@ -1003,7 +1248,7 @@ def _draw_strip_line(
     fontsize: float,
     fontweight: str = "normal",
     color: str = "#333333",
-    line_gap: float = 0.037,
+    line_gap: float = 0.032,
     paragraph_gap: float = 0.008,
 ) -> float:
     wrapped_text = str(text_value)
@@ -1035,46 +1280,31 @@ def _draw_detachable_strip(fig, task: dict, layout: dict) -> None:
     for spine in ax.spines.values():
         spine.set_visible(False)
 
-    payload = _build_ambiguity_sidebar_payload(task)
-    class_line = f"Class: {payload['origin_class']}"
-    if len(class_line) > 23:
-        class_line = f"Class:\n{_wrap_strip_text(payload['origin_class'], width=21)}"
-
+    plot_mode = _current_locus_plot_mode()
+    payload = _build_ambiguity_sidebar_payload(task, plot_mode=plot_mode)
+    sections = _build_strip_sections(task, payload, plot_mode=plot_mode)
     y_cursor = 0.95
-    y_cursor = _draw_strip_line(ax, y_cursor, "Exact-only Howell", fontsize=8.6, fontweight="bold")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Support: {payload['exact_support']}", fontsize=8.0, fontweight="bold")
-    y_cursor = _draw_strip_line(ax, y_cursor, class_line, fontsize=7.6, fontweight="bold", paragraph_gap=0.022)
-
-    y_cursor = _draw_strip_line(ax, y_cursor, "Coherent extension", fontsize=8.0, fontweight="bold", color="#444444")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Windows: {payload['extension_window_count']}", fontsize=7.2, color="#555555")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Span: {payload['extension_span_nt']} nt", fontsize=7.2, color="#555555", paragraph_gap=0.022)
-
-    y_cursor = _draw_strip_line(ax, y_cursor, "Origin ambiguity", fontsize=8.0, fontweight="bold", color="#444444")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Windows: {payload['origin_window_count']}", fontsize=7.2, color="#555555")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Frames: {payload['origin_frame_count']}", fontsize=7.2, color="#555555")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Margin: {payload['origin_margin']}", fontsize=7.2, color="#555555", paragraph_gap=0.022)
-
-    y_cursor = _draw_strip_line(ax, y_cursor, "Other local peaks", fontsize=8.0, fontweight="bold", color="#444444")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Count: {payload['additional_peak_count']}", fontsize=7.2, color="#555555")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Best: {payload['additional_peak_best_score']}", fontsize=7.2, color="#555555")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Cutoff: {payload['additional_peak_cutoff']}", fontsize=7.2, color="#555555", paragraph_gap=0.022)
-
-    y_cursor = _draw_strip_line(ax, y_cursor, "Raw context", fontsize=7.8, fontweight="bold", color="#555555")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Near-tied: {payload['raw_overlap_count']}", fontsize=7.0, color="#666666")
-    y_cursor = _draw_strip_line(ax, y_cursor, f"Alt regs: {payload['raw_alt_register_count']}", fontsize=7.0, color="#666666")
-    _draw_strip_line(ax, y_cursor, f"Raw margin: {payload['raw_overlap_margin']}", fontsize=7.0, color="#666666")
-
-    ax.text(
-        0.07,
-        0.02,
-        _build_ambiguity_sidebar_note(task),
-        fontsize=6.2,
-        ha="left",
-        va="bottom",
-        color="#666666",
-        transform=ax.transAxes,
-        clip_on=True,
-    )
+    for section in sections:
+        title_color = section.get("color", "#444444")
+        y_cursor = _draw_strip_line(
+            ax,
+            y_cursor,
+            section["title"],
+            fontsize=section.get("title_fontsize", 8.0),
+            fontweight="bold",
+            color=title_color,
+        )
+        for line in section.get("lines", []):
+            wrapped = _wrap_strip_text(line, width=24)
+            y_cursor = _draw_strip_line(
+                ax,
+                y_cursor,
+                wrapped,
+                fontsize=section.get("line_fontsize", 7.2),
+                color=section.get("color", "#555555"),
+                paragraph_gap=0.004,
+            )
+        y_cursor -= 0.012
 
 
 def _draw_detachable_separator(fig, layout: dict) -> None:
@@ -1106,18 +1336,19 @@ def _analyze_single_locus(task: dict) -> dict:
 
     if not cluster_rows:
         return {
-            "plot_payload": _placeholder_payload(task, "No cluster rows were available for this PHAS call."),
+            "plot_payload": _placeholder_payload(task, "No cluster rows were available for this detection."),
             "phasiRNA_rows": [],
         }
 
     cluster_df = _prepare_cluster_df(cluster_rows)
     if cluster_df.empty:
         return {
-            "plot_payload": _placeholder_payload(task, "The PHAS locus data were empty after reconstruction."),
+            "plot_payload": _placeholder_payload(task, "The locus data were empty after reconstruction."),
             "phasiRNA_rows": [],
         }
 
     trace = st_feat.enumerate_relaxed_howell_trace(cluster_df, phase=phase_value)
+    browser_trace_context = st_feat.classify_browser_style_relaxed_trace(trace, phase=phase_value)
     w_trace = trace.get("w", [])
     c_trace = trace.get("c", [])
     if not w_trace and not c_trace:
@@ -1130,8 +1361,25 @@ def _analyze_single_locus(task: dict) -> dict:
         }
 
     abundance_rows = _build_abundance_rows(cluster_df)
-    howell_rows_w, _hpsp_w, hpsp_row_w = _build_howell_rows(w_trace, phase_value, "w")
-    howell_rows_c, _hpsp_c, hpsp_row_c = _build_howell_rows(c_trace, phase_value, "c")
+    plot_mode = _current_locus_plot_mode()
+    exact_competitor_context = st_feat.collect_exact_only_peak_competitors(
+        cluster_df,
+        phase=phase_value,
+    )
+    howell_rows_w, _hpsp_w, hpsp_row_w = _build_howell_rows(
+        w_trace,
+        phase_value,
+        "w",
+        plot_mode=plot_mode,
+        trace_context=browser_trace_context,
+    )
+    howell_rows_c, _hpsp_c, hpsp_row_c = _build_howell_rows(
+        c_trace,
+        phase_value,
+        "c",
+        plot_mode=plot_mode,
+        trace_context=browser_trace_context,
+    )
     howell_rows = howell_rows_w + howell_rows_c
     guide_specs_w = _build_score_exact_guide_specs(hpsp_row_w, phase_value, w_trace, "w")
     guide_specs_c = _build_score_exact_guide_specs(hpsp_row_c, phase_value, c_trace, "c")
@@ -1139,6 +1387,7 @@ def _analyze_single_locus(task: dict) -> dict:
         trace,
         score_cutoff=float(getattr(rt, "min_Howell_score", 12.5) or 12.5),
     )
+    exact_peak_summary = exact_competitor_context.get("summary") or {}
 
     base_positions_w, register_origin_w = _build_scored_register_positions(hpsp_row_w, phase_value, "w")
     base_positions_c, register_origin_c = _build_scored_register_positions(hpsp_row_c, phase_value, "c")
@@ -1195,16 +1444,46 @@ def _analyze_single_locus(task: dict) -> dict:
             "xpad": float(xpad),
             "abun_ylim": float(abun_ylim),
             "score_ylim": float(score_ylim),
-            "Howell_exact_support_score": task.get("Howell_exact_support_score"),
-            "Howell_ambiguity_count": task.get("Howell_ambiguity_count"),
-            "Howell_alt_register_count": task.get("Howell_alt_register_count"),
-            "Howell_overlap_margin": task.get("Howell_overlap_margin"),
-            "Howell_extension_window_count": task.get("Howell_extension_window_count"),
-            "Howell_extension_span_nt": task.get("Howell_extension_span_nt"),
-            "Howell_origin_window_count": task.get("Howell_origin_window_count"),
-            "Howell_origin_frame_count": task.get("Howell_origin_frame_count"),
-            "Howell_origin_margin": task.get("Howell_origin_margin"),
-            "Howell_origin_class": task.get("Howell_origin_class"),
+            "Howell_exact_support_score": _coalesce_task_metric(
+                task.get("Howell_exact_support_score"),
+                exact_peak_summary.get("Howell_exact_support_score"),
+            ),
+            "Howell_ambiguity_count": _coalesce_task_metric(
+                task.get("Howell_ambiguity_count"),
+                exact_peak_summary.get("Howell_ambiguity_count"),
+            ),
+            "Howell_alt_register_count": _coalesce_task_metric(
+                task.get("Howell_alt_register_count"),
+                exact_peak_summary.get("Howell_alt_register_count"),
+            ),
+            "Howell_overlap_margin": _coalesce_task_metric(
+                task.get("Howell_overlap_margin"),
+                exact_peak_summary.get("Howell_overlap_margin"),
+            ),
+            "Howell_extension_window_count": _coalesce_task_metric(
+                task.get("Howell_extension_window_count"),
+                exact_peak_summary.get("Howell_extension_window_count"),
+            ),
+            "Howell_extension_span_nt": _coalesce_task_metric(
+                task.get("Howell_extension_span_nt"),
+                exact_peak_summary.get("Howell_extension_span_nt"),
+            ),
+            "Howell_origin_window_count": _coalesce_task_metric(
+                task.get("Howell_origin_window_count"),
+                exact_peak_summary.get("Howell_origin_window_count"),
+            ),
+            "Howell_origin_frame_count": _coalesce_task_metric(
+                task.get("Howell_origin_frame_count"),
+                exact_peak_summary.get("Howell_origin_frame_count"),
+            ),
+            "Howell_origin_margin": _coalesce_task_metric(
+                task.get("Howell_origin_margin"),
+                exact_peak_summary.get("Howell_origin_margin"),
+            ),
+            "Howell_origin_class": _coalesce_task_metric(
+                task.get("Howell_origin_class"),
+                exact_peak_summary.get("Howell_origin_class"),
+            ),
             "Howell_additional_peak_count": _coalesce_task_metric(
                 task.get("Howell_additional_peak_count"),
                 additional_peak_summary.get("Howell_additional_peak_count"),
@@ -1213,6 +1492,23 @@ def _analyze_single_locus(task: dict) -> dict:
                 task.get("Howell_additional_peak_best_score"),
                 additional_peak_summary.get("Howell_additional_peak_best_score"),
             ),
+            "Howell_crowding_window_count": _coalesce_task_metric(
+                task.get("Howell_crowding_window_count"),
+                browser_trace_context.get("Howell_crowding_window_count"),
+            ),
+            "Howell_crowding_best_score": _coalesce_task_metric(
+                task.get("Howell_crowding_best_score"),
+                browser_trace_context.get("Howell_crowding_best_score"),
+            ),
+            "Howell_crowding_score_gap": _coalesce_task_metric(
+                task.get("Howell_crowding_score_gap"),
+                browser_trace_context.get("Howell_crowding_score_gap"),
+            ),
+            "Peak_Howell_score": task.get("Peak_Howell_score"),
+            "secondary_peak_ratio": task.get("secondary_peak_ratio"),
+            "final_class": task.get("final_class"),
+            "report_label": task.get("report_label"),
+            "qc_reason": task.get("qc_reason"),
         },
         "phasiRNA_rows": export_rows,
     }
@@ -1281,6 +1577,7 @@ def _write_single_locus_plot(task: dict) -> str:
         main_left=float(layout["main_left"]),
         main_right=float(layout["main_right"]),
         legend_y=float(layout["legend_y"]),
+        plot_mode=_current_locus_plot_mode(),
     )
 
     _draw_centerline(axes[0])
@@ -1374,6 +1671,28 @@ def _raise_parallel_failures(results, *, stage_name: str) -> None:
     raise RuntimeError(f"{stage_name} failed for {len(failures)} task(s). First error:\n{first}")
 
 
+def _plot_bucket_specs(phase_value: int, method_name: str) -> list[dict]:
+    return [
+        {
+            "final_class": "PHAS",
+            "display_class": "PHAS",
+            "plot_dir": f"{phase_value}_{method_name}_PHAS_locus_plots",
+            "export_name": f"{phase_value}_{method_name}_phasiRNAs.tsv",
+        },
+        {
+            "final_class": "PHAS-like",
+            "display_class": "PHAS-like",
+            "plot_dir": f"{phase_value}_{method_name}_PHAS_like_locus_plots",
+            "export_name": f"{phase_value}_{method_name}_PHAS_like_phasiRNAs.tsv",
+        },
+    ]
+
+
+def _format_locus_title(alib_value: str, identifier_value: str, phase_value: int, display_class: str) -> str:
+    suffix = f"{phase_value}-{_format_phas_text(display_class)}"
+    return f"{alib_value} | {identifier_value} | {suffix}"
+
+
 def write_individual_phas_locus_plots(
     method_name: str,
     labeled_features: pd.DataFrame,
@@ -1383,22 +1702,22 @@ def write_individual_phas_locus_plots(
     job_phase: str | int | None = None,
 ) -> None:
     phase_value = int(job_phase) if job_phase is not None else int(getattr(rt, "phase", 21))
-    plot_dir_name = f"{phase_value}_{method_name}_PHAS_locus_plots"
-    final_plot_dir = _join_outdir(job_outdir, plot_dir_name)
-    phasirna_out = _join_outdir(job_outdir, f"{phase_value}_{method_name}_phasiRNAs.tsv")
+    bucket_specs = _plot_bucket_specs(phase_value, method_name)
+    final_class_series = labeled_features.get("final_class", labeled_features.get("label", pd.Series(dtype=str))).astype(str)
 
-    phas_calls = labeled_features.loc[labeled_features["label"] == "PHAS"].copy()
-    if phas_calls.empty:
-        shutil.rmtree(final_plot_dir, ignore_errors=True)
-        _write_phasirna_export(phasirna_out, [])
-        print("[INFO] No PHAS calls were detected; skipping individual locus plots.")
-        print(f"[INFO] Wrote 0 phase-length in-register phasiRNA row(s) to {phasirna_out}")
+    if not final_class_series.isin(["PHAS", "PHAS-like"]).any():
+        for spec in bucket_specs:
+            shutil.rmtree(_join_outdir(job_outdir, spec["plot_dir"]), ignore_errors=True)
+            export_path = _join_outdir(job_outdir, spec["export_name"])
+            _write_phasirna_export(export_path, [])
+            print(f"[INFO] Wrote 0 phase-length in-register phasiRNA row(s) to {export_path}")
+        print("[INFO] No PHAS or PHAS-like calls were detected; skipping individual locus plots.")
         return
 
-    print("#### Plotting individual PHAS loci ######")
+    print("#### Plotting individual PHAS and PHAS-like loci ######")
 
     call_cols = ["identifier", "alib", "cID"]
-    missing_cols = [col for col in call_cols if col not in phas_calls.columns]
+    missing_cols = [col for col in call_cols if col not in labeled_features.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns for locus plots: {missing_cols}")
 
@@ -1409,9 +1728,6 @@ def write_individual_phas_locus_plots(
     if missing_cluster_cols:
         raise ValueError(f"clusters_data missing required columns for locus plots: {missing_cluster_cols}")
 
-    strategy = _resolve_plot_staging_strategy(final_plot_dir)
-    activated_plan = None
-
     trimmed_clusters = clusters_data[cluster_keep_cols].copy()
     grouped_by_cid = {}
     grouped_by_identifier = {}
@@ -1420,115 +1736,141 @@ def write_individual_phas_locus_plots(
     for (identifier_value, alib_value), subdf in trimmed_clusters.groupby(["identifier", "alib"], sort=False):
         grouped_by_identifier[(str(identifier_value).strip(), str(alib_value).strip())] = subdf.copy()
 
-    phas_calls = phas_calls.drop_duplicates(subset=call_cols, keep="first").reset_index(drop=True)
-    raw_tasks = []
-    for row in phas_calls.itertuples(index=False):
-        identifier_value = str(getattr(row, "identifier")).strip()
-        alib_value = str(getattr(row, "alib")).strip()
-        cid_value = str(getattr(row, "cID")).strip()
-
-        cluster_df = grouped_by_cid.get((cid_value, alib_value))
-        if cluster_df is None:
-            cluster_df = grouped_by_identifier.get((identifier_value, alib_value))
-
-        raw_tasks.append(
-            {
-                "filename": f"{_sanitize_plot_name(alib_value)}__{_sanitize_plot_name(identifier_value)}.png",
-                "title_text": f"{alib_value} | {identifier_value} | {phase_value}-$\\it{{PHAS}}$",
-                "identifier_text": identifier_value,
-                "cid_value": cid_value,
-                "alib_value": alib_value,
-                "phase": int(phase_value),
-                "Howell_exact_support_score": getattr(row, "Howell_exact_support_score", np.nan),
-                "Howell_ambiguity_count": getattr(row, "Howell_ambiguity_count", np.nan),
-                "Howell_alt_register_count": getattr(row, "Howell_alt_register_count", np.nan),
-                "Howell_overlap_margin": getattr(row, "Howell_overlap_margin", np.nan),
-                "Howell_extension_window_count": getattr(row, "Howell_extension_window_count", np.nan),
-                "Howell_extension_span_nt": getattr(row, "Howell_extension_span_nt", np.nan),
-                "Howell_origin_window_count": getattr(row, "Howell_origin_window_count", np.nan),
-                "Howell_origin_frame_count": getattr(row, "Howell_origin_frame_count", np.nan),
-                "Howell_origin_margin": getattr(row, "Howell_origin_margin", np.nan),
-                "Howell_origin_class": getattr(row, "Howell_origin_class", np.nan),
-                "Howell_additional_peak_count": getattr(row, "Howell_additional_peak_count", np.nan),
-                "Howell_additional_peak_best_score": getattr(row, "Howell_additional_peak_best_score", np.nan),
-                "cluster_rows": [] if cluster_df is None else cluster_df.to_dict("records"),
-            }
-        )
-
-    if not raw_tasks:
-        shutil.rmtree(final_plot_dir, ignore_errors=True)
-        _write_phasirna_export(phasirna_out, [])
-        print("[INFO] No PHAS locus plot tasks were produced.")
-        print(f"[INFO] Wrote 0 phase-length in-register phasiRNA row(s) to {phasirna_out}")
-        return
-
-    activated_plan = _activate_plot_staging(final_plot_dir, strategy)
-    _persist_plot_staging_plan(activated_plan)
-
-    if activated_plan["mode"] == "local":
-        print(
-            f"[INFO] Plot staging mode={activated_plan['mode']} "
-            f"(scratch={activated_plan['staging_root']}, final={activated_plan['final_plot_dir']})."
-        )
-    elif strategy["requested_mode"] == "local" and not strategy.get("staging_root"):
-        print("[WARN] Local plot staging was requested but no writable scratch directory was found; writing plots directly.")
-
-    tasks = []
-    for task in raw_tasks:
-        payload = dict(task)
-        payload["plot_path"] = os.path.join(activated_plan["plot_dir"], task["filename"])
-        tasks.append(payload)
-
-    analysis_worker_cap = _resolve_locus_plot_worker_cap(len(tasks), direct_remote=False)
-    prepared_results = run_parallel_with_progress(
-        _analyze_single_locus,
-        tasks,
-        desc="Preparing PHAS locus plot data",
-        min_chunk=1,
-        batch_factor=1.0,
-        unit="file",
-        kind="compute",
-        initial_worker_cap=analysis_worker_cap,
-        max_worker_cap=analysis_worker_cap,
-        adaptive_recovery=False,
-    )
-    _raise_parallel_failures(prepared_results, stage_name="PHAS locus analysis")
-
-    plot_payloads = []
-    export_rows = []
-    for res in prepared_results or []:
-        if not isinstance(res, dict):
+    for spec in bucket_specs:
+        final_plot_dir = _join_outdir(job_outdir, spec["plot_dir"])
+        phasirna_out = _join_outdir(job_outdir, spec["export_name"])
+        bucket_calls = labeled_features.loc[final_class_series == spec["final_class"]].copy()
+        if bucket_calls.empty:
+            shutil.rmtree(final_plot_dir, ignore_errors=True)
+            _write_phasirna_export(phasirna_out, [])
+            print(f"[INFO] Wrote 0 phase-length in-register phasiRNA row(s) to {phasirna_out}")
             continue
-        plot_payloads.append(res.get("plot_payload", {}))
-        export_rows.extend(res.get("phasiRNA_rows", []) or [])
 
-    export_count = _write_phasirna_export(phasirna_out, export_rows)
-    print(f"[INFO] Wrote {export_count} phase-length in-register phasiRNA row(s) to {phasirna_out}")
+        bucket_calls = bucket_calls.drop_duplicates(subset=call_cols, keep="first").reset_index(drop=True)
+        raw_tasks = []
+        for row in bucket_calls.itertuples(index=False):
+            identifier_value = str(getattr(row, "identifier")).strip()
+            alib_value = str(getattr(row, "alib")).strip()
+            cid_value = str(getattr(row, "cID")).strip()
 
-    render_worker_cap = _resolve_locus_plot_worker_cap(
-        len(plot_payloads),
-        direct_remote=activated_plan["mode"] == "direct" and activated_plan.get("is_remote_output", False),
-    )
+            cluster_df = grouped_by_cid.get((cid_value, alib_value))
+            if cluster_df is None:
+                cluster_df = grouped_by_identifier.get((identifier_value, alib_value))
 
-    try:
-        render_results = run_parallel_with_progress(
-            _write_single_locus_plot,
-            plot_payloads,
-            desc="Writing PHAS locus plots",
+            raw_tasks.append(
+                {
+                    "filename": f"{_sanitize_plot_name(alib_value)}__{_sanitize_plot_name(identifier_value)}.png",
+                    "title_text": _format_locus_title(
+                        alib_value,
+                        identifier_value,
+                        phase_value,
+                        spec["display_class"],
+                    ),
+                    "identifier_text": identifier_value,
+                    "cid_value": cid_value,
+                    "alib_value": alib_value,
+                    "phase": int(phase_value),
+                    "Howell_exact_support_score": getattr(row, "Howell_exact_support_score", np.nan),
+                    "Peak_Howell_score": getattr(row, "Peak_Howell_score", np.nan),
+                    "Howell_ambiguity_count": getattr(row, "Howell_ambiguity_count", np.nan),
+                    "Howell_alt_register_count": getattr(row, "Howell_alt_register_count", np.nan),
+                    "Howell_overlap_margin": getattr(row, "Howell_overlap_margin", np.nan),
+                    "Howell_extension_window_count": getattr(row, "Howell_extension_window_count", np.nan),
+                    "Howell_extension_span_nt": getattr(row, "Howell_extension_span_nt", np.nan),
+                    "Howell_origin_window_count": getattr(row, "Howell_origin_window_count", np.nan),
+                    "Howell_origin_frame_count": getattr(row, "Howell_origin_frame_count", np.nan),
+                    "Howell_origin_margin": getattr(row, "Howell_origin_margin", np.nan),
+                    "Howell_origin_class": getattr(row, "Howell_origin_class", np.nan),
+                    "Howell_additional_peak_count": getattr(row, "Howell_additional_peak_count", np.nan),
+                    "Howell_additional_peak_best_score": getattr(row, "Howell_additional_peak_best_score", np.nan),
+                    "Howell_crowding_window_count": getattr(row, "Howell_crowding_window_count", np.nan),
+                    "Howell_crowding_best_score": getattr(row, "Howell_crowding_best_score", np.nan),
+                    "Howell_crowding_score_gap": getattr(row, "Howell_crowding_score_gap", np.nan),
+                    "secondary_peak_ratio": getattr(row, "secondary_peak_ratio", np.nan),
+                    "final_class": getattr(row, "final_class", getattr(row, "label", "non-PHAS")),
+                    "report_label": getattr(row, "report_label", getattr(row, "label", "non-PHAS")),
+                    "qc_reason": getattr(row, "qc_reason", ""),
+                    "cluster_rows": [] if cluster_df is None else cluster_df.to_dict("records"),
+                }
+            )
+
+        if not raw_tasks:
+            shutil.rmtree(final_plot_dir, ignore_errors=True)
+            _write_phasirna_export(phasirna_out, [])
+            print(f"[INFO] Wrote 0 phase-length in-register phasiRNA row(s) to {phasirna_out}")
+            continue
+
+        strategy = _resolve_plot_staging_strategy(final_plot_dir)
+        activated_plan = _activate_plot_staging(final_plot_dir, strategy)
+        _persist_plot_staging_plan(activated_plan)
+
+        if activated_plan["mode"] == "local":
+            print(
+                f"[INFO] Plot staging mode={activated_plan['mode']} "
+                f"(scratch={activated_plan['staging_root']}, final={activated_plan['final_plot_dir']})."
+            )
+        elif strategy["requested_mode"] == "local" and not strategy.get("staging_root"):
+            print("[WARN] Local plot staging was requested but no writable scratch directory was found; writing plots directly.")
+
+        tasks = []
+        for task in raw_tasks:
+            payload = dict(task)
+            payload["plot_path"] = os.path.join(activated_plan["plot_dir"], task["filename"])
+            tasks.append(payload)
+
+        analysis_worker_cap = _resolve_locus_plot_worker_cap(len(tasks), direct_remote=False)
+        prepared_results = run_parallel_with_progress(
+            _analyze_single_locus,
+            tasks,
+            desc=f"Preparing {spec['display_class']} locus plot data",
             min_chunk=1,
             batch_factor=1.0,
             unit="file",
-            kind="plot",
-            initial_worker_cap=render_worker_cap,
-            max_worker_cap=render_worker_cap,
+            kind="compute",
+            initial_worker_cap=analysis_worker_cap,
+            max_worker_cap=analysis_worker_cap,
             adaptive_recovery=False,
         )
-        _raise_parallel_failures(render_results, stage_name="PHAS locus plot rendering")
+        _raise_parallel_failures(prepared_results, stage_name=f"{spec['display_class']} locus analysis")
 
-        if activated_plan["mode"] == "local":
-            _finalize_staged_plot_dir(activated_plan["plot_dir"], activated_plan["final_plot_dir"])
-    finally:
-        if activated_plan.get("staging_run_dir"):
-            shutil.rmtree(activated_plan["staging_run_dir"], ignore_errors=True)
+        plot_payloads = []
+        export_rows = []
+        for res in prepared_results or []:
+            if not isinstance(res, dict):
+                continue
+            plot_payloads.append(res.get("plot_payload", {}))
+            export_rows.extend(res.get("phasiRNA_rows", []) or [])
 
-    print(f"[INFO] Wrote {len(plot_payloads)} individual PHAS locus plot(s) to {activated_plan['final_plot_dir']}")
+        export_count = _write_phasirna_export(phasirna_out, export_rows)
+        print(f"[INFO] Wrote {export_count} phase-length in-register phasiRNA row(s) to {phasirna_out}")
+
+        render_worker_cap = _resolve_locus_plot_worker_cap(
+            len(plot_payloads),
+            direct_remote=activated_plan["mode"] == "direct" and activated_plan.get("is_remote_output", False),
+        )
+
+        try:
+            render_results = run_parallel_with_progress(
+                _write_single_locus_plot,
+                plot_payloads,
+                desc=f"Writing {spec['display_class']} locus plots",
+                min_chunk=1,
+                batch_factor=1.0,
+                unit="file",
+                kind="plot",
+                initial_worker_cap=render_worker_cap,
+                max_worker_cap=render_worker_cap,
+                adaptive_recovery=False,
+            )
+            _raise_parallel_failures(render_results, stage_name=f"{spec['display_class']} locus plot rendering")
+
+            if activated_plan["mode"] == "local":
+                _finalize_staged_plot_dir(activated_plan["plot_dir"], activated_plan["final_plot_dir"])
+        finally:
+            if activated_plan.get("staging_run_dir"):
+                shutil.rmtree(activated_plan["staging_run_dir"], ignore_errors=True)
+
+        print(
+            f"[INFO] Wrote {len(plot_payloads)} individual {spec['display_class']} locus plot(s) "
+            f"to {activated_plan['final_plot_dir']}"
+        )

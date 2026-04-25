@@ -11,7 +11,7 @@ import multiprocessing
 from collections import OrderedDict
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, getmd5, sig_key, stage_signature
+from phasis.cache import MemCache, default_memfile_path, getmd5, sig_key, stage_signature
 from phasis.parallel import run_parallel_with_progress, make_pool
 
 
@@ -499,7 +499,7 @@ def clusterprocess(libs_poscountdict, clustfolder):
     else:
         sources = list(libs_poscountdict)
 
-    mem_file = rt.memFile or MEM_FILE_DEFAULT
+    mem_file = rt.memFile or default_memfile_path()
     phase = int(rt.phase)
     clustbuffer = int(rt.clustbuffer)
 

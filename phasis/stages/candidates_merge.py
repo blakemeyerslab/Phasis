@@ -6,7 +6,7 @@ from functools import partial
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
+from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 
@@ -62,7 +62,7 @@ def loci_table_from_clusters(
     """
     print("### Building loci table from clusters per chromosome ###")
 
-    memFile_local = memFile or getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
+    memFile_local = memFile or getattr(rt, "memFile", None) or default_memfile_path()
     outfname = outfname or phase2_basename("candidate.loci_table.tab")
 
     # Resolve minClusterLength early for both signature and computation
@@ -137,7 +137,7 @@ def merge_candidate_clusters_across_libs(
     """
     print("### Merging candidate clusters across libraries (per chromosome) ###")
 
-    memFile_local = memFile or getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
+    memFile_local = memFile or getattr(rt, "memFile", None) or default_memfile_path()
     concat_local = bool(getattr(rt, "concat_libs", False)) if concat_libs is None else bool(concat_libs)
 
     cache = MemCache.load(memFile_local)

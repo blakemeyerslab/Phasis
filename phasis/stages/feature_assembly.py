@@ -9,13 +9,14 @@ import numpy as np
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
+from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 DCL_OVERHANG = 3          # 2-nt 3' overhang in duplex -> 3-nt genomic offset
 WINDOW_MULTIPLIER = 10    # 10 cycles per window
-FEATURE_SCHEMA_VERSION = 5
+FEATURE_SCHEMA_VERSION = 6
 HOWELL_AMBIGUITY_FRACTION = 0.90
+HOWELL_CROWDING_SCORE_GAP = 4.0
 
 
 # ---- legacy schema (KNN-compatible) ---------------------------------------
@@ -48,6 +49,9 @@ FEATURE_COLS = ['identifier',
  'Howell_origin_class',
  'Howell_additional_peak_count',
  'Howell_additional_peak_best_score',
+ 'Howell_crowding_window_count',
+ 'Howell_crowding_best_score',
+ 'Howell_crowding_score_gap',
  'w_Howell_score_strict',
  'w_window_start_strict',
  'w_window_end_strict',
@@ -83,19 +87,11 @@ def _min_howell_score_value(default: float = 12.5) -> float:
 
 
 def _get_memfile() -> str:
-    """Return runtime memFile; create a reasonable default if missing."""
+    """Return runtime memFile; default to the run directory if missing."""
     mem = getattr(rt, "memFile", None)
     if mem:
         return str(mem)
-
-    outdir = getattr(rt, "outdir", None)
-    if outdir:
-        outdir_abs = os.path.abspath(os.path.expanduser(str(outdir)))
-        os.makedirs(outdir_abs, exist_ok=True)
-        mem = os.path.join(outdir_abs, MEM_FILE_DEFAULT)
-    else:
-        mem = MEM_FILE_DEFAULT
-
+    mem = default_memfile_path()
     rt.memFile = mem
     return mem
 
@@ -345,6 +341,15 @@ def _windows_overlap(start_a, end_a, start_b, end_b) -> bool:
     return int(max(start_a, start_b)) <= int(min(end_a, end_b))
 
 
+def _window_scan_bounds(positions, win_size, seq_start=None, seq_end=None):
+    lower_bound = seq_start if seq_start is not None else positions[0]
+    upper_bound = (seq_end - win_size + 1) if seq_end is not None else positions[-1] - win_size + 1
+    if upper_bound < lower_bound:
+        lower_bound = positions[0]
+        upper_bound = lower_bound
+    return int(lower_bound), int(upper_bound)
+
+
 def _canonical_exact_frame(
     *,
     window_start: int | None,
@@ -372,6 +377,119 @@ def _canonical_exact_frame(
         return int((int(window_start) + reg_value) % phase_local)
     except Exception:
         return None
+
+
+def _exact_register_origin(
+    *,
+    window_start: int | None,
+    window_end: int | None,
+    exact_best_register,
+    strand_code: str | None,
+):
+    try:
+        reg_value = int(exact_best_register)
+    except Exception:
+        return None
+
+    try:
+        strand_text = str(strand_code or "").strip().lower()
+        if strand_text == "c":
+            return int(window_end) - reg_value
+        return int(window_start) + reg_value
+    except Exception:
+        return None
+
+
+def _enumerate_relaxed_candidate_windows(
+    pos_abun,
+    phase,
+    win_size,
+    seq_start=None,
+    seq_end=None,
+    *,
+    forward=True,
+):
+    positions = sorted(pos_abun.keys())
+    if not positions:
+        return [], None
+
+    lower_bound, upper_bound = _window_scan_bounds(
+        positions,
+        win_size,
+        seq_start=seq_start,
+        seq_end=seq_end,
+    )
+
+    best_score = -float("inf")
+    best_detail = None
+    candidate_windows = []
+    phase_local = int(phase)
+
+    for win_start in range(lower_bound, upper_bound + 1):
+        win_end = win_start + win_size - 1
+        window_positions = [p for p in positions if win_start <= p <= win_end]
+        relaxed_summary = _score_window_registers(
+            window_positions,
+            pos_abun,
+            win_start,
+            win_end,
+            phase_local,
+            forward=forward,
+        )
+        exact_summary = _score_window_registers(
+            window_positions,
+            pos_abun,
+            win_start,
+            win_end,
+            phase_local,
+            forward=forward,
+            exact_only=True,
+        )
+        exact_best_register = exact_summary.get("best_register")
+        strand_code = "w" if forward else "c"
+        candidate = {
+            "strand": strand_code,
+            "anchor_position": int(win_start if forward else win_end),
+            "window_start": int(win_start),
+            "window_end": int(win_end),
+            "score": float(relaxed_summary["score"]),
+            "best_register": relaxed_summary.get("best_register"),
+            "exact_score": float(exact_summary["score"]),
+            "exact_best_register": exact_best_register,
+            "exact_frame": _canonical_exact_frame(
+                window_start=win_start,
+                window_end=win_end,
+                exact_best_register=exact_best_register,
+                strand_code=strand_code,
+                phase=phase_local,
+            ),
+            "exact_register_position": _exact_register_origin(
+                window_start=win_start,
+                window_end=win_end,
+                exact_best_register=exact_best_register,
+                strand_code=strand_code,
+            ),
+        }
+        candidate_windows.append(candidate)
+
+        if candidate["score"] > best_score:
+            best_score = candidate["score"]
+            best_detail = {
+                "strand": strand_code,
+                "anchor_position": candidate["anchor_position"],
+                "window_start": candidate["window_start"],
+                "window_end": candidate["window_end"],
+                "score": candidate["score"],
+                "best_register": candidate["best_register"],
+                "register_scores": list(relaxed_summary.get("register_scores") or []),
+                "exact_score": candidate["exact_score"],
+                "exact_best_register": candidate["exact_best_register"],
+                "exact_register_scores": list(exact_summary.get("register_scores") or []),
+                "exact_frame": candidate["exact_frame"],
+                "exact_register_position": candidate["exact_register_position"],
+            }
+
+    return candidate_windows, best_detail
 
 
 def _summarize_peak_howell_ambiguity(
@@ -508,17 +626,34 @@ def _best_sliding_window_score_generic(
             return 0.0, None, None, None
         return 0.0, None, None
 
-    lower_bound = seq_start if seq_start is not None else positions[0]
-    upper_bound = (seq_end - win_size + 1) if seq_end is not None else positions[-1] - win_size + 1
-    if upper_bound < lower_bound:
-        lower_bound = positions[0]
-        upper_bound = lower_bound
+    lower_bound, upper_bound = _window_scan_bounds(
+        positions,
+        win_size,
+        seq_start=seq_start,
+        seq_end=seq_end,
+    )
+
+    if return_detail:
+        candidate_windows, best_detail = _enumerate_relaxed_candidate_windows(
+            pos_abun,
+            int(phase),
+            win_size,
+            seq_start=lower_bound,
+            seq_end=upper_bound + win_size - 1,
+            forward=forward,
+        )
+        if best_detail is None:
+            return 0.0, None, None, None
+        detail = _summarize_peak_howell_ambiguity(best_detail, candidate_windows)
+        return (
+            float(best_detail["score"]),
+            int(best_detail["window_start"]),
+            int(best_detail["window_end"]),
+            detail,
+        )
 
     best_score = -float("inf")
     best_window = (None, None)
-    best_detail = None
-    candidate_windows = [] if return_detail else None
-    phase_local = int(phase)
 
     for win_start in range(lower_bound, upper_bound + 1):
         win_end = win_start + win_size - 1
@@ -532,67 +667,95 @@ def _best_sliding_window_score_generic(
             forward=forward,
         )
         score = float(relaxed_summary["score"])
-        exact_summary = None
-        if return_detail:
-            exact_summary = _score_window_registers(
-                window_positions,
-                pos_abun,
-                win_start,
-                win_end,
-                int(phase),
-                forward=forward,
-                exact_only=True,
-            )
-
-        if return_detail:
-            candidate_windows.append(
-                {
-                    "strand": "w" if forward else "c",
-                    "window_start": int(win_start),
-                    "window_end": int(win_end),
-                    "score": float(score),
-                    "best_register": relaxed_summary.get("best_register"),
-                    "exact_score": float(exact_summary["score"]),
-                    "exact_best_register": exact_summary.get("best_register"),
-                    "exact_frame": _canonical_exact_frame(
-                        window_start=win_start,
-                        window_end=win_end,
-                        exact_best_register=exact_summary.get("best_register"),
-                        strand_code="w" if forward else "c",
-                        phase=phase_local,
-                    ),
-                }
-            )
-
         if score > best_score:
             best_score = score
             best_window = (win_start, win_end)
-            if return_detail:
-                best_detail = {
-                    "strand": "w" if forward else "c",
-                    "window_start": int(win_start),
-                    "window_end": int(win_end),
-                    "score": float(score),
-                    "best_register": relaxed_summary.get("best_register"),
-                    "register_scores": list(relaxed_summary.get("register_scores") or []),
-                    "exact_score": float(exact_summary["score"]),
-                    "exact_best_register": exact_summary.get("best_register"),
-                    "exact_register_scores": list(exact_summary.get("register_scores") or []),
-                    "exact_frame": _canonical_exact_frame(
-                        window_start=win_start,
-                        window_end=win_end,
-                        exact_best_register=exact_summary.get("best_register"),
-                        strand_code="w" if forward else "c",
-                        phase=phase_local,
-                    ),
-                }
 
     resolved_score = best_score if best_score != -float("inf") else 0.0
-    if not return_detail:
-        return resolved_score, best_window[0], best_window[1]
+    return resolved_score, best_window[0], best_window[1]
 
-    detail = _summarize_peak_howell_ambiguity(best_detail, candidate_windows)
-    return resolved_score, best_window[0], best_window[1], detail
+
+def collect_exact_only_peak_competitors(
+    aclust: pd.DataFrame,
+    *,
+    phase: int | None = None,
+    threshold_fraction: float = HOWELL_AMBIGUITY_FRACTION,
+) -> dict:
+    ph = int(phase) if phase is not None else _phase_value()
+    win_size = WINDOW_MULTIPLIER * int(ph)
+    seq_start = int(aclust["pos"].min())
+    seq_end = int(aclust["pos"].max())
+    w_mask, c_mask = _strand_masks(aclust)
+
+    all_candidates = []
+    winner_detail = None
+    winner_score = -float("inf")
+
+    for strand_code, mask, forward in (("w", w_mask, True), ("c", c_mask, False)):
+        if not mask.any():
+            continue
+        pos_abun = _build_pos_abun_exact_phase(aclust.loc[mask], seq_start, seq_end, int(ph))
+        if not pos_abun:
+            continue
+        candidates, best_detail = _enumerate_relaxed_candidate_windows(
+            pos_abun,
+            int(ph),
+            win_size,
+            seq_start=seq_start,
+            seq_end=seq_end,
+            forward=forward,
+        )
+        all_candidates.extend(candidates)
+        if best_detail is None:
+            continue
+        score = float(best_detail.get("score", 0.0) or 0.0)
+        if score >= winner_score:
+            winner_score = score
+            winner_detail = best_detail
+
+    summary = _summarize_peak_howell_ambiguity(
+        winner_detail,
+        all_candidates,
+        threshold_fraction=threshold_fraction,
+    )
+    if not winner_detail or not summary:
+        return {
+            "winner_detail": winner_detail,
+            "summary": summary,
+            "competing_windows": [],
+        }
+
+    exact_support_score = float(summary.get("Howell_exact_support_score", 0.0) or 0.0)
+    winner_exact_frame = summary.get("winner_exact_frame")
+    threshold_score = float(threshold_fraction) * exact_support_score
+    competing_windows = []
+    for candidate in all_candidates:
+        if str(candidate.get("strand")) != str(winner_detail.get("strand")):
+            continue
+        if (
+            int(candidate.get("window_start")) == int(winner_detail.get("window_start"))
+            and int(candidate.get("window_end")) == int(winner_detail.get("window_end"))
+        ):
+            continue
+        if not _windows_overlap(
+            candidate.get("window_start"),
+            candidate.get("window_end"),
+            winner_detail.get("window_start"),
+            winner_detail.get("window_end"),
+        ):
+            continue
+        candidate_score = float(candidate.get("exact_score", 0.0) or 0.0)
+        if candidate_score < threshold_score:
+            continue
+        if candidate.get("exact_frame") == winner_exact_frame:
+            continue
+        competing_windows.append(dict(candidate))
+
+    return {
+        "winner_detail": winner_detail,
+        "summary": summary,
+        "competing_windows": competing_windows,
+    }
 
 def best_sliding_window_score_forward(pos_abun, phase, win_size, seq_start=None, seq_end=None):
     return _best_sliding_window_score_generic(
@@ -841,6 +1004,147 @@ def _same_trace_window(a: dict | None, b: dict | None) -> bool:
         )
     except Exception:
         return False
+
+
+def _normalize_trace_strand_code(strand_code) -> str:
+    text = str(strand_code or "").strip().lower()
+    if text in {"c", "-", "crick", "0", "false"}:
+        return "c"
+    return "w"
+
+
+def _is_forward_trace_strand(strand_code) -> bool:
+    return _normalize_trace_strand_code(strand_code) == "w"
+
+
+def _build_relaxed_trace_register_origin(peak_row: dict | None, phase: int, strand_code) -> int | None:
+    if not peak_row:
+        return None
+    best_register = peak_row.get("best_register")
+    if best_register is None:
+        return None
+
+    if _is_forward_trace_strand(strand_code):
+        return int(peak_row["window_start"]) + int(best_register)
+    return int(peak_row["window_end"]) - int(best_register)
+
+
+def _classify_relaxed_trace_relation(anchor_position: int, register_origin: int | None, phase: int):
+    if register_origin is None:
+        return "other", None
+
+    delta = int(anchor_position) - int(register_origin)
+    remainder = delta % int(phase)
+    if remainder == 0:
+        return "exact", int(anchor_position)
+    if remainder == 1:
+        return "offset", int(anchor_position) - 1
+    if remainder == int(phase) - 1:
+        return "offset", int(anchor_position) + 1
+    return "other", None
+
+
+def classify_browser_style_relaxed_trace(
+    trace: dict,
+    *,
+    phase: int | None = None,
+    crowded_gap: float = HOWELL_CROWDING_SCORE_GAP,
+) -> dict:
+    """
+    Classify relaxed trace windows using browser-style semantics.
+
+    Returns a dict with per-strand classified rows plus crowding metrics derived
+    from non-in-phase windows on the winning strand that overlap the relaxed
+    HPSP window and stay within the requested Howell score gap.
+    """
+    ph = int(phase) if phase is not None else _phase_value()
+    result = {
+        "w": [],
+        "c": [],
+        "strand_hpsp_rows": {"w": None, "c": None},
+        "strand_register_origins": {"w": None, "c": None},
+        "winner_strand": None,
+        "winner_row": None,
+        "Howell_crowding_window_count": 0,
+        "Howell_crowding_best_score": np.nan,
+        "Howell_crowding_score_gap": np.nan,
+        "crowding_rows": [],
+    }
+
+    winner_strand = None
+    winner_row = None
+    winner_score = float("-inf")
+    for strand_code in ("w", "c"):
+        peak_row = _find_relaxed_trace_peak_row(trace.get(strand_code, []) or [])
+        result["strand_hpsp_rows"][strand_code] = peak_row
+        register_origin = _build_relaxed_trace_register_origin(peak_row, ph, strand_code)
+        result["strand_register_origins"][strand_code] = register_origin
+        if peak_row is None:
+            continue
+        try:
+            peak_score = float(peak_row.get("score", 0.0) or 0.0)
+        except Exception:
+            peak_score = 0.0
+        if peak_score >= winner_score:
+            winner_score = peak_score
+            winner_strand = strand_code
+            winner_row = peak_row
+
+    result["winner_strand"] = winner_strand
+    result["winner_row"] = winner_row
+
+    for strand_code in ("w", "c"):
+        peak_row = result["strand_hpsp_rows"][strand_code]
+        register_origin = result["strand_register_origins"][strand_code]
+        strand_rows = []
+        for row in trace.get(strand_code, []) or []:
+            try:
+                anchor_position = int(row.get("anchor_position"))
+            except Exception:
+                continue
+            relation, expected_position = _classify_relaxed_trace_relation(
+                anchor_position,
+                register_origin,
+                ph,
+            )
+            classified = dict(row)
+            classified["strand"] = strand_code
+            classified["phase_relation"] = relation
+            classified["expected_register_position"] = expected_position
+            classified["register_origin"] = register_origin
+            classified["is_hpsp"] = _same_trace_window(row, peak_row)
+            strand_rows.append(classified)
+        result[strand_code] = strand_rows
+
+    crowding_rows = []
+    if winner_row is not None and winner_strand is not None:
+        for row in result.get(winner_strand, []) or []:
+            if row.get("is_hpsp"):
+                continue
+            if str(row.get("phase_relation")) != "other":
+                continue
+            if not _windows_overlap(
+                row.get("window_start"),
+                row.get("window_end"),
+                winner_row.get("window_start"),
+                winner_row.get("window_end"),
+            ):
+                continue
+            try:
+                candidate_score = float(row.get("score", 0.0) or 0.0)
+            except Exception:
+                continue
+            if abs(float(winner_score) - candidate_score) > float(crowded_gap):
+                continue
+            crowding_rows.append(dict(row))
+
+    result["crowding_rows"] = crowding_rows
+    result["Howell_crowding_window_count"] = int(len(crowding_rows))
+    if crowding_rows:
+        best_crowding_score = max(float(row.get("score", 0.0) or 0.0) for row in crowding_rows)
+        result["Howell_crowding_best_score"] = float(best_crowding_score)
+        result["Howell_crowding_score_gap"] = float(float(winner_score) - best_crowding_score)
+    return result
 
 
 def _group_trace_rows_by_overlap(trace_rows, *, score_cutoff: float) -> list[dict]:
@@ -1198,6 +1502,7 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
          peak_howell_detail) = compute_phasing_score_Howell(aclust, return_detail=True)
         Peak_Howell = None if (w_Howell is None and c_Howell is None) else max([x for x in (w_Howell, c_Howell) if x is not None])
         relaxed_trace = enumerate_relaxed_howell_trace(aclust, phase=ph)
+        browser_trace_summary = classify_browser_style_relaxed_trace(relaxed_trace, phase=ph)
         additional_peak_summary = summarize_relaxed_trace_subregions(
             relaxed_trace,
             score_cutoff=_min_howell_score_value(),
@@ -1226,6 +1531,9 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
             origin_class = np.nan
         additional_peak_count = additional_peak_summary.get("Howell_additional_peak_count", np.nan)
         additional_peak_best_score = additional_peak_summary.get("Howell_additional_peak_best_score", np.nan)
+        crowding_window_count = browser_trace_summary.get("Howell_crowding_window_count", 0)
+        crowding_best_score = browser_trace_summary.get("Howell_crowding_best_score", np.nan)
+        crowding_score_gap = browser_trace_summary.get("Howell_crowding_score_gap", np.nan)
 
         # Howell (classic strict)
         (w_Howell_strict, (w_s_strict, w_e_strict),
@@ -1242,6 +1550,7 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
             exact_support_score, ambiguity_count, alt_register_count, overlap_margin,
             extension_window_count, extension_span_nt, origin_window_count, origin_frame_count, origin_margin, origin_class,
             additional_peak_count, additional_peak_best_score,
+            crowding_window_count, crowding_best_score, crowding_score_gap,
             # classic (strict)
             w_Howell_strict, w_s_strict, w_e_strict, c_Howell_strict, c_s_strict, c_e_strict, Peak_Howell_strict
         ])

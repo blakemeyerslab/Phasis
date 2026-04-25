@@ -6,7 +6,7 @@ import gzip
 import shutil
 
 from phasis import runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, compute_md5_str, sig_key, stage_signature
+from phasis.cache import MemCache, compute_md5_str, default_memfile_path, sig_key, stage_signature
 from phasis.parallel import PPBalance, optimize, run_parallel_with_progress
 
 
@@ -17,7 +17,7 @@ clustbuffer = None
 phase = None
 runtype = None
 outdir = None
-memFile = MEM_FILE_DEFAULT
+memFile = default_memfile_path()
 
 MAPPING_SECTION = "MAPPING"
 MAPPING_IO_MAXTASKSPERCHILD = 64
@@ -403,10 +403,7 @@ def sync_from_runtime() -> None:
     if mem_override:
         memFile = mem_override
     else:
-        if outdir:
-            memFile = os.path.join(outdir, MEM_FILE_DEFAULT)
-        else:
-            memFile = MEM_FILE_DEFAULT
+        memFile = default_memfile_path()
         rt.memFile = memFile
 
 
