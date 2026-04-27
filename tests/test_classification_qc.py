@@ -40,6 +40,9 @@ def _base_feature_row(**overrides):
         "Howell_alt_register_count": 0,
         "Howell_additional_peak_count": 0,
         "Howell_additional_peak_best_score": np.nan,
+        "Howell_overlapping_alt_count": 0,
+        "Howell_overlapping_alt_best_score": np.nan,
+        "Howell_overlapping_alt_best_shift_nt": np.nan,
         "Howell_crowding_window_count": 0,
         "Howell_crowding_best_score": np.nan,
         "Howell_crowding_score_gap": np.nan,
@@ -132,6 +135,26 @@ class QCReclassificationTests(unittest.TestCase):
         self.assertEqual(str(out.loc[0, "final_class"]), "PHAS")
         self.assertEqual(str(out.loc[0, "report_label"]), "PHAS")
         self.assertEqual(str(out.loc[0, "qc_reason"]), "pass")
+
+    def test_moderate_score_weak_scaffold_context_becomes_phas_like(self):
+        features = pd.DataFrame(
+            [
+                _base_feature_row(
+                    Peak_Howell_score=24.0,
+                    Howell_exact_support_score=3.0,
+                    Peak_Howell_score_strict=7.0,
+                    Howell_overlapping_alt_count=2,
+                    Howell_overlapping_alt_best_score=21.0,
+                    Howell_overlapping_alt_best_shift_nt=12.0,
+                    complexity=0.24,
+                )
+            ]
+        )
+        out = classify.apply_qc_reclassification(features, phase=24)
+
+        self.assertEqual(str(out.loc[0, "final_class"]), "PHAS-like")
+        self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
+        self.assertEqual(str(out.loc[0, "qc_reason"]), "weak_scaffold_alternative_context")
 
     def test_ambiguous_origin_remains_phas_in_v1(self):
         features = pd.DataFrame(
@@ -257,6 +280,8 @@ class QCOutputTests(unittest.TestCase):
             self.assertEqual(str(row["final_class"]), "PHAS-like")
             self.assertEqual(str(row["qc_reason"]), "low_score_crowded_window_context")
             self.assertEqual(int(row["Howell_crowding_window_count"]), 7)
+            self.assertIn("Howell_exact_relaxed_ratio", qc_df.columns)
+            self.assertIn("Howell_strict_relaxed_ratio", qc_df.columns)
 
 
 if __name__ == "__main__":

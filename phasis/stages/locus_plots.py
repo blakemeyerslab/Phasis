@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import colorsys
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
+from matplotlib.legend_handler import HandlerTuple
 from matplotlib.ticker import FuncFormatter
 
 import phasis.runtime as rt
@@ -20,6 +22,7 @@ from phasis.stages import feature_assembly as st_feat
 MAX_LOCUS_PLOT_WORKERS = 10
 REMOTE_DIRECT_LOCUS_PLOT_WORKER_CAP = 4
 GUIDE_CYCLES = 10
+MAX_COLORED_ALTERNATIVE_CANDIDATES = 6
 PLOT_STAGING_CHOICES = frozenset({"auto", "local", "direct"})
 LOCUS_PLOT_MODE_CHOICES = frozenset({"clean", "debug"})
 REMOTE_FILESYSTEM_TYPES = frozenset(
@@ -93,6 +96,14 @@ EXTENDED_GUIDE_COLOR = "#000000"
 DETACHABLE_STRIP_BG = "#FAFAFA"
 DETACHABLE_SEPARATOR_COLOR = "#9A9A9A"
 DETACHABLE_SEPARATOR_STYLE = (0, (1.2, 2.2))
+ALTERNATIVE_CATEGORY_LABELS = {
+    "other_local_peak": "Other local peaks",
+    "overlapping_alternative": "Overlapping alternative candidates",
+}
+ALTERNATIVE_CATEGORY_PRIORITY = {
+    "overlapping_alternative": 0,
+    "other_local_peak": 1,
+}
 ORIGIN_CLASS_LABELS = {
     "insufficient_exact_support": "Insufficient exact support",
     "unique_origin": "Unique origin",
@@ -149,6 +160,83 @@ def _parse_identifier_interval(identifier_text: str):
 
 def _phase_color_hex(phase_value: int) -> str:
     return PHASE_PANEL_COLORS.get(int(phase_value), "#4C78A8")
+
+
+def _adjust_phase_family_color(
+    base_hex: str,
+    *,
+    hue_shift: float = 0.0,
+    light_delta: float = 0.0,
+    sat_scale: float = 1.0,
+) -> str:
+    base_local = str(base_hex or "#4C78A8")
+    base_local = base_local.lstrip("#")
+    if len(base_local) != 6:
+        return f"#{base_local}" if base_local.startswith("#") else f"#{base_local}"
+
+    r_value = int(base_local[0:2], 16) / 255.0
+    g_value = int(base_local[2:4], 16) / 255.0
+    b_value = int(base_local[4:6], 16) / 255.0
+    hue, lightness, saturation = colorsys.rgb_to_hls(r_value, g_value, b_value)
+    hue = (hue + float(hue_shift)) % 1.0
+    lightness = min(max(lightness + float(light_delta), 0.18), 0.82)
+    saturation = min(max(saturation * float(sat_scale), 0.25), 1.0)
+    r_out, g_out, b_out = colorsys.hls_to_rgb(hue, lightness, saturation)
+    return "#{:02X}{:02X}{:02X}".format(
+        int(round(r_out * 255.0)),
+        int(round(g_out * 255.0)),
+        int(round(b_out * 255.0)),
+    )
+
+
+def _alternative_color_series(phase_value: int, category: str, *, count: int = MAX_COLORED_ALTERNATIVE_CANDIDATES) -> list[str]:
+    base_color = _phase_color_hex(phase_value)
+    category_local = str(category or "").strip()
+    if category_local == "overlapping_alternative":
+        recipes = [
+            (0.032, -0.060, 1.08),
+            (0.026, 0.015, 0.98),
+            (0.040, -0.095, 1.12),
+            (0.018, 0.075, 0.92),
+            (0.028, -0.015, 1.02),
+            (0.020, 0.115, 0.88),
+        ]
+    else:
+        recipes = [
+            (-0.012, 0.180, 0.86),
+            (-0.006, 0.105, 0.92),
+            (-0.018, 0.255, 0.80),
+            (-0.010, 0.145, 0.88),
+            (-0.016, 0.215, 0.84),
+            (-0.004, 0.065, 0.96),
+        ]
+
+    colors = []
+    for idx in range(max(int(count), 0)):
+        hue_shift, light_delta, sat_scale = recipes[idx % len(recipes)]
+        colors.append(
+            _adjust_phase_family_color(
+                base_color,
+                hue_shift=hue_shift,
+                light_delta=light_delta,
+                sat_scale=sat_scale,
+            )
+        )
+    return colors
+
+
+def _alternative_category_label(category: str) -> str:
+    return ALTERNATIVE_CATEGORY_LABELS.get(str(category or "").strip(), "Alternative candidate")
+
+
+def _format_shift_nt_text(value) -> str:
+    try:
+        shift_value = int(round(float(value)))
+    except Exception:
+        return "NA"
+    if shift_value == 0:
+        return "0 nt"
+    return f"+{shift_value} nt"
 
 
 def _read_length_color_hex(length_value) -> str:
@@ -333,7 +421,7 @@ def _draw_strand_guides(ax, guide_specs, color: str, *, upper_half: bool) -> Non
         pos = float(spec["pos"])
         is_hpsp = bool(spec.get("is_hpsp", False))
         is_extended = bool(spec.get("extended", False))
-        line_color = HPSP_RED if is_hpsp else (EXTENDED_GUIDE_COLOR if is_extended else color)
+        line_color = HPSP_RED if is_hpsp else spec.get("color", (EXTENDED_GUIDE_COLOR if is_extended else color))
         alpha_value = 0.60 if is_hpsp else (0.28 if is_extended else 0.38)
         linestyle = "--" if not is_extended else ":"
         linewidth = 0.95 if is_hpsp else (0.8 if is_extended else 0.9)
@@ -347,6 +435,59 @@ def _draw_strand_guides(ax, guide_specs, color: str, *, upper_half: bool) -> Non
             alpha=alpha_value,
             zorder=0,
         )
+
+
+def _build_colored_candidate_guide_specs(candidate: dict, phase_value: int) -> list[dict]:
+    peak_row = candidate.get("peak_row")
+    strand_code = candidate.get("strand", "w")
+    trace_rows = candidate.get("rows", [])
+    color = str(candidate.get("color", _phase_color_hex(phase_value)))
+    guide_specs = _build_score_exact_guide_specs(peak_row, phase_value, trace_rows, strand_code)
+    for spec in guide_specs:
+        spec["color"] = color
+    return guide_specs
+
+
+def _build_candidate_exact_overlay_rows(candidate: dict, phase_value: int) -> list[dict]:
+    register_origin = candidate.get("register_origin")
+    if register_origin is None:
+        return []
+
+    rows = []
+    seen = set()
+    strand_code = str(candidate.get("strand", "w"))
+    color = str(candidate.get("color", _phase_color_hex(phase_value)))
+    direction = 1.0 if _is_forward_strand(strand_code) else -1.0
+    for row in candidate.get("rows", []) or []:
+        try:
+            anchor_position = int(row.get("anchor_position"))
+            score_value = float(row.get("score", 0.0) or 0.0)
+        except Exception:
+            continue
+        relation, _expected_position = _classify_register_relation(
+            anchor_position,
+            int(register_origin),
+            int(phase_value),
+        )
+        if relation != "exact":
+            continue
+        key = (strand_code, anchor_position, round(score_value, 6), color)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "x": float(anchor_position),
+                "y": direction * score_value,
+                "edgecolor": color,
+                "facecolor": color,
+                "alpha": 0.98,
+                "linewidth": 0.8,
+                "size": 24,
+                "category": candidate.get("category"),
+            }
+        )
+    return rows
 
 
 def _build_abundance_rows(cluster_df: pd.DataFrame):
@@ -451,10 +592,76 @@ def _build_howell_rows(
     return rows, hpsp_position, hpsp_row
 
 
-def _build_plot_legend_groups(phase_value: int, *, plot_mode: str = "clean"):
+def _rank_plot_alternative_candidates(summary: dict, phase_value: int) -> list[dict]:
+    candidate_pool = []
+    for group in summary.get("additional_peak_groups", []) or []:
+        candidate = dict(group)
+        candidate["category"] = "other_local_peak"
+        candidate_pool.append(candidate)
+    for group in summary.get("overlapping_alt_groups", []) or []:
+        candidate = dict(group)
+        candidate["category"] = "overlapping_alternative"
+        candidate_pool.append(candidate)
+
+    candidate_pool.sort(
+        key=lambda item: (
+            -float(item.get("peak_score", 0.0) or 0.0),
+            ALTERNATIVE_CATEGORY_PRIORITY.get(str(item.get("category", "")).strip(), 99),
+            int(item.get("shift_nt") or 0),
+        )
+    )
+    selected = candidate_pool[:MAX_COLORED_ALTERNATIVE_CANDIDATES]
+
+    category_counts: dict[str, int] = {}
+    for candidate in selected:
+        category = str(candidate.get("category", "")).strip()
+        color_index = int(category_counts.get(category, 0))
+        category_counts[category] = color_index + 1
+        candidate["category_rank"] = color_index + 1
+        candidate["color"] = _alternative_color_series(
+            phase_value,
+            category,
+            count=MAX_COLORED_ALTERNATIVE_CANDIDATES,
+        )[color_index]
+    return selected
+
+
+def _build_alternative_plot_layers(summary: dict, phase_value: int) -> dict:
+    selected = _rank_plot_alternative_candidates(summary, phase_value)
+    guide_specs = {"w": [], "c": []}
+    overlay_rows = []
+    legend_groups = {}
+
+    grouped_candidates: dict[str, list[dict]] = {}
+    for candidate in selected:
+        category = str(candidate.get("category", "")).strip()
+        grouped_candidates.setdefault(category, []).append(candidate)
+        strand_code = _normalize_strand_code(candidate.get("strand", "w"))
+        guide_specs[strand_code].extend(_build_colored_candidate_guide_specs(candidate, phase_value))
+        overlay_rows.extend(_build_candidate_exact_overlay_rows(candidate, phase_value))
+
+    for category in ("other_local_peak", "overlapping_alternative"):
+        candidates = grouped_candidates.get(category)
+        if not candidates:
+            continue
+        legend_groups[category] = {
+            "label": _alternative_category_label(category),
+            "colors": [str(candidate.get("color", _phase_color_hex(phase_value))) for candidate in candidates],
+        }
+
+    return {
+        "selected_candidates": selected,
+        "guide_specs_w": guide_specs["w"],
+        "guide_specs_c": guide_specs["c"],
+        "overlay_rows": overlay_rows,
+        "legend_groups": legend_groups,
+    }
+
+
+def _build_plot_legend_groups(phase_value: int, *, plot_mode: str = "clean", alternative_legend_groups=None):
     phase_color = _phase_color_hex(phase_value)
     howell_third_label = "Non-in-phase phased window"
-    return {
+    legend_groups = {
         "read_lengths": [
             Line2D([0], [0], marker="D", color="none", markeredgecolor=LIGHT_GREY, markerfacecolor=LIGHT_GREY, markersize=5, label="<=20 nt"),
             Line2D([0], [0], marker="D", color="none", markeredgecolor=READ_LEN_COLORS[21], markerfacecolor=READ_LEN_COLORS[21], markersize=5, label="21 nt"),
@@ -476,6 +683,9 @@ def _build_plot_legend_groups(phase_value: int, *, plot_mode: str = "clean"):
             Line2D([0], [0], marker="o", color="none", markeredgecolor=HPSP_RED, markerfacecolor=HPSP_RED, markersize=6, label="Highest phasing score position / register anchor (HPSP)"),
         ],
     }
+    if alternative_legend_groups:
+        legend_groups["alternatives"] = list(alternative_legend_groups)
+    return legend_groups
 
 
 def _add_grouped_legends(
@@ -486,8 +696,13 @@ def _add_grouped_legends(
     main_right: float,
     legend_y: float,
     plot_mode: str = "clean",
+    alternative_legend_groups=None,
 ) -> None:
-    legend_groups = _build_plot_legend_groups(phase_value, plot_mode=plot_mode)
+    legend_groups = _build_plot_legend_groups(
+        phase_value,
+        plot_mode=plot_mode,
+        alternative_legend_groups=alternative_legend_groups,
+    )
     legend_common = {
         "frameon": False,
         "fontsize": 8,
@@ -536,6 +751,39 @@ def _add_grouped_legends(
     fig.add_artist(legend_abundance)
     fig.add_artist(legend_howell)
     fig.add_artist(legend_hpsp)
+
+    alternative_groups = legend_groups.get("alternatives", [])
+    if alternative_groups:
+        alt_anchor_positions = (
+            float(main_left) + main_width * 0.43,
+            float(main_left) + main_width * 0.62,
+        )
+        alt_y = float(legend_y) - 0.055
+        for idx, group in enumerate(alternative_groups[:2]):
+            swatches = tuple(
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="--",
+                    color=str(color),
+                    markerfacecolor=str(color),
+                    markeredgecolor=str(color),
+                    markersize=5,
+                    linewidth=0.9,
+                )
+                for color in group.get("colors", [])
+            )
+            alt_legend = fig.legend(
+                handles=[swatches],
+                labels=[group["label"]],
+                handler_map={tuple: HandlerTuple(ndivide=None, pad=0.6)},
+                loc="upper left",
+                bbox_to_anchor=(alt_anchor_positions[idx], alt_y),
+                ncol=1,
+                **legend_common,
+            )
+            fig.add_artist(alt_legend)
 
 
 def _normalize_plot_staging_mode(value) -> str:
@@ -1005,6 +1253,17 @@ def _wrap_strip_text(text_value: str, *, width: int = 24) -> str:
     )
 
 
+def _crowding_interpretation_line(crowding_window_count: int) -> str | None:
+    count_local = int(crowding_window_count)
+    if count_local <= 0:
+        return None
+    if count_local <= 2:
+        return "Sparse non-in-phase context (0-2)"
+    if count_local <= 5:
+        return "Moderate non-in-phase context (3-5)"
+    return "Dense non-in-phase context (>5)"
+
+
 def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
     final_class = _clean_ambiguity_text(task.get("final_class")) or "non-PHAS"
     origin_class_raw = _clean_ambiguity_text(task.get("Howell_origin_class")) or ""
@@ -1037,11 +1296,15 @@ def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
         lines.append("No alternate strong registers")
     if origin_class_raw == "coherent_extension" and extension_window_count > 0:
         lines.append("Broad same-frame extension")
+    crowding_line = _crowding_interpretation_line(crowding_window_count)
+    if crowding_line:
+        lines.append(crowding_line)
+    overlapping_alt_count = payload["overlapping_alt_count_value"] or 0
+    if overlapping_alt_count > 0:
+        lines.append("Strong overlapping alternatives detected")
     if final_class == "PHAS-like":
         if relaxed_peak_score is not None and relaxed_peak_score < 20.0:
             lines.append("Modest relaxed Howell support")
-        if crowding_window_count > 0:
-            lines.append("Crowded nearby non-in-phase windows")
         lines.append(_format_phas_text("Classified as PHAS-like"))
     elif final_class == "PHAS":
         lines.append(_format_phas_text("Classified as PHAS"))
@@ -1071,6 +1334,9 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
     origin_class = _format_origin_class(task.get("Howell_origin_class"))
     additional_peak_count = _clean_ambiguity_count(task.get("Howell_additional_peak_count"))
     additional_peak_best_score = _clean_ambiguity_float(task.get("Howell_additional_peak_best_score"))
+    overlapping_alt_count = _clean_ambiguity_count(task.get("Howell_overlapping_alt_count"))
+    overlapping_alt_best_score = _clean_ambiguity_float(task.get("Howell_overlapping_alt_best_score"))
+    overlapping_alt_best_shift_nt = _clean_ambiguity_float(task.get("Howell_overlapping_alt_best_shift_nt"))
     crowding_window_count = _clean_ambiguity_count(task.get("Howell_crowding_window_count"))
     crowding_best_score = _clean_ambiguity_float(task.get("Howell_crowding_best_score"))
     crowding_score_gap = _clean_ambiguity_float(task.get("Howell_crowding_score_gap"))
@@ -1093,6 +1359,12 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
         "additional_peak_best_score": "NA" if additional_peak_best_score is None else f"{additional_peak_best_score:.2f}",
         "additional_peak_best_score_value": additional_peak_best_score,
         "additional_peak_cutoff": _howell_peak_cutoff_text(),
+        "overlapping_alt_count": "NA" if overlapping_alt_count is None else str(overlapping_alt_count),
+        "overlapping_alt_count_value": overlapping_alt_count,
+        "overlapping_alt_best_score": "NA" if overlapping_alt_best_score is None else f"{overlapping_alt_best_score:.2f}",
+        "overlapping_alt_best_score_value": overlapping_alt_best_score,
+        "overlapping_alt_best_shift_nt": _format_shift_nt_text(overlapping_alt_best_shift_nt),
+        "overlapping_alt_best_shift_nt_value": overlapping_alt_best_shift_nt,
         "crowding_window_count": "NA" if crowding_window_count is None else str(crowding_window_count),
         "crowding_window_count_value": crowding_window_count,
         "crowding_best_score": "NA" if crowding_best_score is None else f"{crowding_best_score:.2f}",
@@ -1114,10 +1386,10 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
 def _build_ambiguity_sidebar_note(task: dict, *, plot_mode: str = "clean") -> str:
     exact_support = _clean_ambiguity_float(task.get("Howell_exact_support_score"))
     if exact_support is None or exact_support <= 0.0:
-        return "Exact-only interpretation unavailable.\nRelaxed HPSP lacks exact support."
+        return "Exact-only interpretation unavailable.\nRelaxed HPSP lacks exact support.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
     if _normalize_locus_plot_mode(plot_mode) == "clean":
-        return "Grey points show non-in-phase phased windows.\nUse debug mode for raw context metrics."
-    return "Grey points show non-in-phase phased windows.\nRaw context is shown below."
+        return "Grey points show non-in-phase phased windows.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
+    return "Grey points show non-in-phase phased windows.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
 
 
 def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean") -> list[dict]:
@@ -1195,13 +1467,31 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
         )
 
     if (
+        (payload["overlapping_alt_count_value"] or 0) > 0
+        or payload["overlapping_alt_best_score_value"] is not None
+        or payload["overlapping_alt_best_shift_nt_value"] is not None
+    ):
+        sections.append(
+            {
+                "title": "Overlapping alternative candidates",
+                "title_fontsize": 8.0,
+                "line_fontsize": 7.2,
+                "lines": [
+                    f"Count: {payload['overlapping_alt_count']}",
+                    f"Best: {payload['overlapping_alt_best_score']}",
+                    f"Shift: {payload['overlapping_alt_best_shift_nt']}",
+                ],
+            }
+        )
+
+    if (
         (payload["crowding_window_count_value"] or 0) > 0
         or payload["crowding_best_score_value"] is not None
         or payload["crowding_score_gap_value"] is not None
     ):
         sections.append(
             {
-                "title": "Crowding context",
+                "title": "Alternative phased-like windows",
                 "title_fontsize": 8.0,
                 "line_fontsize": 7.2,
                 "lines": [
@@ -1386,7 +1676,9 @@ def _analyze_single_locus(task: dict) -> dict:
     additional_peak_summary = st_feat.summarize_relaxed_trace_subregions(
         trace,
         score_cutoff=float(getattr(rt, "min_Howell_score", 12.5) or 12.5),
+        phase=phase_value,
     )
+    alternative_layers = _build_alternative_plot_layers(additional_peak_summary, phase_value)
     exact_peak_summary = exact_competitor_context.get("summary") or {}
 
     base_positions_w, register_origin_w = _build_scored_register_positions(hpsp_row_w, phase_value, "w")
@@ -1439,6 +1731,10 @@ def _analyze_single_locus(task: dict) -> dict:
             "howell_rows": howell_rows,
             "guide_specs_w": guide_specs_w,
             "guide_specs_c": guide_specs_c,
+            "alternative_guide_specs_w": alternative_layers["guide_specs_w"],
+            "alternative_guide_specs_c": alternative_layers["guide_specs_c"],
+            "alternative_howell_overlay_rows": alternative_layers["overlay_rows"],
+            "alternative_legend_groups": alternative_layers["legend_groups"],
             "xmin": float(xmin),
             "xmax": float(xmax),
             "xpad": float(xpad),
@@ -1492,6 +1788,18 @@ def _analyze_single_locus(task: dict) -> dict:
                 task.get("Howell_additional_peak_best_score"),
                 additional_peak_summary.get("Howell_additional_peak_best_score"),
             ),
+            "Howell_overlapping_alt_count": _coalesce_task_metric(
+                task.get("Howell_overlapping_alt_count"),
+                additional_peak_summary.get("Howell_overlapping_alt_count"),
+            ),
+            "Howell_overlapping_alt_best_score": _coalesce_task_metric(
+                task.get("Howell_overlapping_alt_best_score"),
+                additional_peak_summary.get("Howell_overlapping_alt_best_score"),
+            ),
+            "Howell_overlapping_alt_best_shift_nt": _coalesce_task_metric(
+                task.get("Howell_overlapping_alt_best_shift_nt"),
+                additional_peak_summary.get("Howell_overlapping_alt_best_shift_nt"),
+            ),
             "Howell_crowding_window_count": _coalesce_task_metric(
                 task.get("Howell_crowding_window_count"),
                 browser_trace_context.get("Howell_crowding_window_count"),
@@ -1505,6 +1813,8 @@ def _analyze_single_locus(task: dict) -> dict:
                 browser_trace_context.get("Howell_crowding_score_gap"),
             ),
             "Peak_Howell_score": task.get("Peak_Howell_score"),
+            "Howell_exact_relaxed_ratio": task.get("Howell_exact_relaxed_ratio"),
+            "Howell_strict_relaxed_ratio": task.get("Howell_strict_relaxed_ratio"),
             "secondary_peak_ratio": task.get("secondary_peak_ratio"),
             "final_class": task.get("final_class"),
             "report_label": task.get("report_label"),
@@ -1578,6 +1888,7 @@ def _write_single_locus_plot(task: dict) -> str:
         main_right=float(layout["main_right"]),
         legend_y=float(layout["legend_y"]),
         plot_mode=_current_locus_plot_mode(),
+        alternative_legend_groups=list((task.get("alternative_legend_groups") or {}).values()),
     )
 
     _draw_centerline(axes[0])
@@ -1586,6 +1897,10 @@ def _write_single_locus_plot(task: dict) -> str:
     _draw_strand_guides(axes[0], task.get("guide_specs_c", []), _phase_color_hex(phase_value), upper_half=False)
     _draw_strand_guides(axes[1], task.get("guide_specs_w", []), _phase_color_hex(phase_value), upper_half=True)
     _draw_strand_guides(axes[1], task.get("guide_specs_c", []), _phase_color_hex(phase_value), upper_half=False)
+    _draw_strand_guides(axes[0], task.get("alternative_guide_specs_w", []), _phase_color_hex(phase_value), upper_half=True)
+    _draw_strand_guides(axes[0], task.get("alternative_guide_specs_c", []), _phase_color_hex(phase_value), upper_half=False)
+    _draw_strand_guides(axes[1], task.get("alternative_guide_specs_w", []), _phase_color_hex(phase_value), upper_half=True)
+    _draw_strand_guides(axes[1], task.get("alternative_guide_specs_c", []), _phase_color_hex(phase_value), upper_half=False)
 
     for row in abundance_rows:
         axes[0].scatter(
@@ -1613,6 +1928,19 @@ def _write_single_locus_plot(task: dict) -> str:
             linewidths=row["linewidth"],
             alpha=row["alpha"],
             zorder=3,
+        )
+
+    for row in task.get("alternative_howell_overlay_rows", []) or []:
+        axes[1].scatter(
+            row["x"],
+            row["y"],
+            s=row["size"],
+            marker="o",
+            facecolors=row["facecolor"],
+            edgecolors=row["edgecolor"],
+            linewidths=row["linewidth"],
+            alpha=row["alpha"],
+            zorder=5,
         )
 
     for row in howell_rows:
@@ -1783,9 +2111,14 @@ def write_individual_phas_locus_plots(
                     "Howell_origin_class": getattr(row, "Howell_origin_class", np.nan),
                     "Howell_additional_peak_count": getattr(row, "Howell_additional_peak_count", np.nan),
                     "Howell_additional_peak_best_score": getattr(row, "Howell_additional_peak_best_score", np.nan),
+                    "Howell_overlapping_alt_count": getattr(row, "Howell_overlapping_alt_count", np.nan),
+                    "Howell_overlapping_alt_best_score": getattr(row, "Howell_overlapping_alt_best_score", np.nan),
+                    "Howell_overlapping_alt_best_shift_nt": getattr(row, "Howell_overlapping_alt_best_shift_nt", np.nan),
                     "Howell_crowding_window_count": getattr(row, "Howell_crowding_window_count", np.nan),
                     "Howell_crowding_best_score": getattr(row, "Howell_crowding_best_score", np.nan),
                     "Howell_crowding_score_gap": getattr(row, "Howell_crowding_score_gap", np.nan),
+                    "Howell_exact_relaxed_ratio": getattr(row, "Howell_exact_relaxed_ratio", np.nan),
+                    "Howell_strict_relaxed_ratio": getattr(row, "Howell_strict_relaxed_ratio", np.nan),
                     "secondary_peak_ratio": getattr(row, "secondary_peak_ratio", np.nan),
                     "final_class": getattr(row, "final_class", getattr(row, "label", "non-PHAS")),
                     "report_label": getattr(row, "report_label", getattr(row, "label", "non-PHAS")),

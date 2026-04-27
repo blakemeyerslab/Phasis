@@ -40,11 +40,20 @@ QC_REASON_PASS = "pass"
 QC_REASON_CLASSIFIER_NON_PHAS = "classifier_non_phas"
 QC_REASON_INSUFFICIENT_EXACT_SUPPORT = "insufficient_exact_support"
 QC_REASON_LOW_SCORE_CROWDED = "low_score_crowded_window_context"
+QC_REASON_WEAK_SCAFFOLD_CONTEXT = "weak_scaffold_alternative_context"
 QC_REASON_LEGACY = "legacy_classification"
 QC_REASON_MANUAL_OVERRIDE = "manual_override"
 PHAS_LIKE_MIN_RELAXED_SCORE = 12.5
 PHAS_LIKE_MAX_RELAXED_SCORE = 20.0
 PHAS_LIKE_MIN_CROWDING_WINDOWS = 5
+PHAS_LIKE_WEAK_CONTEXT_MIN_RELAXED_SCORE = 20.0
+PHAS_LIKE_WEAK_CONTEXT_MAX_RELAXED_SCORE = 30.0
+PHAS_LIKE_MAX_EXACT_RELAXED_RATIO = 0.20
+PHAS_LIKE_MAX_STRICT_RELAXED_RATIO = 0.40
+PHAS_LIKE_MIN_HIGH_CROWDING_WINDOWS = 7
+PHAS_LIKE_MIN_OVERLAPPING_ALT_COUNT = 2
+PHAS_LIKE_MAX_OVERLAPPING_ALT_GAP = 4.0
+PHAS_LIKE_MIN_COMPLEXITY = 0.20
 
 
 def _default_knn_model_path() -> str:
@@ -189,6 +198,45 @@ def _automatic_qc_classification(row) -> tuple[str, str]:
     ):
         return PHAS_LIKE, QC_REASON_LOW_SCORE_CROWDED
 
+    exact_relaxed_ratio = _safe_float(row.get("Howell_exact_relaxed_ratio"))
+    if np.isnan(exact_relaxed_ratio):
+        exact_relaxed_ratio = _safe_ratio(exact_support, relaxed_peak_score)
+
+    strict_relaxed_ratio = _safe_float(row.get("Howell_strict_relaxed_ratio"))
+    if np.isnan(strict_relaxed_ratio):
+        strict_relaxed_ratio = _safe_ratio(
+            row.get("Peak_Howell_score_strict"),
+            relaxed_peak_score,
+        )
+
+    overlapping_alt_count = _safe_int(row.get("Howell_overlapping_alt_count"), default=0)
+    overlapping_alt_best_score = _safe_float(row.get("Howell_overlapping_alt_best_score"))
+    complexity = _safe_float(row.get("complexity"))
+
+    support_weakness = (
+        (not np.isnan(exact_relaxed_ratio) and exact_relaxed_ratio < PHAS_LIKE_MAX_EXACT_RELAXED_RATIO)
+        or (not np.isnan(strict_relaxed_ratio) and strict_relaxed_ratio < PHAS_LIKE_MAX_STRICT_RELAXED_RATIO)
+    )
+    overlapping_alt_close = (
+        not np.isnan(overlapping_alt_best_score)
+        and not np.isnan(relaxed_peak_score)
+        and float(relaxed_peak_score) - float(overlapping_alt_best_score) <= PHAS_LIKE_MAX_OVERLAPPING_ALT_GAP
+    )
+    context_weakness = (
+        origin_class in {"ambiguous_origin", "mixed_extension_and_ambiguity"}
+        or crowding_window_count >= PHAS_LIKE_MIN_HIGH_CROWDING_WINDOWS
+        or overlapping_alt_count >= PHAS_LIKE_MIN_OVERLAPPING_ALT_COUNT
+        or overlapping_alt_close
+        or (not np.isnan(complexity) and complexity >= PHAS_LIKE_MIN_COMPLEXITY)
+    )
+    if (
+        not np.isnan(relaxed_peak_score)
+        and PHAS_LIKE_WEAK_CONTEXT_MIN_RELAXED_SCORE <= relaxed_peak_score < PHAS_LIKE_WEAK_CONTEXT_MAX_RELAXED_SCORE
+        and support_weakness
+        and context_weakness
+    ):
+        return PHAS_LIKE, QC_REASON_WEAK_SCAFFOLD_CONTEXT
+
     return PHAS, QC_REASON_PASS
 
 
@@ -204,6 +252,20 @@ def apply_qc_reclassification(
         raise ValueError("QC reclassification requires a 'label' column from the classifier stage")
 
     out["pre_qc_label"] = out["label"].astype(str)
+    out["Howell_exact_relaxed_ratio"] = [
+        _safe_ratio(exact_support, peak_score)
+        for exact_support, peak_score in zip(
+            out.get("Howell_exact_support_score", pd.Series(index=out.index, dtype=float)),
+            out.get("Peak_Howell_score", pd.Series(index=out.index, dtype=float)),
+        )
+    ]
+    out["Howell_strict_relaxed_ratio"] = [
+        _safe_ratio(strict_score, peak_score)
+        for strict_score, peak_score in zip(
+            out.get("Peak_Howell_score_strict", pd.Series(index=out.index, dtype=float)),
+            out.get("Peak_Howell_score", pd.Series(index=out.index, dtype=float)),
+        )
+    ]
     out["secondary_peak_ratio"] = [
         _safe_ratio(best_score, peak_score)
         for best_score, peak_score in zip(

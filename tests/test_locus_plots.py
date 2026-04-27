@@ -35,6 +35,14 @@ class LocusPlotHelperTests(unittest.TestCase):
         labels = [item.get_label() for item in groups["howell"]]
         self.assertIn("Non-in-phase phased window", labels)
 
+    def test_build_plot_legend_groups_can_include_grouped_alternative_entries(self):
+        alt_groups = [
+            {"label": "Other local peaks", "colors": ["#AA5500"]},
+            {"label": "Overlapping alternative candidates", "colors": ["#CC6600"]},
+        ]
+        groups = locus_plots._build_plot_legend_groups(24, plot_mode="clean", alternative_legend_groups=alt_groups)
+        self.assertEqual([item["label"] for item in groups["alternatives"]], ["Other local peaks", "Overlapping alternative candidates"])
+
     def test_format_locus_title_italicizes_phas_classes(self):
         self.assertIn(r"$\it{PHAS}$", locus_plots._format_locus_title("libA", "chr1:100..196", 24, "PHAS"))
         self.assertIn(r"$\it{PHAS}$-like", locus_plots._format_locus_title("libA", "chr1:100..196", 24, "PHAS-like"))
@@ -154,6 +162,9 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
             "Howell_origin_margin": np.nan,
             "Howell_additional_peak_count": 0,
             "Howell_additional_peak_best_score": np.nan,
+            "Howell_overlapping_alt_count": 0,
+            "Howell_overlapping_alt_best_score": np.nan,
+            "Howell_overlapping_alt_best_shift_nt": np.nan,
             "Howell_crowding_window_count": 0,
             "Howell_crowding_best_score": np.nan,
             "Howell_crowding_score_gap": np.nan,
@@ -168,6 +179,8 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
         self.assertNotIn("Origin ambiguity", titles)
         self.assertIn("Interpretation", titles)
         self.assertIn("Notes", titles)
+        note_lines = [line for section in sections if section["title"] == "Notes" for line in section["lines"]]
+        self.assertTrue(any("10-cycle window" in line for line in note_lines))
 
     def test_clean_mode_analyze_single_locus_uses_browser_style_other_points(self):
         task = {
@@ -238,6 +251,101 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
         self.assertIn("other", phase_relations)
         self.assertNotIn("competitor", phase_relations)
         self.assertEqual(int(result["plot_payload"]["Howell_crowding_window_count"]), 5)
+
+    def test_analyze_single_locus_builds_grouped_alternative_overlays(self):
+        task = {
+            "plot_path": "/tmp/test_plot_alt.png",
+            "title_text": r"libA | chr1:100..196 | 24-$\it{PHAS}$",
+            "identifier_text": "chr1:100..196",
+            "cid_value": "cluster_1",
+            "alib_value": "libA",
+            "phase": 24,
+            "final_class": "PHAS",
+            "cluster_rows": [
+                {"pos": 100, "abun": 5, "len": 24, "strand": "w", "tag_seq": "A1", "hits": 1},
+                {"pos": 124, "abun": 6, "len": 24, "strand": "w", "tag_seq": "A2", "hits": 1},
+                {"pos": 148, "abun": 7, "len": 24, "strand": "w", "tag_seq": "A3", "hits": 1},
+                {"pos": 172, "abun": 8, "len": 24, "strand": "w", "tag_seq": "A4", "hits": 1},
+            ],
+        }
+        browser_trace_context = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 339, "score": 18.0, "best_register": 0, "phase_relation": "exact", "is_hpsp": True},
+                {"anchor_position": 124, "window_start": 124, "window_end": 363, "score": 14.0, "best_register": 0, "phase_relation": "exact", "is_hpsp": False},
+                {"anchor_position": 130, "window_start": 130, "window_end": 369, "score": 13.5, "best_register": 0, "phase_relation": "other", "is_hpsp": False},
+            ],
+            "c": [],
+            "strand_hpsp_rows": {"w": {"anchor_position": 100, "window_start": 100, "window_end": 339, "score": 18.0, "best_register": 0}, "c": None},
+            "strand_register_origins": {"w": 100, "c": None},
+            "winner_strand": "w",
+            "winner_row": {"anchor_position": 100, "window_start": 100, "window_end": 339, "score": 18.0, "best_register": 0},
+            "Howell_crowding_window_count": 1,
+            "Howell_crowding_best_score": 13.5,
+            "Howell_crowding_score_gap": 4.5,
+            "crowding_rows": [],
+        }
+        exact_context = {"summary": {}, "competing_windows": []}
+        alt_summary = {
+            "Howell_additional_peak_count": 1,
+            "Howell_additional_peak_best_score": 15.0,
+            "Howell_overlapping_alt_count": 1,
+            "Howell_overlapping_alt_best_score": 14.5,
+            "Howell_overlapping_alt_best_shift_nt": 12.0,
+            "additional_peak_groups": [
+                {
+                    "category": "other_local_peak",
+                    "strand": "w",
+                    "rows": [
+                        {"anchor_position": 500, "window_start": 500, "window_end": 739, "score": 15.0, "best_register": 0},
+                        {"anchor_position": 524, "window_start": 524, "window_end": 763, "score": 14.2, "best_register": 0},
+                    ],
+                    "peak_row": {"anchor_position": 500, "window_start": 500, "window_end": 739, "score": 15.0, "best_register": 0},
+                    "peak_score": 15.0,
+                    "register_origin": 500,
+                    "shift_nt": None,
+                    "min_start": 500,
+                    "max_end": 763,
+                }
+            ],
+            "overlapping_alt_groups": [
+                {
+                    "category": "overlapping_alternative",
+                    "strand": "w",
+                    "rows": [
+                        {"anchor_position": 112, "window_start": 112, "window_end": 351, "score": 14.5, "best_register": 0},
+                        {"anchor_position": 136, "window_start": 136, "window_end": 375, "score": 13.8, "best_register": 0},
+                    ],
+                    "peak_row": {"anchor_position": 112, "window_start": 112, "window_end": 351, "score": 14.5, "best_register": 0},
+                    "peak_score": 14.5,
+                    "register_origin": 112,
+                    "shift_nt": 12,
+                    "min_start": 112,
+                    "max_end": 375,
+                }
+            ],
+        }
+
+        with mock.patch.object(locus_plots.rt, "locus_plot_mode", "clean"):
+            with mock.patch.object(
+                locus_plots.st_feat,
+                "enumerate_relaxed_howell_trace",
+                return_value={"w": browser_trace_context["w"], "c": []},
+            ):
+                with mock.patch.object(
+                    locus_plots.st_feat,
+                    "classify_browser_style_relaxed_trace",
+                    return_value=browser_trace_context,
+                ):
+                    with mock.patch.object(locus_plots.st_feat, "collect_exact_only_peak_competitors", return_value=exact_context):
+                        with mock.patch.object(locus_plots.st_feat, "summarize_relaxed_trace_subregions", return_value=alt_summary):
+                            result = locus_plots._analyze_single_locus(task)
+
+        payload = result["plot_payload"]
+        self.assertEqual(int(payload["Howell_overlapping_alt_count"]), 1)
+        self.assertEqual(float(payload["Howell_overlapping_alt_best_shift_nt"]), 12.0)
+        self.assertIn("other_local_peak", payload["alternative_legend_groups"])
+        self.assertIn("overlapping_alternative", payload["alternative_legend_groups"])
+        self.assertTrue(payload["alternative_howell_overlay_rows"])
 
     def test_write_individual_plots_routes_phas_like_to_separate_outputs(self):
         labeled_features = pd.DataFrame(

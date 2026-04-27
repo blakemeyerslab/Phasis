@@ -999,9 +999,14 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         'Howell_origin_class': features.get('Howell_origin_class', pd.Series([np.nan] * int(nrows))),
         'Howell_additional_peak_count': features.get('Howell_additional_peak_count', _fallback_series(nrows)),
         'Howell_additional_peak_best_score': features.get('Howell_additional_peak_best_score', _fallback_series(nrows)),
+        'Howell_overlapping_alt_count': features.get('Howell_overlapping_alt_count', _fallback_series(nrows)),
+        'Howell_overlapping_alt_best_score': features.get('Howell_overlapping_alt_best_score', _fallback_series(nrows)),
+        'Howell_overlapping_alt_best_shift_nt': features.get('Howell_overlapping_alt_best_shift_nt', _fallback_series(nrows)),
         'Howell_crowding_window_count': features.get('Howell_crowding_window_count', _fallback_series(nrows)),
         'Howell_crowding_best_score': features.get('Howell_crowding_best_score', _fallback_series(nrows)),
         'Howell_crowding_score_gap': features.get('Howell_crowding_score_gap', _fallback_series(nrows)),
+        'Howell_exact_relaxed_ratio': features.get('Howell_exact_relaxed_ratio', _fallback_series(nrows)),
+        'Howell_strict_relaxed_ratio': features.get('Howell_strict_relaxed_ratio', _fallback_series(nrows)),
         # strict (classic) Howell
         'w_Howell_score_strict': features.get('w_Howell_score_strict', _fallback_series(nrows)),
         'w_window_start_strict': features.get('w_window_start_strict', _fallback_series(nrows)),
@@ -1037,9 +1042,14 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         "Howell_alt_register_count": features.get("Howell_alt_register_count", _fallback_series(nrows)),
         "Howell_additional_peak_count": features.get("Howell_additional_peak_count", _fallback_series(nrows)),
         "Howell_additional_peak_best_score": features.get("Howell_additional_peak_best_score", _fallback_series(nrows)),
+        "Howell_overlapping_alt_count": features.get("Howell_overlapping_alt_count", _fallback_series(nrows)),
+        "Howell_overlapping_alt_best_score": features.get("Howell_overlapping_alt_best_score", _fallback_series(nrows)),
+        "Howell_overlapping_alt_best_shift_nt": features.get("Howell_overlapping_alt_best_shift_nt", _fallback_series(nrows)),
         "Howell_crowding_window_count": features.get("Howell_crowding_window_count", _fallback_series(nrows)),
         "Howell_crowding_best_score": features.get("Howell_crowding_best_score", _fallback_series(nrows)),
         "Howell_crowding_score_gap": features.get("Howell_crowding_score_gap", _fallback_series(nrows)),
+        "Howell_exact_relaxed_ratio": features.get("Howell_exact_relaxed_ratio", _fallback_series(nrows)),
+        "Howell_strict_relaxed_ratio": features.get("Howell_strict_relaxed_ratio", _fallback_series(nrows)),
         "secondary_peak_ratio": features.get("secondary_peak_ratio", _fallback_series(nrows)),
         "override_note": features.get("override_note", _fallback_text_series(nrows)),
     })
@@ -1062,6 +1072,9 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         'Howell_origin_window_count', 'Howell_origin_frame_count',
         'Howell_origin_margin', 'Howell_origin_class',
         'Howell_additional_peak_count', 'Howell_additional_peak_best_score',
+        'Howell_overlapping_alt_count', 'Howell_overlapping_alt_best_score',
+        'Howell_overlapping_alt_best_shift_nt',
+        'Howell_exact_relaxed_ratio', 'Howell_strict_relaxed_ratio',
     ]
     # Ensure missing columns are created as NaN so write doesn't fail
     for col in calls_cols:

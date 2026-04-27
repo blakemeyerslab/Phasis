@@ -14,7 +14,7 @@ from phasis.parallel import run_parallel_with_progress
 
 DCL_OVERHANG = 3          # 2-nt 3' overhang in duplex -> 3-nt genomic offset
 WINDOW_MULTIPLIER = 10    # 10 cycles per window
-FEATURE_SCHEMA_VERSION = 6
+FEATURE_SCHEMA_VERSION = 7
 HOWELL_AMBIGUITY_FRACTION = 0.90
 HOWELL_CROWDING_SCORE_GAP = 4.0
 
@@ -49,6 +49,9 @@ FEATURE_COLS = ['identifier',
  'Howell_origin_class',
  'Howell_additional_peak_count',
  'Howell_additional_peak_best_score',
+ 'Howell_overlapping_alt_count',
+ 'Howell_overlapping_alt_best_score',
+ 'Howell_overlapping_alt_best_shift_nt',
  'Howell_crowding_window_count',
  'Howell_crowding_best_score',
  'Howell_crowding_score_gap',
@@ -1044,6 +1047,25 @@ def _classify_relaxed_trace_relation(anchor_position: int, register_origin: int 
     return "other", None
 
 
+def _compute_phase_shift_nt(
+    reference_origin: int | None,
+    candidate_origin: int | None,
+    phase: int,
+) -> int | None:
+    if reference_origin is None or candidate_origin is None:
+        return None
+
+    try:
+        phase_local = int(phase)
+        if phase_local <= 0:
+            return None
+        shift_value = (int(candidate_origin) - int(reference_origin)) % phase_local
+    except Exception:
+        return None
+
+    return None if shift_value == 0 else int(shift_value)
+
+
 def classify_browser_style_relaxed_trace(
     trace: dict,
     *,
@@ -1185,7 +1207,131 @@ def _group_trace_rows_by_overlap(trace_rows, *, score_cutoff: float) -> list[dic
     return groups
 
 
-def summarize_relaxed_trace_subregions(trace: dict, *, score_cutoff: float | None = None) -> dict:
+def _build_relaxed_group_summary(
+    group: dict,
+    *,
+    strand_code: str,
+    category: str,
+    phase: int | None = None,
+    winner_register_origin: int | None = None,
+) -> dict | None:
+    rows = list(group.get("rows") or [])
+    if not rows:
+        return None
+
+    peak_row = _find_relaxed_trace_peak_row(rows)
+    if peak_row is None:
+        return None
+
+    ph = int(phase) if phase is not None else None
+    register_origin = None
+    shift_nt = None
+    if ph is not None:
+        register_origin = _build_relaxed_trace_register_origin(peak_row, ph, strand_code)
+        shift_nt = _compute_phase_shift_nt(winner_register_origin, register_origin, ph)
+
+    try:
+        peak_score = float(peak_row.get("score", 0.0) or 0.0)
+    except Exception:
+        peak_score = 0.0
+
+    return {
+        "category": str(category),
+        "strand": str(strand_code),
+        "rows": rows,
+        "peak_row": peak_row,
+        "peak_score": float(peak_score),
+        "register_origin": register_origin,
+        "shift_nt": shift_nt,
+        "min_start": int(group.get("min_start")),
+        "max_end": int(group.get("max_end")),
+    }
+
+
+def _group_overlapping_alternative_candidates(
+    main_group_rows,
+    winner_row: dict | None,
+    *,
+    phase: int,
+    strand_code: str,
+    score_cutoff: float,
+) -> list[dict]:
+    if winner_row is None:
+        return []
+
+    winner_register_origin = _build_relaxed_trace_register_origin(winner_row, phase, strand_code)
+    if winner_register_origin is None:
+        return []
+
+    grouped = {}
+    for row in main_group_rows or []:
+        if _same_trace_window(row, winner_row):
+            continue
+        if not _windows_overlap(
+            row.get("window_start"),
+            row.get("window_end"),
+            winner_row.get("window_start"),
+            winner_row.get("window_end"),
+        ):
+            continue
+
+        try:
+            candidate_score = float(row.get("score", 0.0) or 0.0)
+            anchor_position = int(row.get("anchor_position"))
+        except Exception:
+            continue
+        if candidate_score < float(score_cutoff):
+            continue
+
+        relation_to_winner, _ = _classify_relaxed_trace_relation(
+            anchor_position,
+            winner_register_origin,
+            int(phase),
+        )
+        if relation_to_winner != "other":
+            continue
+
+        candidate_register_origin = _build_relaxed_trace_register_origin(row, int(phase), strand_code)
+        shift_nt = _compute_phase_shift_nt(winner_register_origin, candidate_register_origin, int(phase))
+        if shift_nt is None:
+            continue
+
+        shift_group = grouped.setdefault(
+            int(shift_nt),
+            {
+                "rows": [],
+                "min_start": int(row.get("window_start")),
+                "max_end": int(row.get("window_end")),
+            },
+        )
+        shift_group["rows"].append(dict(row))
+        shift_group["min_start"] = min(shift_group["min_start"], int(row.get("window_start")))
+        shift_group["max_end"] = max(shift_group["max_end"], int(row.get("window_end")))
+
+    summaries = []
+    for shift_nt, group in grouped.items():
+        summary = _build_relaxed_group_summary(
+            group,
+            strand_code=strand_code,
+            category="overlapping_alternative",
+            phase=int(phase),
+            winner_register_origin=winner_register_origin,
+        )
+        if summary is None:
+            continue
+        summary["shift_nt"] = int(shift_nt)
+        summaries.append(summary)
+
+    summaries.sort(key=lambda item: (-float(item.get("peak_score", 0.0) or 0.0), int(item.get("shift_nt") or 0)))
+    return summaries
+
+
+def summarize_relaxed_trace_subregions(
+    trace: dict,
+    *,
+    score_cutoff: float | None = None,
+    phase: int | None = None,
+) -> dict:
     """
     Summarize additional relaxed Howell peak regions across the whole locus.
 
@@ -1196,7 +1342,10 @@ def summarize_relaxed_trace_subregions(trace: dict, *, score_cutoff: float | Non
     phased-like subregions.
     """
     cutoff = _min_howell_score_value() if score_cutoff is None else float(score_cutoff)
+    phase_local = int(phase) if phase is not None else _phase_value()
     additional_region_scores = []
+    additional_peak_groups = []
+    overlapping_alt_groups = []
     global_peak_strand = None
     global_peak_row = None
     global_peak_score = float("-inf")
@@ -1229,22 +1378,52 @@ def summarize_relaxed_trace_subregions(trace: dict, *, score_cutoff: float | Non
                 main_group_index = idx
                 break
 
+        if strand_code == global_peak_strand and main_group_index is not None:
+            overlapping_alt_groups.extend(
+                _group_overlapping_alternative_candidates(
+                    groups[main_group_index]["rows"],
+                    global_peak_row,
+                    phase=phase_local,
+                    strand_code=strand_code,
+                    score_cutoff=cutoff,
+                )
+            )
+
         for idx, group in enumerate(groups):
             if main_group_index is not None and idx == main_group_index:
                 continue
-            group_peak = _find_relaxed_trace_peak_row(group["rows"])
-            if group_peak is None:
+            group_summary = _build_relaxed_group_summary(
+                group,
+                strand_code=strand_code,
+                category="other_local_peak",
+                phase=phase_local,
+            )
+            if group_summary is None:
                 continue
-            try:
-                additional_region_scores.append(float(group_peak.get("score", 0.0) or 0.0))
-            except Exception:
-                continue
+            additional_peak_groups.append(group_summary)
+            additional_region_scores.append(float(group_summary.get("peak_score", 0.0) or 0.0))
+
+    best_overlap_group = None
+    if overlapping_alt_groups:
+        best_overlap_group = max(
+            overlapping_alt_groups,
+            key=lambda item: float(item.get("peak_score", 0.0) or 0.0),
+        )
 
     return {
         "Howell_additional_peak_count": int(len(additional_region_scores)),
         "Howell_additional_peak_best_score": (
             np.nan if not additional_region_scores else float(max(additional_region_scores))
         ),
+        "Howell_overlapping_alt_count": int(len(overlapping_alt_groups)),
+        "Howell_overlapping_alt_best_score": (
+            np.nan if best_overlap_group is None else float(best_overlap_group.get("peak_score", 0.0) or 0.0)
+        ),
+        "Howell_overlapping_alt_best_shift_nt": (
+            np.nan if best_overlap_group is None else float(best_overlap_group.get("shift_nt"))
+        ),
+        "additional_peak_groups": additional_peak_groups,
+        "overlapping_alt_groups": overlapping_alt_groups,
     }
 
 
@@ -1506,6 +1685,7 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
         additional_peak_summary = summarize_relaxed_trace_subregions(
             relaxed_trace,
             score_cutoff=_min_howell_score_value(),
+            phase=ph,
         )
         if peak_howell_detail:
             exact_support_score = peak_howell_detail.get("Howell_exact_support_score", np.nan)
@@ -1531,6 +1711,9 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
             origin_class = np.nan
         additional_peak_count = additional_peak_summary.get("Howell_additional_peak_count", np.nan)
         additional_peak_best_score = additional_peak_summary.get("Howell_additional_peak_best_score", np.nan)
+        overlapping_alt_count = additional_peak_summary.get("Howell_overlapping_alt_count", 0)
+        overlapping_alt_best_score = additional_peak_summary.get("Howell_overlapping_alt_best_score", np.nan)
+        overlapping_alt_best_shift_nt = additional_peak_summary.get("Howell_overlapping_alt_best_shift_nt", np.nan)
         crowding_window_count = browser_trace_summary.get("Howell_crowding_window_count", 0)
         crowding_best_score = browser_trace_summary.get("Howell_crowding_best_score", np.nan)
         crowding_score_gap = browser_trace_summary.get("Howell_crowding_score_gap", np.nan)
@@ -1550,6 +1733,7 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
             exact_support_score, ambiguity_count, alt_register_count, overlap_margin,
             extension_window_count, extension_span_nt, origin_window_count, origin_frame_count, origin_margin, origin_class,
             additional_peak_count, additional_peak_best_score,
+            overlapping_alt_count, overlapping_alt_best_score, overlapping_alt_best_shift_nt,
             crowding_window_count, crowding_best_score, crowding_score_gap,
             # classic (strict)
             w_Howell_strict, w_s_strict, w_e_strict, c_Howell_strict, c_s_strict, c_e_strict, Peak_Howell_strict

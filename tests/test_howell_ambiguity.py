@@ -43,10 +43,31 @@ class HowellAmbiguityScoringTests(unittest.TestCase):
             ],
         }
 
-        summary = feature_assembly.summarize_relaxed_trace_subregions(trace, score_cutoff=12.5)
+        summary = feature_assembly.summarize_relaxed_trace_subregions(trace, score_cutoff=12.5, phase=21)
 
         self.assertEqual(summary["Howell_additional_peak_count"], 2)
         self.assertAlmostEqual(summary["Howell_additional_peak_best_score"], 15.0, places=6)
+        self.assertEqual(summary["Howell_overlapping_alt_count"], 0)
+        self.assertEqual(len(summary["additional_peak_groups"]), 2)
+
+    def test_summarize_relaxed_trace_subregions_detects_overlapping_shifted_alternative(self):
+        trace = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 339, "score": 20.0, "best_register": 0},
+                {"anchor_position": 124, "window_start": 124, "window_end": 363, "score": 18.5, "best_register": 0},
+                {"anchor_position": 112, "window_start": 112, "window_end": 351, "score": 18.0, "best_register": 0},
+                {"anchor_position": 136, "window_start": 136, "window_end": 375, "score": 17.5, "best_register": 0},
+            ],
+            "c": [],
+        }
+
+        summary = feature_assembly.summarize_relaxed_trace_subregions(trace, score_cutoff=12.5, phase=24)
+
+        self.assertEqual(summary["Howell_additional_peak_count"], 0)
+        self.assertEqual(summary["Howell_overlapping_alt_count"], 1)
+        self.assertAlmostEqual(summary["Howell_overlapping_alt_best_score"], 18.0, places=6)
+        self.assertEqual(int(summary["Howell_overlapping_alt_best_shift_nt"]), 12)
+        self.assertEqual(len(summary["overlapping_alt_groups"]), 1)
 
     def test_summarize_peak_howell_ambiguity_separates_extension_and_origin_frames(self):
         winner = {
@@ -325,6 +346,11 @@ class HowellAmbiguityOutputTests(unittest.TestCase):
                     "Howell_origin_class": "mixed_extension_and_ambiguity",
                     "Howell_additional_peak_count": 2,
                     "Howell_additional_peak_best_score": 15.5,
+                    "Howell_overlapping_alt_count": 1,
+                    "Howell_overlapping_alt_best_score": 14.2,
+                    "Howell_overlapping_alt_best_shift_nt": 12.0,
+                    "Howell_exact_relaxed_ratio": 0.6585,
+                    "Howell_strict_relaxed_ratio": 0.8211,
                     "w_Howell_score_strict": 10.1,
                     "w_window_start_strict": 100,
                     "w_window_end_strict": 309,
@@ -364,6 +390,11 @@ class HowellAmbiguityOutputTests(unittest.TestCase):
                     "Howell_origin_class": "insufficient_exact_support",
                     "Howell_additional_peak_count": 0,
                     "Howell_additional_peak_best_score": np.nan,
+                    "Howell_overlapping_alt_count": 0,
+                    "Howell_overlapping_alt_best_score": np.nan,
+                    "Howell_overlapping_alt_best_shift_nt": np.nan,
+                    "Howell_exact_relaxed_ratio": np.nan,
+                    "Howell_strict_relaxed_ratio": np.nan,
                     "w_Howell_score_strict": 0.0,
                     "w_window_start_strict": np.nan,
                     "w_window_end_strict": np.nan,
@@ -410,6 +441,9 @@ class HowellAmbiguityOutputTests(unittest.TestCase):
                 "Howell_origin_class",
                 "Howell_additional_peak_count",
                 "Howell_additional_peak_best_score",
+                "Howell_overlapping_alt_count",
+                "Howell_overlapping_alt_best_score",
+                "Howell_overlapping_alt_best_shift_nt",
             ):
                 self.assertIn(column, all_df.columns)
                 self.assertIn(column, calls_df.columns)
@@ -427,6 +461,9 @@ class HowellAmbiguityOutputTests(unittest.TestCase):
             self.assertEqual(str(calls_df.loc[0, "Howell_origin_class"]), "mixed_extension_and_ambiguity")
             self.assertEqual(int(calls_df.loc[0, "Howell_additional_peak_count"]), 2)
             self.assertAlmostEqual(float(calls_df.loc[0, "Howell_additional_peak_best_score"]), 15.5, places=6)
+            self.assertEqual(int(calls_df.loc[0, "Howell_overlapping_alt_count"]), 1)
+            self.assertAlmostEqual(float(calls_df.loc[0, "Howell_overlapping_alt_best_score"]), 14.2, places=6)
+            self.assertEqual(int(calls_df.loc[0, "Howell_overlapping_alt_best_shift_nt"]), 12)
 
 
 if __name__ == "__main__":
