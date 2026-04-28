@@ -96,6 +96,15 @@ class HowellAmbiguityScoringTests(unittest.TestCase):
             ],
             "c": [
                 {"anchor_position": 291, "window_start": 82, "window_end": 291, "score": 17.5, "best_register": 0},
+                {"anchor_position": 270, "window_start": 61, "window_end": 270, "score": 16.5, "best_register": 0},
+                {"anchor_position": 249, "window_start": 40, "window_end": 249, "score": 15.5, "best_register": 0},
+                {"anchor_position": 228, "window_start": 19, "window_end": 228, "score": 15.0, "best_register": 0},
+                {"anchor_position": 207, "window_start": -2, "window_end": 207, "score": 14.5, "best_register": 0},
+                {"anchor_position": 186, "window_start": -23, "window_end": 186, "score": 14.0, "best_register": 0},
+                {"anchor_position": 165, "window_start": -44, "window_end": 165, "score": 13.8, "best_register": 0},
+                {"anchor_position": 144, "window_start": -65, "window_end": 144, "score": 13.6, "best_register": 0},
+                {"anchor_position": 123, "window_start": -86, "window_end": 123, "score": 13.4, "best_register": 0},
+                {"anchor_position": 102, "window_start": -107, "window_end": 102, "score": 13.2, "best_register": 0},
             ],
         }
 
@@ -107,6 +116,52 @@ class HowellAmbiguityScoringTests(unittest.TestCase):
         self.assertIsNotNone(summary["main_biogenesis_unit"])
         self.assertTrue(summary["main_biogenesis_unit"]["main_partner_present"])
         self.assertEqual(sorted(summary["main_biogenesis_unit"]["member_strands"]), ["c", "w"])
+
+    def test_summarize_relaxed_trace_subregions_finds_below_cutoff_cross_strand_partner_from_trace(self):
+        trace = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 20.0, "best_register": 0},
+                {"anchor_position": 121, "window_start": 121, "window_end": 330, "score": 19.0, "best_register": 0},
+                {"anchor_position": 142, "window_start": 142, "window_end": 351, "score": 18.0, "best_register": 0},
+            ],
+            "c": [
+                {"anchor_position": 291, "window_start": 82, "window_end": 291, "score": 10.5, "best_register": 0},
+                {"anchor_position": 270, "window_start": 61, "window_end": 270, "score": 10.1, "best_register": 0},
+                {"anchor_position": 249, "window_start": 40, "window_end": 249, "score": 9.8, "best_register": 0},
+                {"anchor_position": 228, "window_start": 19, "window_end": 228, "score": 9.5, "best_register": 0},
+                {"anchor_position": 207, "window_start": -2, "window_end": 207, "score": 9.3, "best_register": 0},
+                {"anchor_position": 186, "window_start": -23, "window_end": 186, "score": 9.0, "best_register": 0},
+                {"anchor_position": 165, "window_start": -44, "window_end": 165, "score": 8.8, "best_register": 0},
+                {"anchor_position": 144, "window_start": -65, "window_end": 144, "score": 8.5, "best_register": 0},
+                {"anchor_position": 123, "window_start": -86, "window_end": 123, "score": 8.2, "best_register": 0},
+                {"anchor_position": 102, "window_start": -107, "window_end": 102, "score": 8.0, "best_register": 0},
+            ],
+        }
+
+        summary = feature_assembly.summarize_relaxed_trace_subregions(trace, score_cutoff=12.5, phase=21)
+
+        self.assertIsNotNone(summary["main_biogenesis_unit"])
+        self.assertTrue(summary["main_biogenesis_unit"]["main_partner_present"])
+        self.assertEqual(sorted(summary["main_biogenesis_unit"]["member_strands"]), ["c", "w"])
+        self.assertEqual(summary["Howell_overlapping_alt_count"], 0)
+
+    def test_summarize_relaxed_trace_subregions_rejects_sparse_cross_strand_bridge(self):
+        trace = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 20.0, "best_register": 0},
+                {"anchor_position": 121, "window_start": 121, "window_end": 330, "score": 19.0, "best_register": 0},
+                {"anchor_position": 142, "window_start": 142, "window_end": 351, "score": 18.0, "best_register": 0},
+            ],
+            "c": [
+                {"anchor_position": 291, "window_start": 82, "window_end": 291, "score": 10.5, "best_register": 0},
+                {"anchor_position": 270, "window_start": 61, "window_end": 270, "score": 10.1, "best_register": 0},
+            ],
+        }
+
+        summary = feature_assembly.summarize_relaxed_trace_subregions(trace, score_cutoff=12.5, phase=21)
+
+        self.assertIsNotNone(summary["main_biogenesis_unit"])
+        self.assertFalse(summary["main_biogenesis_unit"]["main_partner_present"])
 
     def test_compute_phase_shift_nt_uses_signed_minimal_shift(self):
         self.assertEqual(feature_assembly._compute_phase_shift_nt(100, 120, 21), -1)

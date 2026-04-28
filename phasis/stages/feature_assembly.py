@@ -14,7 +14,7 @@ from phasis.parallel import run_parallel_with_progress
 
 DCL_OVERHANG = 3          # 2-nt 3' overhang in duplex -> 3-nt genomic offset
 WINDOW_MULTIPLIER = 10    # 10 cycles per window
-FEATURE_SCHEMA_VERSION = 9
+FEATURE_SCHEMA_VERSION = 10
 HOWELL_AMBIGUITY_FRACTION = 0.90
 HOWELL_CROWDING_SCORE_GAP = 4.0
 ALTERNATIVE_DCL_OFFSET_NT = 2
@@ -22,6 +22,10 @@ ALTERNATIVE_MIN_SHARED_CYCLES = 3
 PROMOTED_ALT_MAX_SCORE_GAP = 2.0
 PROMOTED_ALT_MIN_NON_GREY_ROWS = 2
 PROMOTED_ALT_MIN_EXACT_ROWS = 1
+MAIN_UNIT_BRIDGE_MIN_RATIO = 0.50
+MAIN_UNIT_BRIDGE_MAX_ZERO_RUN = 2
+MAIN_UNIT_MIN_SUPPORTED_POSITIONS = 2
+MAIN_UNIT_MIN_EXACT_POSITIONS = 1
 
 
 # ---- legacy schema (KNN-compatible) ---------------------------------------
@@ -1091,7 +1095,7 @@ def _summarize_group_register_support_rows(
             anchor_position = int(row.get("anchor_position"))
         except Exception:
             continue
-        relation, _ = _classify_relaxed_trace_relation(
+        relation, expected_position = _classify_relaxed_trace_relation(
             anchor_position,
             register_origin,
             int(phase),
@@ -1100,6 +1104,7 @@ def _summarize_group_register_support_rows(
             {
                 **dict(row),
                 "phase_relation": relation,
+                "expected_position": expected_position,
             }
         )
         if relation == "exact":
@@ -1291,7 +1296,7 @@ def _group_trace_rows_by_overlap(trace_rows, *, score_cutoff: float) -> list[dic
             score = float(row.get("score", 0.0) or 0.0)
         except Exception:
             continue
-        if score < float(score_cutoff):
+        if score_cutoff is not None and score < float(score_cutoff):
             continue
         qualifying_rows.append(row)
 
@@ -1382,6 +1387,374 @@ def _build_relaxed_group_summary(
             )
         ),
     }
+
+
+def _trace_row_key(row: dict | None):
+    if not row:
+        return None
+    try:
+        return (
+            _normalize_trace_strand_code(row.get("strand")),
+            int(row.get("anchor_position")),
+            int(row.get("window_start")),
+            int(row.get("window_end")),
+            None if row.get("best_register") is None else int(row.get("best_register")),
+        )
+    except Exception:
+        return None
+
+
+def _relation_support_weight(relation: str | None) -> float:
+    relation_local = str(relation or "").strip()
+    if relation_local == "exact":
+        return 1.0
+    if relation_local == "offset":
+        return 0.5
+    return 0.0
+
+
+def _member_support_weight_map(member: dict | None) -> dict[int, float]:
+    support_map: dict[int, float] = {}
+    for row in list((member or {}).get("relation_rows") or []):
+        expected_position = row.get("expected_position")
+        if expected_position is None:
+            continue
+        weight = _relation_support_weight(row.get("phase_relation"))
+        if weight <= 0.0:
+            continue
+        expected_local = int(expected_position)
+        support_map[expected_local] = max(float(weight), float(support_map.get(expected_local, 0.0)))
+    return support_map
+
+
+def _member_supported_positions(member: dict | None) -> list[int]:
+    return sorted(_member_support_weight_map(member).keys())
+
+
+def _trace_support_weight_map(
+    trace_rows,
+    *,
+    register_origin: int | None,
+    phase: int,
+) -> dict[int, float]:
+    if register_origin is None:
+        return {}
+
+    support_map: dict[int, float] = {}
+    for row in trace_rows or []:
+        try:
+            anchor_position = int(row.get("anchor_position"))
+        except Exception:
+            continue
+        relation, expected_position = _classify_relaxed_trace_relation(
+            anchor_position,
+            register_origin,
+            int(phase),
+        )
+        if expected_position is None:
+            continue
+        weight = _relation_support_weight(relation)
+        if weight <= 0.0:
+            continue
+        expected_local = int(expected_position)
+        support_map[expected_local] = max(float(weight), float(support_map.get(expected_local, 0.0)))
+    return support_map
+
+
+def _supported_position_counts(member: dict | None) -> tuple[int, int]:
+    support_map = _member_support_weight_map(member)
+    exact_count = 0
+    for row in list((member or {}).get("relation_rows") or []):
+        if row.get("expected_position") is None:
+            continue
+        if str(row.get("phase_relation")) == "exact":
+            exact_count += 1
+    return int(len(support_map)), int(exact_count)
+
+
+def _build_lattice_positions_between(positions, *, phase: int) -> list[int]:
+    coords = sorted({int(value) for value in (positions or [])})
+    if not coords:
+        return []
+    if len(coords) == 1:
+        return [coords[0]]
+    start = int(coords[0])
+    end = int(coords[-1])
+    return list(range(start, end + 1, int(phase)))
+
+
+def _max_consecutive_unsupported(weights) -> int:
+    longest = 0
+    current = 0
+    for weight in weights or []:
+        if float(weight) <= 0.0:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return int(longest)
+
+
+def _candidate_bridge_reference_positions(
+    candidate: dict,
+    main_members,
+    winner_member: dict,
+    *,
+    shift_nt: int,
+) -> list[int]:
+    candidate_strand = _normalize_trace_strand_code(candidate.get("strand"))
+    winner_strand = _normalize_trace_strand_code(winner_member.get("strand"))
+
+    same_strand_positions = []
+    for member in main_members or []:
+        if _normalize_trace_strand_code(member.get("strand")) != candidate_strand:
+            continue
+        same_strand_positions.extend(_member_supported_positions(member))
+    if same_strand_positions:
+        return sorted({int(value) for value in same_strand_positions})
+
+    if candidate_strand == winner_strand:
+        return []
+
+    projected = []
+    for member in main_members or []:
+        if _normalize_trace_strand_code(member.get("strand")) != winner_strand:
+            continue
+        projected.extend(int(pos) + int(shift_nt) for pos in _member_supported_positions(member))
+    return sorted({int(value) for value in projected})
+
+
+def _evaluate_main_unit_bridge(
+    candidate: dict,
+    main_members,
+    winner_member: dict,
+    trace_rows_by_strand: dict,
+    *,
+    phase: int,
+    shift_nt: int,
+) -> dict | None:
+    candidate_supported_count, candidate_exact_count = _supported_position_counts(candidate)
+    if candidate_supported_count < int(MAIN_UNIT_MIN_SUPPORTED_POSITIONS):
+        return None
+    if candidate_exact_count < int(MAIN_UNIT_MIN_EXACT_POSITIONS):
+        return None
+
+    reference_positions = _candidate_bridge_reference_positions(
+        candidate,
+        main_members,
+        winner_member,
+        shift_nt=int(shift_nt),
+    )
+    candidate_positions = _member_supported_positions(candidate)
+    if not reference_positions or not candidate_positions:
+        return None
+
+    span_positions = _build_lattice_positions_between(
+        list(reference_positions) + list(candidate_positions),
+        phase=int(phase),
+    )
+    if not span_positions:
+        return None
+
+    candidate_strand = _normalize_trace_strand_code(candidate.get("strand"))
+    strand_support = _trace_support_weight_map(
+        trace_rows_by_strand.get(candidate_strand, []) or [],
+        register_origin=candidate.get("register_origin"),
+        phase=int(phase),
+    )
+    support_weights = [float(strand_support.get(int(pos), 0.0)) for pos in span_positions]
+    support_ratio = float(sum(support_weights) / max(len(support_weights), 1))
+    max_zero_run = _max_consecutive_unsupported(support_weights)
+    shared_cycles = int(len(set(reference_positions) & set(candidate_positions)))
+
+    return {
+        "support_ratio": float(support_ratio),
+        "max_zero_run": int(max_zero_run),
+        "shared_cycles": int(shared_cycles),
+        "candidate_supported_positions": int(candidate_supported_count),
+        "candidate_exact_positions": int(candidate_exact_count),
+        "passes": bool(
+            support_ratio >= float(MAIN_UNIT_BRIDGE_MIN_RATIO)
+            and max_zero_run <= int(MAIN_UNIT_BRIDGE_MAX_ZERO_RUN)
+        ),
+    }
+
+
+def _describe_main_unit_candidate_match(
+    winner_member: dict | None,
+    candidate: dict,
+    main_members,
+    trace_rows_by_strand: dict,
+    *,
+    phase: int,
+) -> dict | None:
+    if winner_member is None:
+        return None
+
+    winner_origin = winner_member.get("register_origin")
+    candidate_origin = candidate.get("register_origin")
+    if winner_origin is None or candidate_origin is None:
+        return None
+
+    winner_strand = _normalize_trace_strand_code(winner_member.get("strand"))
+    candidate_strand = _normalize_trace_strand_code(candidate.get("strand"))
+    raw_shift = _compute_phase_shift_nt(winner_origin, candidate_origin, int(phase))
+    shift_nt = 0 if raw_shift is None else int(raw_shift)
+    cross_strand = candidate_strand != winner_strand
+
+    if cross_strand:
+        if abs(int(shift_nt)) != int(ALTERNATIVE_DCL_OFFSET_NT):
+            return None
+    elif int(shift_nt) != 0:
+        return None
+
+    bridge = _evaluate_main_unit_bridge(
+        candidate,
+        main_members,
+        winner_member,
+        trace_rows_by_strand,
+        phase=int(phase),
+        shift_nt=int(shift_nt),
+    )
+    if bridge is None or not bool(bridge.get("passes")):
+        return None
+
+    return {
+        "shift_nt": int(shift_nt),
+        "cross_strand": bool(cross_strand),
+        "shared_cycles": int(bridge.get("shared_cycles", 0)),
+        "support_ratio": float(bridge.get("support_ratio", 0.0)),
+        "max_zero_run": int(bridge.get("max_zero_run", 0)),
+    }
+
+
+def _build_all_trace_segment_candidates(
+    trace: dict,
+    winner_row: dict | None,
+    winner_strand: str | None,
+    *,
+    phase: int,
+) -> list[dict]:
+    candidates = []
+    winner_register_origin = (
+        None
+        if winner_row is None or winner_strand is None
+        else _build_relaxed_trace_register_origin(winner_row, int(phase), winner_strand)
+    )
+    winner_window = (
+        None
+        if winner_row is None
+        else (int(winner_row.get("window_start")), int(winner_row.get("window_end")))
+    )
+
+    for strand_code in ("w", "c"):
+        groups = _group_trace_rows_by_overlap(
+            trace.get(strand_code, []) or [],
+            score_cutoff=0.0,
+        )
+        for group in groups:
+            summary = _build_relaxed_group_summary(
+                group,
+                strand_code=strand_code,
+                category="trace_segment",
+                phase=int(phase),
+                winner_register_origin=winner_register_origin,
+                winner_window=winner_window,
+            )
+            if summary is None:
+                continue
+            peak_score = float(summary.get("peak_score", 0.0) or 0.0)
+            non_grey_rows = int(summary.get("non_grey_row_count", 0) or 0)
+            if peak_score <= 0.0 and non_grey_rows <= 0:
+                continue
+            candidates.append(summary)
+
+    candidates.sort(
+        key=lambda item: (
+            -float(item.get("peak_score", 0.0) or 0.0),
+            0 if bool(item.get("overlaps_winner_window")) else 1,
+            int(item.get("min_start", 0) or 0),
+        )
+    )
+    return candidates
+
+
+def _unit_row_keys(unit: dict | None) -> set:
+    row_keys = set()
+    if unit is None:
+        return row_keys
+    for member in _unit_members(unit):
+        for row in list(member.get("rows") or []):
+            key = _trace_row_key(row)
+            if key is not None:
+                row_keys.add(key)
+        peak_key = _trace_row_key(member.get("peak_row"))
+        if peak_key is not None:
+            row_keys.add(peak_key)
+    return row_keys
+
+
+def _main_unit_row_keys(main_unit: dict | None) -> set:
+    row_keys = set()
+    if not main_unit:
+        return row_keys
+    for member in list(main_unit.get("members") or []):
+        row_keys.update(_unit_row_keys(member))
+    return row_keys
+
+
+def _filter_secondary_units_against_main_unit(candidate_units, main_unit: dict | None) -> list[dict]:
+    if not main_unit:
+        return [dict(unit) for unit in (candidate_units or [])]
+
+    main_keys = _main_unit_row_keys(main_unit)
+    if not main_keys:
+        return [dict(unit) for unit in (candidate_units or [])]
+
+    remaining = []
+    for unit in candidate_units or []:
+        if _unit_row_keys(unit) & main_keys:
+            continue
+        remaining.append(dict(unit))
+    return remaining
+
+
+def _refine_main_unit_member(
+    member: dict | None,
+    *,
+    phase: int,
+    unit_role: str,
+    category: str,
+) -> dict | None:
+    if member is None:
+        return None
+
+    relation_rows = [
+        dict(row)
+        for row in list((member or {}).get("relation_rows") or [])
+        if str(row.get("phase_relation")) in {"exact", "offset"}
+    ]
+    if not relation_rows:
+        return dict(member)
+
+    group = {
+        "rows": relation_rows,
+        "min_start": min(int(row.get("window_start")) for row in relation_rows),
+        "max_end": max(int(row.get("window_end")) for row in relation_rows),
+    }
+    summary = _build_relaxed_group_summary(
+        group,
+        strand_code=str(member.get("strand", "w")),
+        category=str(category),
+        phase=int(phase),
+    )
+    if summary is None:
+        return dict(member)
+
+    summary["unit_role"] = str(unit_role)
+    summary["shift_nt"] = member.get("shift_nt", 0)
+    summary["overlaps_winner_window"] = bool(member.get("overlaps_winner_window"))
+    return summary
 
 
 def _build_candidate_register_positions(
@@ -1677,6 +2050,7 @@ def _synthetic_main_unit_member(
 def _select_main_biogenesis_partner(
     winner_member: dict | None,
     candidate_units,
+    trace_rows_by_strand: dict,
     *,
     phase: int,
 ) -> tuple[int | None, dict | None]:
@@ -1685,40 +2059,23 @@ def _select_main_biogenesis_partner(
 
     best_index = None
     best_detail = None
-    winner_strand = _normalize_trace_strand_code(winner_member.get("strand"))
     for index, unit in enumerate(candidate_units or []):
-        if not bool(unit.get("overlaps_winner_window")):
-            continue
-        unit_strands = set(unit.get("member_strands") or [])
-        if winner_strand in unit_strands and len(unit_strands) == 1:
-            continue
-        candidate_details = []
-        for member in _unit_members(unit):
-            if _normalize_trace_strand_code(member.get("strand")) == winner_strand:
-                continue
-            match_detail = _describe_biogenesis_match(
-                winner_member,
-                member,
-                phase=int(phase),
-            )
-            if match_detail is None or not bool(match_detail.get("cross_strand")):
-                continue
-            candidate_details.append(dict(match_detail))
-        if not candidate_details:
-            continue
-        match_detail = max(
-            candidate_details,
-            key=lambda item: (
-                int(item.get("shared_cycles", 0)),
-                0 if abs(int(item.get("shift_nt", 0))) == ALTERNATIVE_DCL_OFFSET_NT else 1,
-                -float(unit.get("peak_score", 0.0) or 0.0),
-            ),
+        match_detail = _describe_main_unit_candidate_match(
+            winner_member,
+            unit,
+            [winner_member],
+            trace_rows_by_strand,
+            phase=int(phase),
         )
+        if match_detail is None or not bool(match_detail.get("cross_strand")):
+            continue
         if best_detail is None or (
             int(match_detail.get("shared_cycles", 0)),
+            float(match_detail.get("support_ratio", 0.0)),
             float(unit.get("peak_score", 0.0) or 0.0),
         ) > (
             int(best_detail.get("shared_cycles", 0)),
+            float(best_detail.get("support_ratio", 0.0)),
             float((candidate_units or [])[best_index].get("peak_score", 0.0) or 0.0),
         ):
             best_index = int(index)
@@ -1726,36 +2083,193 @@ def _select_main_biogenesis_partner(
     return best_index, best_detail
 
 
+def _expand_main_biogenesis_members(
+    winner_member: dict | None,
+    trace_candidates,
+    trace_rows_by_strand: dict,
+    *,
+    phase: int,
+    initial_members=None,
+    consumed_indexes=None,
+) -> tuple[list[dict], set[int]]:
+    if winner_member is None:
+        return [], set()
+
+    members = [dict(member) for member in (initial_members or []) if member]
+    if not members:
+        members = [dict(winner_member)]
+    used_indexes = {int(index) for index in (consumed_indexes or set())}
+    used_row_keys = set()
+    for member in members:
+        used_row_keys.update(_unit_row_keys(member))
+
+    expanded = True
+    while expanded:
+        expanded = False
+        best_index = None
+        best_detail = None
+        best_candidate = None
+        for index, unit in enumerate(trace_candidates or []):
+            if int(index) in used_indexes:
+                continue
+            candidate_keys = _unit_row_keys(unit)
+            if candidate_keys & used_row_keys:
+                continue
+            match_detail = _describe_main_unit_candidate_match(
+                winner_member,
+                unit,
+                members,
+                trace_rows_by_strand,
+                phase=int(phase),
+            )
+            if match_detail is None:
+                continue
+            ranking = (
+                0 if bool(match_detail.get("cross_strand")) else 1,
+                -int(match_detail.get("shared_cycles", 0)),
+                -float(match_detail.get("support_ratio", 0.0)),
+                -float(unit.get("peak_score", 0.0) or 0.0),
+            )
+            if best_detail is None or ranking < (
+                0 if bool(best_detail.get("cross_strand")) else 1,
+                -int(best_detail.get("shared_cycles", 0)),
+                -float(best_detail.get("support_ratio", 0.0)),
+                -float(best_candidate.get("peak_score", 0.0) or 0.0),
+            ):
+                best_index = int(index)
+                best_detail = dict(match_detail)
+                best_candidate = dict(unit)
+
+        if best_index is None or best_detail is None or best_candidate is None:
+            continue
+
+        unit_role = (
+            "main_partner"
+            if bool(best_detail.get("cross_strand"))
+            else "main_extension"
+        )
+        member_copy = _refine_main_unit_member(
+            dict(best_candidate),
+            phase=int(phase),
+            unit_role=unit_role,
+            category=unit_role,
+        )
+        if member_copy is None:
+            member_copy = dict(best_candidate)
+            member_copy["unit_role"] = unit_role
+        member_copy["shift_nt"] = int(best_detail.get("shift_nt", 0))
+        members.append(member_copy)
+        used_indexes.add(int(best_index))
+        used_row_keys.update(_unit_row_keys(member_copy))
+        expanded = True
+
+    return members, used_indexes
+
+
 def _main_biogenesis_unit(
     winner_row: dict | None,
     winner_strand: str | None,
     candidate_units,
+    trace_candidates,
+    trace: dict,
     *,
     phase: int,
 ) -> tuple[dict | None, list[dict]]:
-    winner_member = _synthetic_main_unit_member(
-        winner_row,
-        phase=int(phase),
-        strand_code=("w" if winner_strand is None else winner_strand),
-    )
+    trace_candidates_local = [dict(unit) for unit in (trace_candidates or [])]
+    winner_member = None
+    winner_key = _trace_row_key(winner_row)
+    seed_index = None
+    for index, unit in enumerate(trace_candidates_local):
+        if winner_key is None or winner_key not in _unit_row_keys(unit):
+            continue
+        winner_member = _refine_main_unit_member(
+            dict(unit),
+            phase=int(phase),
+            unit_role="main_hpsp",
+            category="main_hpsp",
+        )
+        if winner_member is None:
+            winner_member = dict(unit)
+            winner_member["category"] = "main_hpsp"
+            winner_member["unit_role"] = "main_hpsp"
+            winner_member["shift_nt"] = 0
+        seed_index = int(index)
+        break
+
+    if winner_member is None:
+        winner_member = _synthetic_main_unit_member(
+            winner_row,
+            phase=int(phase),
+            strand_code=("w" if winner_strand is None else winner_strand),
+        )
     if winner_member is None:
         return None, list(candidate_units or [])
 
-    remaining_units = [dict(unit) for unit in (candidate_units or [])]
+    trace_rows_by_strand = {
+        "w": list((trace or {}).get("w") or []),
+        "c": list((trace or {}).get("c") or []),
+    }
     partner_index, partner_detail = _select_main_biogenesis_partner(
         winner_member,
-        remaining_units,
+        trace_candidates_local,
+        trace_rows_by_strand,
         phase=int(phase),
     )
 
     main_members = [dict(winner_member)]
     if partner_index is not None:
-        partner_unit = remaining_units.pop(int(partner_index))
-        for member in _unit_members(partner_unit):
-            member_copy = dict(member)
-            member_copy["unit_role"] = "main_partner"
-            member_copy["shift_nt"] = int(partner_detail.get("shift_nt", 0))
-            main_members.append(member_copy)
+        partner_unit = _refine_main_unit_member(
+            dict(trace_candidates_local[int(partner_index)]),
+            phase=int(phase),
+            unit_role="main_partner",
+            category="main_partner",
+        )
+        if partner_unit is None:
+            partner_unit = dict(trace_candidates_local[int(partner_index)])
+            partner_unit["unit_role"] = "main_partner"
+        partner_unit["shift_nt"] = int(partner_detail.get("shift_nt", 0))
+        main_members.append(partner_unit)
+
+    consumed_indexes = set()
+    if seed_index is not None:
+        consumed_indexes.add(int(seed_index))
+    if partner_index is not None:
+        consumed_indexes.add(int(partner_index))
+
+    main_members, consumed_indexes = _expand_main_biogenesis_members(
+        winner_member,
+        trace_candidates_local,
+        trace_rows_by_strand,
+        phase=int(phase),
+        initial_members=main_members,
+        consumed_indexes=consumed_indexes,
+    )
+
+    remaining_units = _filter_secondary_units_against_main_unit(candidate_units, {"members": main_members})
+
+    partner_members = [
+        member
+        for member in main_members
+        if str(member.get("unit_role") or "") == "main_partner"
+    ]
+    best_partner_detail = None
+    if partner_members:
+        best_partner_detail = max(
+            (
+                _describe_main_unit_candidate_match(
+                    winner_member,
+                    member,
+                    [winner_member],
+                    trace_rows_by_strand,
+                    phase=int(phase),
+                )
+                for member in partner_members
+            ),
+            key=lambda item: (
+                -1 if item is None else int(item.get("shared_cycles", 0)),
+                -1 if item is None else float(item.get("support_ratio", 0.0)),
+            ),
+        )
 
     main_unit = {
         "category": "main_biogenesis_unit",
@@ -1771,12 +2285,12 @@ def _main_biogenesis_unit(
                 for member in main_members
             }
         ),
-        "main_partner_present": bool(partner_index is not None),
+        "main_partner_present": bool(partner_members),
         "main_partner_shift_nt": (
-            None if partner_detail is None else int(partner_detail.get("shift_nt", 0))
+            None if best_partner_detail is None else int(best_partner_detail.get("shift_nt", 0))
         ),
         "best_cross_strand_shared_cycles": (
-            0 if partner_detail is None else int(partner_detail.get("shared_cycles", 0))
+            0 if best_partner_detail is None else int(best_partner_detail.get("shared_cycles", 0))
         ),
     }
     return main_unit, remaining_units
@@ -1929,10 +2443,18 @@ def summarize_relaxed_trace_subregions(
         raw_candidate_groups,
         phase=phase_local,
     )
+    trace_segment_candidates = _build_all_trace_segment_candidates(
+        trace,
+        global_peak_row,
+        global_peak_strand,
+        phase=phase_local,
+    )
     main_unit, secondary_units = _main_biogenesis_unit(
         global_peak_row,
         global_peak_strand,
         merged_candidate_groups,
+        trace_segment_candidates,
+        trace,
         phase=phase_local,
     )
     promoted_secondary_units, unpromoted_secondary_units = _annotate_promoted_secondary_units(

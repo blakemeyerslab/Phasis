@@ -1519,9 +1519,6 @@ def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
         lines.append("No alternate strong registers")
     if origin_class_raw == "coherent_extension" and extension_window_count > 0:
         lines.append("Broad same-frame extension")
-    crowding_line = _crowding_interpretation_line(crowding_window_count)
-    if crowding_line:
-        lines.append(crowding_line)
     overlapping_alt_count = payload["overlapping_alt_count_value"] or 0
     if overlapping_alt_count > 0:
         lines.append("Promoted secondary relaxed candidate units present")
@@ -1629,24 +1626,40 @@ def _build_ambiguity_sidebar_note(task: dict, *, plot_mode: str = "clean") -> st
 def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean") -> list[dict]:
     sections = [
         {
-            "title": "Exact-only Howell",
+            "title": None,
             "title_fontsize": 8.6,
             "line_fontsize": 7.8,
-                "lines": [
-                    f"Support: {payload['exact_support']}",
-                    f"Relaxed peak: {payload['relaxed_peak_score']}",
-                    f"Class: {payload['origin_class']}",
-                ],
-            }
+            "line_wrap_width": 28,
+            "line_weights": ["bold", "bold", "bold"],
+            "lines": [
+                f"Exact-only Howell Support: {payload['exact_support']}",
+                f"Relaxed peak: {payload['relaxed_peak_score']}",
+                f"Class: {payload['origin_class']}",
+            ],
+        }
+    ]
+
+    show_context_section = (
+        (payload["crowding_window_count_value"] or 0) > 0
+        or payload["crowding_best_score_value"] is not None
+        or payload["crowding_score_gap_value"] is not None
+    )
+
+    interpretation_lines = list(payload["interpretation_lines"] or [])
+    if show_context_section:
+        interpretation_lines = [
+            line
+            for line in interpretation_lines
+            if "non-in-phase context" not in str(line).lower()
         ]
 
-    if payload["interpretation_lines"]:
+    if interpretation_lines:
         sections.append(
             {
                 "title": "Interpretation",
                 "title_fontsize": 8.0,
                 "line_fontsize": 7.1,
-                "lines": payload["interpretation_lines"],
+                "lines": interpretation_lines,
             }
         )
 
@@ -1716,11 +1729,7 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
             }
         )
 
-    if (
-        (payload["crowding_window_count_value"] or 0) > 0
-        or payload["crowding_best_score_value"] is not None
-        or payload["crowding_score_gap_value"] is not None
-    ):
+    if show_context_section:
         crowding_lines = [
             f"Windows: {payload['crowding_window_count']}",
             f"Best: {payload['crowding_best_score']}",
@@ -1734,6 +1743,8 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
                 "title": "Non-in-phase context windows",
                 "title_fontsize": 8.0,
                 "line_fontsize": 7.2,
+                "title_wrap_width": 28,
+                "line_wrap_width": 28,
                 "lines": crowding_lines,
             }
         )
@@ -1798,6 +1809,44 @@ def _wrap_strip_title(text_value: str, *, width: int = 24) -> str:
     return _wrap_strip_text(text_value, width=width)
 
 
+def _estimate_strip_section_height(sections) -> float:
+    total = 0.0
+    for section in sections or []:
+        title_value = section.get("title")
+        if title_value:
+            wrapped_title = _wrap_strip_title(
+                str(title_value),
+                width=int(section.get("title_wrap_width", 28)),
+            )
+            title_lines = max(wrapped_title.count("\n") + 1, 1)
+            total += (0.032 * title_lines) + 0.008
+        for line in section.get("lines", []):
+            wrapped_line = _wrap_strip_text(
+                str(line),
+                width=int(section.get("line_wrap_width", 28)),
+            )
+            line_count = max(wrapped_line.count("\n") + 1, 1)
+            total += (0.030 * line_count) + 0.004
+        total += 0.010
+    return float(total)
+
+
+def _fit_strip_sections(sections) -> list[dict]:
+    sections_local = [dict(section) for section in (sections or [])]
+    if not sections_local:
+        return sections_local
+
+    required_height = _estimate_strip_section_height(sections_local)
+    if required_height <= 0.90:
+        return sections_local
+
+    scale = max(0.82, 0.90 / max(required_height, 0.01))
+    for section in sections_local:
+        section["title_fontsize"] = max(7.0, float(section.get("title_fontsize", 8.0)) * scale)
+        section["line_fontsize"] = max(6.0, float(section.get("line_fontsize", 7.2)) * scale)
+    return sections_local
+
+
 def _draw_detachable_strip(fig, task: dict, layout: dict) -> None:
     strip_left = float(layout["strip_left"])
     strip_bottom = float(layout["strip_bottom"])
@@ -1812,37 +1861,46 @@ def _draw_detachable_strip(fig, task: dict, layout: dict) -> None:
 
     plot_mode = _current_locus_plot_mode()
     payload = _build_ambiguity_sidebar_payload(task, plot_mode=plot_mode)
-    sections = _build_strip_sections(task, payload, plot_mode=plot_mode)
+    sections = _fit_strip_sections(_build_strip_sections(task, payload, plot_mode=plot_mode))
     y_cursor = 0.95
     for section in sections:
         title_color = section.get("color", "#444444")
-        wrapped_title = _wrap_strip_title(
-            section["title"],
-            width=int(section.get("title_wrap_width", 24)),
-        )
-        wrapped_title_lines = max(wrapped_title.count("\n") + 1, 1)
-        title_fontsize = float(section.get("title_fontsize", 8.0))
-        if wrapped_title_lines > 1:
-            title_fontsize = min(title_fontsize, 7.6)
-        y_cursor = _draw_strip_line(
-            ax,
-            y_cursor,
-            wrapped_title,
-            fontsize=title_fontsize,
-            fontweight="bold",
-            color=title_color,
-        )
-        for line in section.get("lines", []):
-            wrapped = _wrap_strip_text(line, width=24)
+        title_value = section.get("title")
+        if title_value:
+            wrapped_title = _wrap_strip_title(
+                str(title_value),
+                width=int(section.get("title_wrap_width", 28)),
+            )
+            wrapped_title_lines = max(wrapped_title.count("\n") + 1, 1)
+            title_fontsize = float(section.get("title_fontsize", 8.0))
+            if wrapped_title_lines > 1:
+                title_fontsize = min(title_fontsize, 7.6)
+            y_cursor = _draw_strip_line(
+                ax,
+                y_cursor,
+                wrapped_title,
+                fontsize=title_fontsize,
+                fontweight="bold",
+                color=title_color,
+            )
+        line_weights = list(section.get("line_weights", []) or [])
+        for line_index, line in enumerate(section.get("lines", [])):
+            wrapped = _wrap_strip_text(
+                str(line),
+                width=int(section.get("line_wrap_width", 28)),
+            )
+            fontweight = line_weights[line_index] if line_index < len(line_weights) else "normal"
             y_cursor = _draw_strip_line(
                 ax,
                 y_cursor,
                 wrapped,
                 fontsize=section.get("line_fontsize", 7.2),
+                fontweight=str(fontweight),
                 color=section.get("color", "#555555"),
+                line_gap=0.030,
                 paragraph_gap=0.004,
             )
-        y_cursor -= 0.012
+        y_cursor -= 0.010
 
 
 def _draw_detachable_separator(fig, layout: dict) -> None:

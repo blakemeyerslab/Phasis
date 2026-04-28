@@ -271,6 +271,30 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
         self.assertNotIn("Overlapping alternative candidates", [section["title"] for section in sections])
         self.assertNotIn("Other local peaks", [section["title"] for section in sections])
 
+    def test_context_section_removes_duplicate_context_line_from_interpretation(self):
+        task = {
+            "Howell_exact_support_score": 14.7,
+            "Peak_Howell_score": 15.14,
+            "Howell_origin_class": "coherent_extension",
+            "Howell_extension_window_count": 86,
+            "Howell_extension_span_nt": 317,
+            "Howell_origin_window_count": 0,
+            "Howell_origin_frame_count": 0,
+            "Howell_origin_margin": np.nan,
+            "Howell_overlapping_alt_count": 0,
+            "Howell_promoted_additional_peak_count": 0,
+            "Howell_crowding_window_count": 2,
+            "Howell_crowding_best_score": 13.73,
+            "Howell_crowding_score_gap": 0.82,
+            "final_class": "PHAS",
+        }
+
+        payload = locus_plots._build_ambiguity_sidebar_payload(task, plot_mode="clean")
+        sections = locus_plots._build_strip_sections(task, payload, plot_mode="clean")
+        interpretation = next(section for section in sections if section["title"] == "Interpretation")
+
+        self.assertFalse(any("non-in-phase context" in str(line).lower() for line in interpretation["lines"]))
+
     def test_context_section_uses_singular_sentence_for_one_window(self):
         task = {
             "Howell_exact_support_score": 14.7,
@@ -318,6 +342,29 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
         )
         self.assertIn(payload["non_in_phase_context_sentence"], context_section["lines"])
         self.assertIn("Overlapping alternative candidates", [section["title"] for section in sections])
+
+    def test_strip_top_summary_uses_bold_inline_labels(self):
+        task = {
+            "Howell_exact_support_score": 21.94,
+            "Peak_Howell_score": 24.81,
+            "Howell_origin_class": "coherent_extension",
+            "final_class": "PHAS",
+        }
+
+        payload = locus_plots._build_ambiguity_sidebar_payload(task, plot_mode="clean")
+        sections = locus_plots._build_strip_sections(task, payload, plot_mode="clean")
+        top_section = sections[0]
+
+        self.assertIsNone(top_section["title"])
+        self.assertEqual(
+            top_section["lines"][:3],
+            [
+                "Exact-only Howell Support: 21.94",
+                "Relaxed peak: 24.81",
+                "Class: Coherent extension",
+            ],
+        )
+        self.assertEqual(top_section["line_weights"][:3], ["bold", "bold", "bold"])
 
     def test_clean_mode_analyze_single_locus_uses_browser_style_other_points(self):
         task = {
@@ -519,6 +566,116 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
             self.assertIn("window_unit_shift_nt", export_df.columns)
             self.assertEqual(sorted(export_df["window_unit_role"].unique().tolist()), ["main_hpsp"])
             self.assertEqual(sorted(export_df["window_unit_id"].unique().tolist()), ["unit_main"])
+
+    def test_export_rows_include_main_partner_and_extension_roles(self):
+        task = {
+            "plot_path": "/tmp/test_plot_main_unit.png",
+            "title_text": r"libA | chr1:100..196 | 21-$\it{PHAS}$",
+            "identifier_text": "chr1:100..196",
+            "cid_value": "cluster_1",
+            "alib_value": "libA",
+            "phase": 21,
+            "final_class": "PHAS",
+            "cluster_rows": [
+                {"pos": 100, "abun": 5, "len": 21, "strand": "w", "tag_seq": "A1", "hits": 1},
+                {"pos": 121, "abun": 6, "len": 21, "strand": "w", "tag_seq": "A2", "hits": 1},
+                {"pos": 142, "abun": 7, "len": 21, "strand": "w", "tag_seq": "A3", "hits": 1},
+                {"pos": 291, "abun": 8, "len": 21, "strand": "c", "tag_seq": "C1", "hits": 1},
+                {"pos": 270, "abun": 9, "len": 21, "strand": "c", "tag_seq": "C2", "hits": 1},
+                {"pos": 373, "abun": 10, "len": 21, "strand": "w", "tag_seq": "A4", "hits": 1},
+                {"pos": 394, "abun": 11, "len": 21, "strand": "w", "tag_seq": "A5", "hits": 1},
+            ],
+        }
+        trace_rows = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 20.0, "best_register": 0, "phase_relation": "exact", "is_hpsp": True},
+                {"anchor_position": 121, "window_start": 121, "window_end": 330, "score": 19.0, "best_register": 0, "phase_relation": "exact", "is_hpsp": False},
+                {"anchor_position": 142, "window_start": 142, "window_end": 351, "score": 18.0, "best_register": 0, "phase_relation": "exact", "is_hpsp": False},
+                {"anchor_position": 373, "window_start": 373, "window_end": 582, "score": 11.0, "best_register": 0, "phase_relation": "exact", "is_hpsp": False},
+                {"anchor_position": 394, "window_start": 394, "window_end": 603, "score": 10.0, "best_register": 0, "phase_relation": "exact", "is_hpsp": False},
+            ],
+            "c": [
+                {"anchor_position": 291, "window_start": 82, "window_end": 291, "score": 17.0, "best_register": 0, "phase_relation": "exact", "is_hpsp": False},
+                {"anchor_position": 270, "window_start": 61, "window_end": 270, "score": 16.0, "best_register": 0, "phase_relation": "exact", "is_hpsp": False},
+            ],
+        }
+        browser_trace_context = {
+            "w": trace_rows["w"],
+            "c": trace_rows["c"],
+            "strand_hpsp_rows": {"w": trace_rows["w"][0], "c": None},
+            "strand_register_origins": {"w": 100, "c": 291},
+            "winner_strand": "w",
+            "winner_row": trace_rows["w"][0],
+            "Howell_crowding_window_count": 0,
+            "Howell_crowding_best_score": np.nan,
+            "Howell_crowding_score_gap": np.nan,
+            "crowding_rows": [],
+        }
+        exact_context = {"summary": {}, "competing_windows": []}
+        alt_summary = {
+            "Howell_additional_peak_count": 0,
+            "Howell_additional_peak_best_score": np.nan,
+            "Howell_overlapping_alt_count": 0,
+            "Howell_overlapping_alt_best_score": np.nan,
+            "Howell_overlapping_alt_best_shift_nt": np.nan,
+            "promoted_secondary_units": [],
+            "promoted_additional_peak_groups": [],
+            "main_biogenesis_unit": {
+                "members": [
+                    {
+                        "unit_role": "main_hpsp",
+                        "strand": "w",
+                        "rows": [
+                            {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 20.0, "best_register": 0},
+                            {"anchor_position": 121, "window_start": 121, "window_end": 330, "score": 19.0, "best_register": 0},
+                            {"anchor_position": 142, "window_start": 142, "window_end": 351, "score": 18.0, "best_register": 0},
+                        ],
+                        "peak_row": {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 20.0, "best_register": 0},
+                    },
+                    {
+                        "unit_role": "main_partner",
+                        "strand": "c",
+                        "shift_nt": 2,
+                        "rows": [
+                            {"anchor_position": 291, "window_start": 82, "window_end": 291, "score": 17.0, "best_register": 0},
+                            {"anchor_position": 270, "window_start": 61, "window_end": 270, "score": 16.0, "best_register": 0},
+                        ],
+                        "peak_row": {"anchor_position": 291, "window_start": 82, "window_end": 291, "score": 17.0, "best_register": 0},
+                    },
+                    {
+                        "unit_role": "main_extension",
+                        "strand": "w",
+                        "shift_nt": 0,
+                        "rows": [
+                            {"anchor_position": 373, "window_start": 373, "window_end": 582, "score": 11.0, "best_register": 0},
+                            {"anchor_position": 394, "window_start": 394, "window_end": 603, "score": 10.0, "best_register": 0},
+                        ],
+                        "peak_row": {"anchor_position": 373, "window_start": 373, "window_end": 582, "score": 11.0, "best_register": 0},
+                    },
+                ]
+            },
+        }
+
+        with mock.patch.object(locus_plots.rt, "locus_plot_mode", "clean"):
+            with mock.patch.object(
+                locus_plots.st_feat,
+                "enumerate_relaxed_howell_trace",
+                return_value=trace_rows,
+            ):
+                with mock.patch.object(
+                    locus_plots.st_feat,
+                    "classify_browser_style_relaxed_trace",
+                    return_value=browser_trace_context,
+                ):
+                    with mock.patch.object(locus_plots.st_feat, "collect_exact_only_peak_competitors", return_value=exact_context):
+                        with mock.patch.object(locus_plots.st_feat, "summarize_relaxed_trace_subregions", return_value=alt_summary):
+                            result = locus_plots._analyze_single_locus(task)
+
+        export_rows = result["phasiRNA_rows"]
+        roles = sorted({row["window_unit_role"] for row in export_rows})
+        unit_ids = sorted({row["window_unit_id"] for row in export_rows})
+        self.assertEqual(unit_ids, ["unit_main"])
+        self.assertEqual(roles, ["main_extension", "main_hpsp", "main_partner"])
 
     def test_write_individual_plots_routes_phas_like_to_separate_outputs(self):
         labeled_features = pd.DataFrame(
