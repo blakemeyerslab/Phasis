@@ -14,9 +14,14 @@ from phasis.parallel import run_parallel_with_progress
 
 DCL_OVERHANG = 3          # 2-nt 3' overhang in duplex -> 3-nt genomic offset
 WINDOW_MULTIPLIER = 10    # 10 cycles per window
-FEATURE_SCHEMA_VERSION = 7
+FEATURE_SCHEMA_VERSION = 9
 HOWELL_AMBIGUITY_FRACTION = 0.90
 HOWELL_CROWDING_SCORE_GAP = 4.0
+ALTERNATIVE_DCL_OFFSET_NT = 2
+ALTERNATIVE_MIN_SHARED_CYCLES = 3
+PROMOTED_ALT_MAX_SCORE_GAP = 2.0
+PROMOTED_ALT_MIN_NON_GREY_ROWS = 2
+PROMOTED_ALT_MIN_EXACT_ROWS = 1
 
 
 # ---- legacy schema (KNN-compatible) ---------------------------------------
@@ -1063,7 +1068,117 @@ def _compute_phase_shift_nt(
     except Exception:
         return None
 
-    return None if shift_value == 0 else int(shift_value)
+    if shift_value == 0:
+        return None
+    half_phase = phase_local / 2.0
+    if shift_value > half_phase:
+        shift_value -= phase_local
+    return int(shift_value)
+
+
+def _summarize_group_register_support_rows(
+    rows,
+    *,
+    register_origin: int | None,
+    phase: int,
+) -> dict:
+    exact_row_count = 0
+    offset_row_count = 0
+    other_row_count = 0
+    relation_rows = []
+    for row in rows or []:
+        try:
+            anchor_position = int(row.get("anchor_position"))
+        except Exception:
+            continue
+        relation, _ = _classify_relaxed_trace_relation(
+            anchor_position,
+            register_origin,
+            int(phase),
+        )
+        relation_rows.append(
+            {
+                **dict(row),
+                "phase_relation": relation,
+            }
+        )
+        if relation == "exact":
+            exact_row_count += 1
+        elif relation == "offset":
+            offset_row_count += 1
+        else:
+            other_row_count += 1
+    return {
+        "exact_row_count": int(exact_row_count),
+        "offset_row_count": int(offset_row_count),
+        "other_row_count": int(other_row_count),
+        "non_grey_row_count": int(exact_row_count + offset_row_count),
+        "relation_rows": relation_rows,
+    }
+
+
+def _describe_biogenesis_match(
+    group_a: dict,
+    group_b: dict,
+    *,
+    phase: int,
+) -> dict | None:
+    if not _windows_overlap(
+        group_a.get("min_start"),
+        group_a.get("max_end"),
+        group_b.get("min_start"),
+        group_b.get("max_end"),
+    ):
+        return None
+
+    positions_a = _build_candidate_register_positions(
+        group_a.get("register_origin"),
+        int(phase),
+        group_a.get("strand"),
+    )
+    positions_b = _build_candidate_register_positions(
+        group_b.get("register_origin"),
+        int(phase),
+        group_b.get("strand"),
+    )
+    if not positions_a or not positions_b:
+        return None
+
+    cross_strand = (
+        _normalize_trace_strand_code(group_a.get("strand"))
+        != _normalize_trace_strand_code(group_b.get("strand"))
+    )
+    allowed_shifts = {0}
+    if cross_strand:
+        allowed_shifts.update({-ALTERNATIVE_DCL_OFFSET_NT, ALTERNATIVE_DCL_OFFSET_NT})
+
+    ranked_matches = []
+    for shift_value in sorted(allowed_shifts):
+        shared_cycles = _count_shifted_register_matches(
+            positions_a,
+            positions_b,
+            shift_nt=shift_value,
+        )
+        ranked_matches.append(
+            {
+                "shared_cycles": int(shared_cycles),
+                "shift_nt": int(shift_value),
+                "cross_strand": bool(cross_strand),
+            }
+        )
+
+    best_match = max(
+        ranked_matches,
+        key=lambda item: (
+            int(item.get("shared_cycles", 0)),
+            0 if abs(int(item.get("shift_nt", 0))) == ALTERNATIVE_DCL_OFFSET_NT else 1,
+            -abs(int(item.get("shift_nt", 0))),
+            int(item.get("shift_nt", 0)),
+        ),
+    )
+    if int(best_match.get("shared_cycles", 0)) < int(ALTERNATIVE_MIN_SHARED_CYCLES):
+        return None
+    return best_match
 
 
 def classify_browser_style_relaxed_trace(
@@ -1214,6 +1329,7 @@ def _build_relaxed_group_summary(
     category: str,
     phase: int | None = None,
     winner_register_origin: int | None = None,
+    winner_window: tuple[int, int] | None = None,
 ) -> dict | None:
     rows = list(group.get("rows") or [])
     if not rows:
@@ -1229,6 +1345,11 @@ def _build_relaxed_group_summary(
     if ph is not None:
         register_origin = _build_relaxed_trace_register_origin(peak_row, ph, strand_code)
         shift_nt = _compute_phase_shift_nt(winner_register_origin, register_origin, ph)
+    support_summary = _summarize_group_register_support_rows(
+        rows,
+        register_origin=register_origin,
+        phase=(1 if ph is None else ph),
+    )
 
     try:
         peak_score = float(peak_row.get("score", 0.0) or 0.0)
@@ -1245,7 +1366,197 @@ def _build_relaxed_group_summary(
         "shift_nt": shift_nt,
         "min_start": int(group.get("min_start")),
         "max_end": int(group.get("max_end")),
+        "exact_row_count": int(support_summary.get("exact_row_count", 0)),
+        "offset_row_count": int(support_summary.get("offset_row_count", 0)),
+        "other_row_count": int(support_summary.get("other_row_count", 0)),
+        "non_grey_row_count": int(support_summary.get("non_grey_row_count", 0)),
+        "relation_rows": list(support_summary.get("relation_rows") or []),
+        "overlaps_winner_window": (
+            False
+            if winner_window is None
+            else _windows_overlap(
+                int(group.get("min_start")),
+                int(group.get("max_end")),
+                int(winner_window[0]),
+                int(winner_window[1]),
+            )
+        ),
     }
+
+
+def _build_candidate_register_positions(
+    register_origin: int | None,
+    phase: int,
+    strand_code,
+    *,
+    cycles: int = WINDOW_MULTIPLIER,
+) -> list[int]:
+    if register_origin is None:
+        return []
+    origin = int(register_origin)
+    phase_local = int(phase)
+    count = int(cycles)
+    if count <= 0 or phase_local <= 0:
+        return []
+    if _is_forward_trace_strand(strand_code):
+        return [origin + cycle * phase_local for cycle in range(count)]
+    return [origin - cycle * phase_local for cycle in range(count)]
+
+
+def _count_shifted_register_matches(
+    positions_a,
+    positions_b,
+    *,
+    shift_nt: int = 0,
+) -> int:
+    pos_a = [int(value) for value in positions_a or []]
+    pos_b = {int(value) for value in positions_b or []}
+    if not pos_a or not pos_b:
+        return 0
+    shift_local = int(shift_nt)
+    return sum(1 for value in pos_a if int(value) + shift_local in pos_b)
+
+
+def _alternative_groups_share_biogenesis_unit(
+    group_a: dict,
+    group_b: dict,
+    *,
+    phase: int,
+) -> bool:
+    return _describe_biogenesis_match(group_a, group_b, phase=int(phase)) is not None
+
+
+def _merge_relaxed_candidate_groups_into_units(
+    candidate_groups,
+    *,
+    phase: int,
+) -> list[dict]:
+    groups = [dict(group) for group in candidate_groups or [] if group]
+    if not groups:
+        return []
+
+    parent = list(range(len(groups)))
+    pair_matches: dict[tuple[int, int], dict] = {}
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left in range(len(groups)):
+        for right in range(left + 1, len(groups)):
+            match_detail = _describe_biogenesis_match(groups[left], groups[right], phase=int(phase))
+            if match_detail is None:
+                continue
+            pair_matches[(left, right)] = dict(match_detail)
+            union(left, right)
+
+    clustered = {}
+    for index, group in enumerate(groups):
+        clustered.setdefault(find(index), []).append(group)
+
+    merged_units = []
+    for root_index, members in clustered.items():
+        members_local = sorted(
+            members,
+            key=lambda item: (
+                -float(item.get("peak_score", 0.0) or 0.0),
+                0 if bool(item.get("overlaps_winner_window")) else 1,
+                0 if str(item.get("category", "")).strip() == "overlapping_alternative" else 1,
+            ),
+        )
+        representative = dict(members_local[0])
+        member_indexes = [idx for idx in range(len(groups)) if find(idx) == root_index]
+        cross_strand_matches = []
+        for left_pos in range(len(member_indexes)):
+            for right_pos in range(left_pos + 1, len(member_indexes)):
+                left_idx = member_indexes[left_pos]
+                right_idx = member_indexes[right_pos]
+                pair_key = (min(left_idx, right_idx), max(left_idx, right_idx))
+                match_detail = pair_matches.get(pair_key)
+                if match_detail and bool(match_detail.get("cross_strand")):
+                    cross_strand_matches.append(dict(match_detail))
+        best_cross_match = None
+        if cross_strand_matches:
+            best_cross_match = max(
+                cross_strand_matches,
+                key=lambda item: (
+                    int(item.get("shared_cycles", 0)),
+                    -abs(int(item.get("shift_nt", 0))),
+                    int(item.get("shift_nt", 0)),
+                ),
+            )
+        overlapping_member_present = any(
+            bool(member.get("overlaps_winner_window"))
+            or str(member.get("category", "")).strip() == "overlapping_alternative"
+            for member in members_local
+        )
+        unit_category = "overlapping_alternative" if overlapping_member_present else "other_local_peak"
+        best_shift_member = None
+        shift_members = [member for member in members_local if member.get("shift_nt") is not None]
+        if shift_members:
+            best_shift_member = max(
+                shift_members,
+                key=lambda item: float(item.get("peak_score", 0.0) or 0.0),
+            )
+        merged_units.append(
+            {
+                **representative,
+                "category": unit_category,
+                "members": [dict(member) for member in members_local],
+                "member_count": int(len(members_local)),
+                "member_strands": sorted(
+                    {
+                        _normalize_trace_strand_code(member.get("strand"))
+                        for member in members_local
+                    }
+                ),
+                "raw_categories": sorted(
+                    {
+                        str(member.get("category", "")).strip()
+                        for member in members_local
+                    }
+                ),
+                "peak_row": representative.get("peak_row"),
+                "peak_score": float(representative.get("peak_score", 0.0) or 0.0),
+                "register_origin": representative.get("register_origin"),
+                "shift_nt": (
+                    None
+                    if best_shift_member is None
+                    else int(best_shift_member.get("shift_nt"))
+                ),
+                "has_opposite_strand_match": bool(best_cross_match is not None),
+                "best_cross_strand_shared_cycles": (
+                    0 if best_cross_match is None else int(best_cross_match.get("shared_cycles", 0))
+                ),
+                "best_cross_strand_shift_nt": (
+                    None if best_cross_match is None else int(best_cross_match.get("shift_nt", 0))
+                ),
+                "exact_row_count": int(sum(int(member.get("exact_row_count", 0) or 0) for member in members_local)),
+                "offset_row_count": int(sum(int(member.get("offset_row_count", 0) or 0) for member in members_local)),
+                "other_row_count": int(sum(int(member.get("other_row_count", 0) or 0) for member in members_local)),
+                "non_grey_row_count": int(sum(int(member.get("non_grey_row_count", 0) or 0) for member in members_local)),
+                "min_start": min(int(member.get("min_start")) for member in members_local),
+                "max_end": max(int(member.get("max_end")) for member in members_local),
+                "overlaps_winner_window": overlapping_member_present,
+            }
+        )
+
+    merged_units.sort(
+        key=lambda item: (
+            -float(item.get("peak_score", 0.0) or 0.0),
+            0 if str(item.get("category", "")).strip() == "overlapping_alternative" else 1,
+            int(item.get("shift_nt") or 0),
+        )
+    )
+    return merged_units
 
 
 def _group_overlapping_alternative_candidates(
@@ -1320,10 +1631,214 @@ def _group_overlapping_alternative_candidates(
         if summary is None:
             continue
         summary["shift_nt"] = int(shift_nt)
+        summary["overlaps_winner_window"] = True
         summaries.append(summary)
 
     summaries.sort(key=lambda item: (-float(item.get("peak_score", 0.0) or 0.0), int(item.get("shift_nt") or 0)))
     return summaries
+
+
+def _unit_members(unit: dict) -> list[dict]:
+    members = list(unit.get("members") or [])
+    if members:
+        return [dict(member) for member in members]
+    return [dict(unit)]
+
+
+def _synthetic_main_unit_member(
+    winner_row: dict | None,
+    *,
+    phase: int,
+    strand_code: str,
+) -> dict | None:
+    if winner_row is None:
+        return None
+    group = {
+        "rows": [dict(winner_row)],
+        "min_start": int(winner_row.get("window_start")),
+        "max_end": int(winner_row.get("window_end")),
+    }
+    summary = _build_relaxed_group_summary(
+        group,
+        strand_code=strand_code,
+        category="main_hpsp",
+        phase=int(phase),
+        winner_register_origin=_build_relaxed_trace_register_origin(winner_row, int(phase), strand_code),
+        winner_window=(int(winner_row.get("window_start")), int(winner_row.get("window_end"))),
+    )
+    if summary is None:
+        return None
+    summary["category"] = "main_hpsp"
+    summary["unit_role"] = "main_hpsp"
+    summary["shift_nt"] = 0
+    return summary
+
+
+def _select_main_biogenesis_partner(
+    winner_member: dict | None,
+    candidate_units,
+    *,
+    phase: int,
+) -> tuple[int | None, dict | None]:
+    if winner_member is None:
+        return None, None
+
+    best_index = None
+    best_detail = None
+    winner_strand = _normalize_trace_strand_code(winner_member.get("strand"))
+    for index, unit in enumerate(candidate_units or []):
+        if not bool(unit.get("overlaps_winner_window")):
+            continue
+        unit_strands = set(unit.get("member_strands") or [])
+        if winner_strand in unit_strands and len(unit_strands) == 1:
+            continue
+        candidate_details = []
+        for member in _unit_members(unit):
+            if _normalize_trace_strand_code(member.get("strand")) == winner_strand:
+                continue
+            match_detail = _describe_biogenesis_match(
+                winner_member,
+                member,
+                phase=int(phase),
+            )
+            if match_detail is None or not bool(match_detail.get("cross_strand")):
+                continue
+            candidate_details.append(dict(match_detail))
+        if not candidate_details:
+            continue
+        match_detail = max(
+            candidate_details,
+            key=lambda item: (
+                int(item.get("shared_cycles", 0)),
+                0 if abs(int(item.get("shift_nt", 0))) == ALTERNATIVE_DCL_OFFSET_NT else 1,
+                -float(unit.get("peak_score", 0.0) or 0.0),
+            ),
+        )
+        if best_detail is None or (
+            int(match_detail.get("shared_cycles", 0)),
+            float(unit.get("peak_score", 0.0) or 0.0),
+        ) > (
+            int(best_detail.get("shared_cycles", 0)),
+            float((candidate_units or [])[best_index].get("peak_score", 0.0) or 0.0),
+        ):
+            best_index = int(index)
+            best_detail = dict(match_detail)
+    return best_index, best_detail
+
+
+def _main_biogenesis_unit(
+    winner_row: dict | None,
+    winner_strand: str | None,
+    candidate_units,
+    *,
+    phase: int,
+) -> tuple[dict | None, list[dict]]:
+    winner_member = _synthetic_main_unit_member(
+        winner_row,
+        phase=int(phase),
+        strand_code=("w" if winner_strand is None else winner_strand),
+    )
+    if winner_member is None:
+        return None, list(candidate_units or [])
+
+    remaining_units = [dict(unit) for unit in (candidate_units or [])]
+    partner_index, partner_detail = _select_main_biogenesis_partner(
+        winner_member,
+        remaining_units,
+        phase=int(phase),
+    )
+
+    main_members = [dict(winner_member)]
+    if partner_index is not None:
+        partner_unit = remaining_units.pop(int(partner_index))
+        for member in _unit_members(partner_unit):
+            member_copy = dict(member)
+            member_copy["unit_role"] = "main_partner"
+            member_copy["shift_nt"] = int(partner_detail.get("shift_nt", 0))
+            main_members.append(member_copy)
+
+    main_unit = {
+        "category": "main_biogenesis_unit",
+        "members": main_members,
+        "peak_row": winner_row,
+        "peak_score": float(winner_row.get("score", 0.0) or 0.0),
+        "register_origin": winner_member.get("register_origin"),
+        "shift_nt": 0,
+        "member_count": int(len(main_members)),
+        "member_strands": sorted(
+            {
+                _normalize_trace_strand_code(member.get("strand"))
+                for member in main_members
+            }
+        ),
+        "main_partner_present": bool(partner_index is not None),
+        "main_partner_shift_nt": (
+            None if partner_detail is None else int(partner_detail.get("shift_nt", 0))
+        ),
+        "best_cross_strand_shared_cycles": (
+            0 if partner_detail is None else int(partner_detail.get("shared_cycles", 0))
+        ),
+    }
+    return main_unit, remaining_units
+
+
+def _secondary_unit_is_promotable(
+    unit: dict,
+    *,
+    main_peak_score: float | None,
+    score_cutoff: float,
+) -> bool:
+    try:
+        peak_score = float(unit.get("peak_score", 0.0) or 0.0)
+    except Exception:
+        peak_score = 0.0
+    if peak_score < float(score_cutoff):
+        return False
+
+    if bool(unit.get("has_opposite_strand_match")):
+        return int(unit.get("best_cross_strand_shared_cycles", 0) or 0) >= int(ALTERNATIVE_MIN_SHARED_CYCLES)
+
+    if main_peak_score is None or not np.isfinite(float(main_peak_score)):
+        return False
+    score_gap = float(main_peak_score) - float(peak_score)
+    if score_gap > float(PROMOTED_ALT_MAX_SCORE_GAP):
+        return False
+    if int(unit.get("non_grey_row_count", 0) or 0) < int(PROMOTED_ALT_MIN_NON_GREY_ROWS):
+        return False
+    if int(unit.get("exact_row_count", 0) or 0) < int(PROMOTED_ALT_MIN_EXACT_ROWS):
+        return False
+    return True
+
+
+def _annotate_promoted_secondary_units(
+    candidate_units,
+    *,
+    main_peak_score: float | None,
+    score_cutoff: float,
+) -> tuple[list[dict], list[dict]]:
+    promoted_units = []
+    unpromoted_units = []
+    for unit in candidate_units or []:
+        unit_copy = dict(unit)
+        promotable = _secondary_unit_is_promotable(
+            unit_copy,
+            main_peak_score=main_peak_score,
+            score_cutoff=score_cutoff,
+        )
+        unit_copy["promoted_secondary"] = bool(promotable)
+        if promotable:
+            promoted_units.append(unit_copy)
+        else:
+            unpromoted_units.append(unit_copy)
+
+    promoted_units.sort(
+        key=lambda item: (
+            -float(item.get("peak_score", 0.0) or 0.0),
+            0 if str(item.get("category", "")).strip() == "overlapping_alternative" else 1,
+            abs(int(item.get("shift_nt") or 0)),
+        )
+    )
+    return promoted_units, unpromoted_units
 
 
 def summarize_relaxed_trace_subregions(
@@ -1343,9 +1858,7 @@ def summarize_relaxed_trace_subregions(
     """
     cutoff = _min_howell_score_value() if score_cutoff is None else float(score_cutoff)
     phase_local = int(phase) if phase is not None else _phase_value()
-    additional_region_scores = []
-    additional_peak_groups = []
-    overlapping_alt_groups = []
+    raw_candidate_groups = []
     global_peak_strand = None
     global_peak_row = None
     global_peak_score = float("-inf")
@@ -1379,7 +1892,7 @@ def summarize_relaxed_trace_subregions(
                 break
 
         if strand_code == global_peak_strand and main_group_index is not None:
-            overlapping_alt_groups.extend(
+            raw_candidate_groups.extend(
                 _group_overlapping_alternative_candidates(
                     groups[main_group_index]["rows"],
                     global_peak_row,
@@ -1397,11 +1910,56 @@ def summarize_relaxed_trace_subregions(
                 strand_code=strand_code,
                 category="other_local_peak",
                 phase=phase_local,
+                winner_register_origin=(
+                    _build_relaxed_trace_register_origin(global_peak_row, phase_local, global_peak_strand)
+                    if global_peak_row is not None and global_peak_strand is not None
+                    else None
+                ),
+                winner_window=(
+                    (int(global_peak_row.get("window_start")), int(global_peak_row.get("window_end")))
+                    if global_peak_row is not None
+                    else None
+                ),
             )
             if group_summary is None:
                 continue
-            additional_peak_groups.append(group_summary)
-            additional_region_scores.append(float(group_summary.get("peak_score", 0.0) or 0.0))
+            raw_candidate_groups.append(group_summary)
+
+    merged_candidate_groups = _merge_relaxed_candidate_groups_into_units(
+        raw_candidate_groups,
+        phase=phase_local,
+    )
+    main_unit, secondary_units = _main_biogenesis_unit(
+        global_peak_row,
+        global_peak_strand,
+        merged_candidate_groups,
+        phase=phase_local,
+    )
+    promoted_secondary_units, unpromoted_secondary_units = _annotate_promoted_secondary_units(
+        secondary_units,
+        main_peak_score=global_peak_score if np.isfinite(global_peak_score) else None,
+        score_cutoff=cutoff,
+    )
+
+    additional_peak_groups = [
+        group
+        for group in secondary_units
+        if str(group.get("category", "")).strip() == "other_local_peak"
+    ]
+    promoted_additional_peak_groups = [
+        group
+        for group in promoted_secondary_units
+        if str(group.get("category", "")).strip() == "other_local_peak"
+    ]
+    overlapping_alt_groups = [
+        group
+        for group in promoted_secondary_units
+        if str(group.get("category", "")).strip() == "overlapping_alternative"
+    ]
+    additional_region_scores = [
+        float(group.get("peak_score", 0.0) or 0.0)
+        for group in additional_peak_groups
+    ]
 
     best_overlap_group = None
     if overlapping_alt_groups:
@@ -1422,8 +1980,12 @@ def summarize_relaxed_trace_subregions(
         "Howell_overlapping_alt_best_shift_nt": (
             np.nan if best_overlap_group is None else float(best_overlap_group.get("shift_nt"))
         ),
+        "main_biogenesis_unit": main_unit,
         "additional_peak_groups": additional_peak_groups,
+        "promoted_additional_peak_groups": promoted_additional_peak_groups,
         "overlapping_alt_groups": overlapping_alt_groups,
+        "promoted_secondary_units": promoted_secondary_units,
+        "unpromoted_secondary_units": unpromoted_secondary_units,
     }
 
 

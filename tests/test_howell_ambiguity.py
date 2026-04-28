@@ -69,6 +69,64 @@ class HowellAmbiguityScoringTests(unittest.TestCase):
         self.assertEqual(int(summary["Howell_overlapping_alt_best_shift_nt"]), 12)
         self.assertEqual(len(summary["overlapping_alt_groups"]), 1)
 
+    def test_summarize_relaxed_trace_subregions_merges_complementary_distal_peak_pair(self):
+        trace = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 20.0, "best_register": 0},
+                {"anchor_position": 600, "window_start": 600, "window_end": 809, "score": 16.0, "best_register": 0},
+            ],
+            "c": [
+                {"anchor_position": 791, "window_start": 582, "window_end": 791, "score": 15.0, "best_register": 0},
+            ],
+        }
+
+        summary = feature_assembly.summarize_relaxed_trace_subregions(trace, score_cutoff=12.5, phase=21)
+
+        self.assertEqual(summary["Howell_additional_peak_count"], 1)
+        self.assertEqual(summary["Howell_overlapping_alt_count"], 0)
+        self.assertEqual(len(summary["additional_peak_groups"]), 1)
+        unit = summary["additional_peak_groups"][0]
+        self.assertEqual(int(unit["member_count"]), 2)
+        self.assertEqual(sorted(unit["member_strands"]), ["c", "w"])
+
+    def test_summarize_relaxed_trace_subregions_merges_main_block_reflex_pair(self):
+        trace = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 20.0, "best_register": 0},
+            ],
+            "c": [
+                {"anchor_position": 291, "window_start": 82, "window_end": 291, "score": 17.5, "best_register": 0},
+            ],
+        }
+
+        summary = feature_assembly.summarize_relaxed_trace_subregions(trace, score_cutoff=12.5, phase=21)
+
+        self.assertEqual(summary["Howell_additional_peak_count"], 0)
+        self.assertEqual(summary["Howell_overlapping_alt_count"], 0)
+        self.assertEqual(len(summary["overlapping_alt_groups"]), 0)
+        self.assertIsNotNone(summary["main_biogenesis_unit"])
+        self.assertTrue(summary["main_biogenesis_unit"]["main_partner_present"])
+        self.assertEqual(sorted(summary["main_biogenesis_unit"]["member_strands"]), ["c", "w"])
+
+    def test_compute_phase_shift_nt_uses_signed_minimal_shift(self):
+        self.assertEqual(feature_assembly._compute_phase_shift_nt(100, 120, 21), -1)
+        self.assertEqual(feature_assembly._compute_phase_shift_nt(100, 112, 24), 12)
+
+    def test_summarize_relaxed_trace_subregions_requires_support_before_promoting_overlap(self):
+        trace = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 20.0, "best_register": 0},
+                {"anchor_position": 112, "window_start": 112, "window_end": 321, "score": 18.9, "best_register": 0},
+            ],
+            "c": [],
+        }
+
+        summary = feature_assembly.summarize_relaxed_trace_subregions(trace, score_cutoff=12.5, phase=21)
+
+        self.assertEqual(summary["Howell_overlapping_alt_count"], 0)
+        self.assertEqual(len(summary["promoted_secondary_units"]), 0)
+        self.assertEqual(len(summary["unpromoted_secondary_units"]), 1)
+
     def test_summarize_peak_howell_ambiguity_separates_extension_and_origin_frames(self):
         winner = {
             "strand": "w",

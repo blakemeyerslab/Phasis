@@ -64,6 +64,10 @@ PHASIRNA_EXPORT_COLUMNS = [
     "cID",
     "alib",
     "phase",
+    "window_unit_id",
+    "window_unit_role",
+    "window_unit_rank",
+    "window_unit_shift_nt",
     "strand",
     "observed_pos",
     "expected_register_pos",
@@ -191,26 +195,14 @@ def _adjust_phase_family_color(
 
 def _alternative_color_series(phase_value: int, category: str, *, count: int = MAX_COLORED_ALTERNATIVE_CANDIDATES) -> list[str]:
     base_color = _phase_color_hex(phase_value)
-    category_local = str(category or "").strip()
-    if category_local == "overlapping_alternative":
-        recipes = [
-            (0.032, -0.060, 1.08),
-            (0.026, 0.015, 0.98),
-            (0.040, -0.095, 1.12),
-            (0.018, 0.075, 0.92),
-            (0.028, -0.015, 1.02),
-            (0.020, 0.115, 0.88),
-        ]
-    else:
-        recipes = [
-            (-0.012, 0.180, 0.86),
-            (-0.006, 0.105, 0.92),
-            (-0.018, 0.255, 0.80),
-            (-0.010, 0.145, 0.88),
-            (-0.016, 0.215, 0.84),
-            (-0.004, 0.065, 0.96),
-        ]
-
+    recipes = [
+        (0.020, -0.010, 1.04),
+        (0.016, 0.040, 0.98),
+        (0.012, 0.090, 0.94),
+        (0.008, 0.135, 0.90),
+        (0.004, 0.185, 0.86),
+        (0.000, 0.235, 0.82),
+    ]
     colors = []
     for idx in range(max(int(count), 0)):
         hue_shift, light_delta, sat_scale = recipes[idx % len(recipes)]
@@ -225,6 +217,15 @@ def _alternative_color_series(phase_value: int, category: str, *, count: int = M
     return colors
 
 
+def _main_unit_color(phase_value: int) -> str:
+    return _adjust_phase_family_color(
+        _phase_color_hex(phase_value),
+        hue_shift=0.028,
+        light_delta=-0.075,
+        sat_scale=1.10,
+    )
+
+
 def _alternative_category_label(category: str) -> str:
     return ALTERNATIVE_CATEGORY_LABELS.get(str(category or "").strip(), "Alternative candidate")
 
@@ -236,7 +237,9 @@ def _format_shift_nt_text(value) -> str:
         return "NA"
     if shift_value == 0:
         return "0 nt"
-    return f"+{shift_value} nt"
+    if shift_value > 0:
+        return f"+{shift_value} nt"
+    return f"{shift_value} nt"
 
 
 def _read_length_color_hex(length_value) -> str:
@@ -397,6 +400,41 @@ def _build_score_exact_guide_specs(hpsp_row: dict | None, phase_value: int, trac
     return [specs_by_pos[pos] for pos in sorted(specs_by_pos)]
 
 
+def _build_unit_member_guide_specs(member: dict, phase_value: int, color: str) -> list[dict]:
+    peak_row = member.get("peak_row")
+    strand_code = member.get("strand", "w")
+    trace_rows = member.get("rows", [])
+    guide_specs = _build_score_exact_guide_specs(peak_row, phase_value, trace_rows, strand_code)
+    for spec in guide_specs:
+        spec["color"] = str(color)
+        spec["strand"] = _normalize_strand_code(strand_code)
+        # The HPSP dot stays red in the lower panel, but the main-unit guide
+        # itself should remain within the phase-family color.
+        spec["is_hpsp"] = False
+    return guide_specs
+
+
+def _build_main_unit_guide_specs(main_unit: dict | None, phase_value: int) -> dict:
+    guide_specs = {"w": [], "c": []}
+    if not main_unit:
+        return guide_specs
+    color = _main_unit_color(phase_value)
+    seen = set()
+    for member in list(main_unit.get("members") or []):
+        for spec in _build_unit_member_guide_specs(member, phase_value, color):
+            key = (
+                _normalize_strand_code(spec.get("strand")),
+                round(float(spec.get("pos", 0.0)), 6),
+                bool(spec.get("extended", False)),
+                str(color),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            guide_specs[_normalize_strand_code(spec.get("strand"))].append(spec)
+    return guide_specs
+
+
 def _axis_abs_formatter(value, _pos):
     if abs(value) < 1e-9:
         return "0"
@@ -445,6 +483,36 @@ def _build_colored_candidate_guide_specs(candidate: dict, phase_value: int) -> l
     guide_specs = _build_score_exact_guide_specs(peak_row, phase_value, trace_rows, strand_code)
     for spec in guide_specs:
         spec["color"] = color
+        spec["strand"] = _normalize_strand_code(strand_code)
+        spec["is_hpsp"] = False
+    return guide_specs
+
+
+def _candidate_unit_members(candidate: dict) -> list[dict]:
+    members = list(candidate.get("members") or [])
+    if members:
+        return [dict(member) for member in members]
+    return [dict(candidate)]
+
+
+def _build_colored_unit_guide_specs(candidate: dict, phase_value: int) -> list[dict]:
+    color = str(candidate.get("color", _phase_color_hex(phase_value)))
+    seen = set()
+    guide_specs = []
+    for member in _candidate_unit_members(candidate):
+        member["color"] = color
+        for spec in _build_colored_candidate_guide_specs(member, phase_value):
+            key = (
+                _normalize_strand_code(member.get("strand", "w")),
+                round(float(spec.get("pos", 0.0)), 6),
+                bool(spec.get("is_hpsp", False)),
+                bool(spec.get("extended", False)),
+                color,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            guide_specs.append(spec)
     return guide_specs
 
 
@@ -490,6 +558,27 @@ def _build_candidate_exact_overlay_rows(candidate: dict, phase_value: int) -> li
     return rows
 
 
+def _build_candidate_unit_exact_overlay_rows(candidate: dict, phase_value: int) -> list[dict]:
+    color = str(candidate.get("color", _phase_color_hex(phase_value)))
+    seen = set()
+    rows = []
+    for member in _candidate_unit_members(candidate):
+        member["color"] = color
+        for row in _build_candidate_exact_overlay_rows(member, phase_value):
+            key = (
+                round(float(row.get("x", 0.0)), 6),
+                round(float(row.get("y", 0.0)), 6),
+                str(row.get("edgecolor")),
+                str(candidate.get("category", "")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            row["category"] = candidate.get("category")
+            rows.append(row)
+    return rows
+
+
 def _build_abundance_rows(cluster_df: pd.DataFrame):
     rows = []
     if cluster_df.empty:
@@ -529,6 +618,7 @@ def _build_howell_rows(
     *,
     plot_mode: str = "debug",
     trace_context=None,
+    exact_color: str | None = None,
 ):
     rows = []
     strand_local = _normalize_strand_code(strand_code)
@@ -541,7 +631,7 @@ def _build_howell_rows(
     hpsp_row = (trace_context.get("strand_hpsp_rows") or {}).get(strand_local)
     register_origin = (trace_context.get("strand_register_origins") or {}).get(strand_local)
     hpsp_position = None if register_origin is None else int(register_origin)
-    phase_color = _phase_color_hex(phase_value)
+    phase_color = str(exact_color or _phase_color_hex(phase_value))
     direction = 1.0 if _is_forward_strand(strand_code) else -1.0
 
     for row in strand_rows:
@@ -594,7 +684,10 @@ def _build_howell_rows(
 
 def _rank_plot_alternative_candidates(summary: dict, phase_value: int) -> list[dict]:
     candidate_pool = []
-    for group in summary.get("additional_peak_groups", []) or []:
+    promoted_additional_groups = summary.get("promoted_additional_peak_groups")
+    if promoted_additional_groups is None:
+        promoted_additional_groups = summary.get("additional_peak_groups", [])
+    for group in promoted_additional_groups or []:
         candidate = dict(group)
         candidate["category"] = "other_local_peak"
         candidate_pool.append(candidate)
@@ -612,17 +705,19 @@ def _rank_plot_alternative_candidates(summary: dict, phase_value: int) -> list[d
     )
     selected = candidate_pool[:MAX_COLORED_ALTERNATIVE_CANDIDATES]
 
-    category_counts: dict[str, int] = {}
-    for candidate in selected:
-        category = str(candidate.get("category", "")).strip()
-        color_index = int(category_counts.get(category, 0))
-        category_counts[category] = color_index + 1
-        candidate["category_rank"] = color_index + 1
-        candidate["color"] = _alternative_color_series(
-            phase_value,
-            category,
-            count=MAX_COLORED_ALTERNATIVE_CANDIDATES,
-        )[color_index]
+    secondary_colors = _alternative_color_series(
+        phase_value,
+        "secondary_units",
+        count=MAX_COLORED_ALTERNATIVE_CANDIDATES,
+    )
+    for rank_index, candidate in enumerate(selected, start=1):
+        candidate["category_rank"] = sum(
+            1
+            for earlier in selected[: rank_index - 1]
+            if str(earlier.get("category", "")).strip() == str(candidate.get("category", "")).strip()
+        ) + 1
+        candidate["secondary_rank"] = int(rank_index)
+        candidate["color"] = secondary_colors[rank_index - 1]
     return selected
 
 
@@ -636,9 +731,10 @@ def _build_alternative_plot_layers(summary: dict, phase_value: int) -> dict:
     for candidate in selected:
         category = str(candidate.get("category", "")).strip()
         grouped_candidates.setdefault(category, []).append(candidate)
-        strand_code = _normalize_strand_code(candidate.get("strand", "w"))
-        guide_specs[strand_code].extend(_build_colored_candidate_guide_specs(candidate, phase_value))
-        overlay_rows.extend(_build_candidate_exact_overlay_rows(candidate, phase_value))
+        for spec in _build_colored_unit_guide_specs(candidate, phase_value):
+            strand_code = _normalize_strand_code(spec.get("strand", candidate.get("strand", "w")))
+            guide_specs[strand_code].append(spec)
+        overlay_rows.extend(_build_candidate_unit_exact_overlay_rows(candidate, phase_value))
 
     for category in ("other_local_peak", "overlapping_alternative"):
         candidates = grouped_candidates.get(category)
@@ -659,7 +755,7 @@ def _build_alternative_plot_layers(summary: dict, phase_value: int) -> dict:
 
 
 def _build_plot_legend_groups(phase_value: int, *, plot_mode: str = "clean", alternative_legend_groups=None):
-    phase_color = _phase_color_hex(phase_value)
+    phase_color = _main_unit_color(phase_value)
     howell_third_label = "Non-in-phase phased window"
     legend_groups = {
         "read_lengths": [
@@ -758,7 +854,7 @@ def _add_grouped_legends(
             float(main_left) + main_width * 0.43,
             float(main_left) + main_width * 0.62,
         )
-        alt_y = float(legend_y) - 0.055
+        alt_y = max(float(legend_y) - 0.082, LOCUS_LAYOUT["abun_bottom"] + LOCUS_LAYOUT["abun_height"] + 0.03)
         for idx, group in enumerate(alternative_groups[:2]):
             swatches = tuple(
                 Line2D(
@@ -1056,6 +1152,10 @@ def _materialize_export_rows(
     alib_value: str,
     phase_value: int,
     strand_code: str,
+    window_unit_id: str,
+    window_unit_role: str,
+    window_unit_rank: int,
+    window_unit_shift_nt,
 ) -> list[dict]:
     rows = []
     for row in rows_df.itertuples(index=False):
@@ -1065,6 +1165,10 @@ def _materialize_export_rows(
                 "cID": cid_value,
                 "alib": alib_value,
                 "phase": int(phase_value),
+                "window_unit_id": str(window_unit_id),
+                "window_unit_role": str(window_unit_role),
+                "window_unit_rank": int(window_unit_rank),
+                "window_unit_shift_nt": window_unit_shift_nt,
                 "strand": _normalize_strand_code(strand_code),
                 "observed_pos": int(getattr(row, "pos")),
                 "expected_register_pos": int(expected_position),
@@ -1087,6 +1191,10 @@ def _collect_export_rows_for_strand(
     identifier_text: str,
     cid_value: str,
     alib_value: str,
+    window_unit_id: str = "unit_0",
+    window_unit_role: str = "main_hpsp",
+    window_unit_rank: int = 0,
+    window_unit_shift_nt=np.nan,
 ) -> list[dict]:
     if cluster_df.empty:
         return []
@@ -1127,6 +1235,10 @@ def _collect_export_rows_for_strand(
                     alib_value=alib_value,
                     phase_value=phase_value,
                     strand_code=strand_code,
+                    window_unit_id=window_unit_id,
+                    window_unit_role=window_unit_role,
+                    window_unit_rank=window_unit_rank,
+                    window_unit_shift_nt=window_unit_shift_nt,
                 )
             )
             continue
@@ -1146,6 +1258,10 @@ def _collect_export_rows_for_strand(
                 alib_value=alib_value,
                 phase_value=phase_value,
                 strand_code=strand_code,
+                window_unit_id=window_unit_id,
+                window_unit_role=window_unit_role,
+                window_unit_rank=window_unit_rank,
+                window_unit_shift_nt=window_unit_shift_nt,
             )
         )
 
@@ -1164,10 +1280,64 @@ def _collect_export_rows_for_strand(
                 alib_value=alib_value,
                 phase_value=phase_value,
                 strand_code=strand_code,
+                window_unit_id=window_unit_id,
+                window_unit_role=window_unit_role,
+                window_unit_rank=window_unit_rank,
+                window_unit_shift_nt=window_unit_shift_nt,
             )
         )
 
     return export_rows
+
+
+def _unit_member_export_positions(member: dict, phase_value: int) -> tuple[list[int], list[int]]:
+    peak_row = member.get("peak_row")
+    strand_code = member.get("strand", "w")
+    trace_rows = member.get("rows", [])
+    base_positions, register_origin = _build_scored_register_positions(
+        peak_row,
+        phase_value,
+        strand_code,
+    )
+    extended_positions = _collect_extended_register_positions(
+        trace_rows,
+        register_origin,
+        base_positions,
+        phase_value,
+    )
+    return base_positions, extended_positions
+
+
+def _export_rows_for_unit_member(
+    cluster_df: pd.DataFrame,
+    *,
+    member: dict,
+    phase_value: int,
+    identifier_text: str,
+    cid_value: str,
+    alib_value: str,
+    window_unit_id: str,
+    window_unit_role: str,
+    window_unit_rank: int,
+    window_unit_shift_nt,
+) -> list[dict]:
+    base_positions, extended_positions = _unit_member_export_positions(member, phase_value)
+    if not base_positions and not extended_positions:
+        return []
+    return _collect_export_rows_for_strand(
+        cluster_df,
+        phase_value=phase_value,
+        strand_code=str(member.get("strand", "w")),
+        base_positions=base_positions,
+        extended_positions=extended_positions,
+        identifier_text=identifier_text,
+        cid_value=cid_value,
+        alib_value=alib_value,
+        window_unit_id=window_unit_id,
+        window_unit_role=window_unit_role,
+        window_unit_rank=window_unit_rank,
+        window_unit_shift_nt=window_unit_shift_nt,
+    )
 
 
 def _build_x_bounds(cluster_df: pd.DataFrame, identifier_text: str, howell_rows, phase_value: int):
@@ -1264,6 +1434,59 @@ def _crowding_interpretation_line(crowding_window_count: int) -> str | None:
     return "Dense non-in-phase context (>5)"
 
 
+def _small_count_text(value: int) -> str:
+    lookup = {
+        0: "Zero",
+        1: "One",
+        2: "Two",
+        3: "Three",
+        4: "Four",
+        5: "Five",
+        6: "Six",
+        7: "Seven",
+        8: "Eight",
+        9: "Nine",
+        10: "Ten",
+        11: "Eleven",
+        12: "Twelve",
+    }
+    try:
+        ivalue = int(value)
+    except Exception:
+        return str(value)
+    return lookup.get(ivalue, str(ivalue))
+
+
+def _non_in_phase_context_sentence(payload: dict) -> str | None:
+    crowding_count = payload.get("crowding_window_count_value")
+    if crowding_count is None:
+        return None
+    try:
+        count_local = int(crowding_count)
+    except Exception:
+        return None
+    if count_local <= 0:
+        return None
+
+    promoted_overlap_count = int(payload.get("overlapping_alt_count_value") or 0)
+    promoted_distal_count = int(payload.get("promoted_additional_peak_count_value") or 0)
+    promoted_total = int(promoted_overlap_count + promoted_distal_count)
+
+    count_text = _small_count_text(count_local)
+    noun = "window" if count_local == 1 else "windows"
+    if promoted_total <= 0:
+        verb = "was" if count_local == 1 else "were"
+        return (
+            f"{count_text} non-in-phase context {noun} {verb} detected "
+            f"near the main Howell peak, but no secondary candidate unit was promoted."
+        )
+    verb = "remains" if count_local == 1 else "remain"
+    return (
+        f"{count_text} additional non-in-phase context {noun} {verb} "
+        f"unpromoted near the main Howell peak."
+    )
+
+
 def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
     final_class = _clean_ambiguity_text(task.get("final_class")) or "non-PHAS"
     origin_class_raw = _clean_ambiguity_text(task.get("Howell_origin_class")) or ""
@@ -1301,7 +1524,7 @@ def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
         lines.append(crowding_line)
     overlapping_alt_count = payload["overlapping_alt_count_value"] or 0
     if overlapping_alt_count > 0:
-        lines.append("Strong overlapping alternatives detected")
+        lines.append("Promoted secondary relaxed candidate units present")
     if final_class == "PHAS-like":
         if relaxed_peak_score is not None and relaxed_peak_score < 20.0:
             lines.append("Modest relaxed Howell support")
@@ -1323,6 +1546,7 @@ def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
 
 def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") -> dict:
     exact_support = _clean_ambiguity_float(task.get("Howell_exact_support_score"))
+    relaxed_peak_score = _clean_ambiguity_float(task.get("Peak_Howell_score"))
     overlap_count = _clean_ambiguity_count(task.get("Howell_ambiguity_count"))
     alt_register_count = _clean_ambiguity_count(task.get("Howell_alt_register_count"))
     overlap_margin = _clean_ambiguity_float(task.get("Howell_overlap_margin"))
@@ -1334,6 +1558,8 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
     origin_class = _format_origin_class(task.get("Howell_origin_class"))
     additional_peak_count = _clean_ambiguity_count(task.get("Howell_additional_peak_count"))
     additional_peak_best_score = _clean_ambiguity_float(task.get("Howell_additional_peak_best_score"))
+    promoted_additional_peak_count = _clean_ambiguity_count(task.get("Howell_promoted_additional_peak_count"))
+    promoted_additional_peak_best_score = _clean_ambiguity_float(task.get("Howell_promoted_additional_peak_best_score"))
     overlapping_alt_count = _clean_ambiguity_count(task.get("Howell_overlapping_alt_count"))
     overlapping_alt_best_score = _clean_ambiguity_float(task.get("Howell_overlapping_alt_best_score"))
     overlapping_alt_best_shift_nt = _clean_ambiguity_float(task.get("Howell_overlapping_alt_best_shift_nt"))
@@ -1343,6 +1569,8 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
     payload = {
         "exact_support": "NA" if exact_support is None else f"{exact_support:.2f}",
         "exact_support_value": exact_support,
+        "relaxed_peak_score": "NA" if relaxed_peak_score is None else f"{relaxed_peak_score:.2f}",
+        "relaxed_peak_score_value": relaxed_peak_score,
         "origin_class": origin_class,
         "extension_window_count": "NA" if extension_window_count is None else str(extension_window_count),
         "extension_window_count_value": extension_window_count,
@@ -1359,6 +1587,11 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
         "additional_peak_best_score": "NA" if additional_peak_best_score is None else f"{additional_peak_best_score:.2f}",
         "additional_peak_best_score_value": additional_peak_best_score,
         "additional_peak_cutoff": _howell_peak_cutoff_text(),
+        "promoted_additional_peak_count_value": promoted_additional_peak_count,
+        "promoted_additional_peak_best_score": (
+            "NA" if promoted_additional_peak_best_score is None else f"{promoted_additional_peak_best_score:.2f}"
+        ),
+        "promoted_additional_peak_best_score_value": promoted_additional_peak_best_score,
         "overlapping_alt_count": "NA" if overlapping_alt_count is None else str(overlapping_alt_count),
         "overlapping_alt_count_value": overlapping_alt_count,
         "overlapping_alt_best_score": "NA" if overlapping_alt_best_score is None else f"{overlapping_alt_best_score:.2f}",
@@ -1380,6 +1613,7 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
         "plot_mode": _normalize_locus_plot_mode(plot_mode),
     }
     payload["interpretation_lines"] = _build_interpretation_lines(task, payload)
+    payload["non_in_phase_context_sentence"] = _non_in_phase_context_sentence(payload)
     return payload
 
 
@@ -1388,8 +1622,8 @@ def _build_ambiguity_sidebar_note(task: dict, *, plot_mode: str = "clean") -> st
     if exact_support is None or exact_support <= 0.0:
         return "Exact-only interpretation unavailable.\nRelaxed HPSP lacks exact support.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
     if _normalize_locus_plot_mode(plot_mode) == "clean":
-        return "Grey points show non-in-phase phased windows.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
-    return "Grey points show non-in-phase phased windows.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
+        return "Non-in-phase phased windows are shown as hollow points.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
+    return "Non-in-phase phased windows are shown as hollow points.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
 
 
 def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean") -> list[dict]:
@@ -1398,12 +1632,13 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
             "title": "Exact-only Howell",
             "title_fontsize": 8.6,
             "line_fontsize": 7.8,
-            "lines": [
-                f"Support: {payload['exact_support']}",
-                f"Class: {payload['origin_class']}",
-            ],
-        }
-    ]
+                "lines": [
+                    f"Support: {payload['exact_support']}",
+                    f"Relaxed peak: {payload['relaxed_peak_score']}",
+                    f"Class: {payload['origin_class']}",
+                ],
+            }
+        ]
 
     if payload["interpretation_lines"]:
         sections.append(
@@ -1449,18 +1684,15 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
             }
         )
 
-    if (
-        (payload["additional_peak_count_value"] or 0) > 0
-        or payload["additional_peak_best_score_value"] is not None
-    ):
+    if (payload["promoted_additional_peak_count_value"] or 0) > 0:
         sections.append(
             {
                 "title": "Other local peaks",
                 "title_fontsize": 8.0,
                 "line_fontsize": 7.2,
                 "lines": [
-                    f"Count: {payload['additional_peak_count']}",
-                    f"Best: {payload['additional_peak_best_score']}",
+                    f"Count: {payload['promoted_additional_peak_count_value']}",
+                    f"Best: {payload['promoted_additional_peak_best_score']}",
                     f"Cutoff: {payload['additional_peak_cutoff']}",
                 ],
             }
@@ -1489,16 +1721,20 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
         or payload["crowding_best_score_value"] is not None
         or payload["crowding_score_gap_value"] is not None
     ):
+        crowding_lines = [
+            f"Windows: {payload['crowding_window_count']}",
+            f"Best: {payload['crowding_best_score']}",
+            f"Gap: {payload['crowding_score_gap']}",
+        ]
+        context_sentence = payload.get("non_in_phase_context_sentence")
+        if context_sentence:
+            crowding_lines.append(context_sentence)
         sections.append(
             {
-                "title": "Alternative phased-like windows",
+                "title": "Non-in-phase context windows",
                 "title_fontsize": 8.0,
                 "line_fontsize": 7.2,
-                "lines": [
-                    f"Windows: {payload['crowding_window_count']}",
-                    f"Best: {payload['crowding_best_score']}",
-                    f"Gap: {payload['crowding_score_gap']}",
-                ],
+                "lines": crowding_lines,
             }
         )
 
@@ -1558,6 +1794,10 @@ def _draw_strip_line(
     return y_value - (line_gap * line_count) - paragraph_gap
 
 
+def _wrap_strip_title(text_value: str, *, width: int = 24) -> str:
+    return _wrap_strip_text(text_value, width=width)
+
+
 def _draw_detachable_strip(fig, task: dict, layout: dict) -> None:
     strip_left = float(layout["strip_left"])
     strip_bottom = float(layout["strip_bottom"])
@@ -1576,11 +1816,19 @@ def _draw_detachable_strip(fig, task: dict, layout: dict) -> None:
     y_cursor = 0.95
     for section in sections:
         title_color = section.get("color", "#444444")
+        wrapped_title = _wrap_strip_title(
+            section["title"],
+            width=int(section.get("title_wrap_width", 24)),
+        )
+        wrapped_title_lines = max(wrapped_title.count("\n") + 1, 1)
+        title_fontsize = float(section.get("title_fontsize", 8.0))
+        if wrapped_title_lines > 1:
+            title_fontsize = min(title_fontsize, 7.6)
         y_cursor = _draw_strip_line(
             ax,
             y_cursor,
-            section["title"],
-            fontsize=section.get("title_fontsize", 8.0),
+            wrapped_title,
+            fontsize=title_fontsize,
             fontweight="bold",
             color=title_color,
         )
@@ -1639,6 +1887,13 @@ def _analyze_single_locus(task: dict) -> dict:
 
     trace = st_feat.enumerate_relaxed_howell_trace(cluster_df, phase=phase_value)
     browser_trace_context = st_feat.classify_browser_style_relaxed_trace(trace, phase=phase_value)
+    additional_peak_summary = st_feat.summarize_relaxed_trace_subregions(
+        trace,
+        score_cutoff=float(getattr(rt, "min_Howell_score", 12.5) or 12.5),
+        phase=phase_value,
+    )
+    main_unit = additional_peak_summary.get("main_biogenesis_unit")
+    main_phase_color = _main_unit_color(phase_value)
     w_trace = trace.get("w", [])
     c_trace = trace.get("c", [])
     if not w_trace and not c_trace:
@@ -1662,6 +1917,7 @@ def _analyze_single_locus(task: dict) -> dict:
         "w",
         plot_mode=plot_mode,
         trace_context=browser_trace_context,
+        exact_color=main_phase_color,
     )
     howell_rows_c, _hpsp_c, hpsp_row_c = _build_howell_rows(
         c_trace,
@@ -1669,48 +1925,90 @@ def _analyze_single_locus(task: dict) -> dict:
         "c",
         plot_mode=plot_mode,
         trace_context=browser_trace_context,
+        exact_color=main_phase_color,
     )
     howell_rows = howell_rows_w + howell_rows_c
-    guide_specs_w = _build_score_exact_guide_specs(hpsp_row_w, phase_value, w_trace, "w")
-    guide_specs_c = _build_score_exact_guide_specs(hpsp_row_c, phase_value, c_trace, "c")
-    additional_peak_summary = st_feat.summarize_relaxed_trace_subregions(
-        trace,
-        score_cutoff=float(getattr(rt, "min_Howell_score", 12.5) or 12.5),
-        phase=phase_value,
-    )
+    main_unit_guides = _build_main_unit_guide_specs(main_unit, phase_value)
+    guide_specs_w = main_unit_guides["w"]
+    guide_specs_c = main_unit_guides["c"]
     alternative_layers = _build_alternative_plot_layers(additional_peak_summary, phase_value)
     exact_peak_summary = exact_competitor_context.get("summary") or {}
 
-    base_positions_w, register_origin_w = _build_scored_register_positions(hpsp_row_w, phase_value, "w")
-    base_positions_c, register_origin_c = _build_scored_register_positions(hpsp_row_c, phase_value, "c")
-    extended_positions_w = _collect_extended_register_positions(w_trace, register_origin_w, base_positions_w, phase_value)
-    extended_positions_c = _collect_extended_register_positions(c_trace, register_origin_c, base_positions_c, phase_value)
-
     export_rows = []
-    export_rows.extend(
-        _collect_export_rows_for_strand(
-            cluster_df,
-            phase_value=phase_value,
-            strand_code="w",
-            base_positions=base_positions_w,
-            extended_positions=extended_positions_w,
-            identifier_text=str(task["identifier_text"]),
-            cid_value=str(task["cid_value"]),
-            alib_value=str(task["alib_value"]),
+    if main_unit:
+        for member in list(main_unit.get("members") or []):
+            role = str(member.get("unit_role") or "main_hpsp")
+            export_rows.extend(
+                _export_rows_for_unit_member(
+                    cluster_df,
+                    member=member,
+                    phase_value=phase_value,
+                    identifier_text=str(task["identifier_text"]),
+                    cid_value=str(task["cid_value"]),
+                    alib_value=str(task["alib_value"]),
+                    window_unit_id="unit_main",
+                    window_unit_role=role,
+                    window_unit_rank=0,
+                    window_unit_shift_nt=(0 if role == "main_hpsp" else member.get("shift_nt", np.nan)),
+                )
+            )
+    else:
+        base_positions_w, register_origin_w = _build_scored_register_positions(hpsp_row_w, phase_value, "w")
+        base_positions_c, register_origin_c = _build_scored_register_positions(hpsp_row_c, phase_value, "c")
+        extended_positions_w = _collect_extended_register_positions(w_trace, register_origin_w, base_positions_w, phase_value)
+        extended_positions_c = _collect_extended_register_positions(c_trace, register_origin_c, base_positions_c, phase_value)
+        export_rows.extend(
+            _collect_export_rows_for_strand(
+                cluster_df,
+                phase_value=phase_value,
+                strand_code="w",
+                base_positions=base_positions_w,
+                extended_positions=extended_positions_w,
+                identifier_text=str(task["identifier_text"]),
+                cid_value=str(task["cid_value"]),
+                alib_value=str(task["alib_value"]),
+                window_unit_id="unit_main",
+                window_unit_role="main_hpsp",
+                window_unit_rank=0,
+                window_unit_shift_nt=0,
+            )
         )
-    )
-    export_rows.extend(
-        _collect_export_rows_for_strand(
-            cluster_df,
-            phase_value=phase_value,
-            strand_code="c",
-            base_positions=base_positions_c,
-            extended_positions=extended_positions_c,
-            identifier_text=str(task["identifier_text"]),
-            cid_value=str(task["cid_value"]),
-            alib_value=str(task["alib_value"]),
+        export_rows.extend(
+            _collect_export_rows_for_strand(
+                cluster_df,
+                phase_value=phase_value,
+                strand_code="c",
+                base_positions=base_positions_c,
+                extended_positions=extended_positions_c,
+                identifier_text=str(task["identifier_text"]),
+                cid_value=str(task["cid_value"]),
+                alib_value=str(task["alib_value"]),
+                window_unit_id="unit_main",
+                window_unit_role="main_hpsp",
+                window_unit_rank=0,
+                window_unit_shift_nt=0,
+            )
         )
-    )
+
+    for rank_index, unit in enumerate(additional_peak_summary.get("promoted_secondary_units", []) or [], start=1):
+        unit_id = f"unit_secondary_{rank_index}"
+        unit_role = str(unit.get("category") or "overlapping_alternative")
+        unit_shift_nt = unit.get("shift_nt", np.nan)
+        for member in _candidate_unit_members(unit):
+            export_rows.extend(
+                _export_rows_for_unit_member(
+                    cluster_df,
+                    member=member,
+                    phase_value=phase_value,
+                    identifier_text=str(task["identifier_text"]),
+                    cid_value=str(task["cid_value"]),
+                    alib_value=str(task["alib_value"]),
+                    window_unit_id=unit_id,
+                    window_unit_role=unit_role,
+                    window_unit_rank=rank_index,
+                    window_unit_shift_nt=unit_shift_nt,
+                )
+            )
 
     xmin, xmax = _build_x_bounds(cluster_df, str(task["identifier_text"]), howell_rows, phase_value)
     span = max(float(xmax) - float(xmin), float(phase_value))
@@ -1720,6 +2018,9 @@ def _analyze_single_locus(task: dict) -> dict:
     max_score = max([abs(row["y"]) for row in howell_rows], default=1.0)
     abun_ylim = max(1.0, max_abun * 1.15)
     score_ylim = max(1.0, max_score * 1.20)
+    promoted_additional_peak_groups = additional_peak_summary.get("promoted_additional_peak_groups")
+    if promoted_additional_peak_groups is None:
+        promoted_additional_peak_groups = additional_peak_summary.get("additional_peak_groups", []) or []
 
     return {
         "plot_payload": {
@@ -1731,6 +2032,7 @@ def _analyze_single_locus(task: dict) -> dict:
             "howell_rows": howell_rows,
             "guide_specs_w": guide_specs_w,
             "guide_specs_c": guide_specs_c,
+            "main_unit_color": main_phase_color,
             "alternative_guide_specs_w": alternative_layers["guide_specs_w"],
             "alternative_guide_specs_c": alternative_layers["guide_specs_c"],
             "alternative_howell_overlay_rows": alternative_layers["overlay_rows"],
@@ -1787,6 +2089,21 @@ def _analyze_single_locus(task: dict) -> dict:
             "Howell_additional_peak_best_score": _coalesce_task_metric(
                 task.get("Howell_additional_peak_best_score"),
                 additional_peak_summary.get("Howell_additional_peak_best_score"),
+            ),
+            "Howell_promoted_additional_peak_count": _coalesce_task_metric(
+                task.get("Howell_promoted_additional_peak_count"),
+                len(promoted_additional_peak_groups),
+            ),
+            "Howell_promoted_additional_peak_best_score": _coalesce_task_metric(
+                task.get("Howell_promoted_additional_peak_best_score"),
+                (
+                    np.nan
+                    if not promoted_additional_peak_groups
+                    else max(
+                        float(group.get("peak_score", 0.0) or 0.0)
+                        for group in promoted_additional_peak_groups
+                    )
+                ),
             ),
             "Howell_overlapping_alt_count": _coalesce_task_metric(
                 task.get("Howell_overlapping_alt_count"),

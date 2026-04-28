@@ -34,6 +34,7 @@ class LocusPlotHelperTests(unittest.TestCase):
         groups = locus_plots._build_plot_legend_groups(24, plot_mode="clean")
         labels = [item.get_label() for item in groups["howell"]]
         self.assertIn("Non-in-phase phased window", labels)
+        self.assertEqual(groups["howell"][0].get_markerfacecolor(), locus_plots._main_unit_color(24))
 
     def test_build_plot_legend_groups_can_include_grouped_alternative_entries(self):
         alt_groups = [
@@ -42,6 +43,55 @@ class LocusPlotHelperTests(unittest.TestCase):
         ]
         groups = locus_plots._build_plot_legend_groups(24, plot_mode="clean", alternative_legend_groups=alt_groups)
         self.assertEqual([item["label"] for item in groups["alternatives"]], ["Other local peaks", "Overlapping alternative candidates"])
+
+    def test_build_alternative_plot_layers_keeps_merged_strand_pair_on_one_color(self):
+        summary = {
+            "additional_peak_groups": [],
+            "overlapping_alt_groups": [
+                {
+                    "category": "overlapping_alternative",
+                    "peak_score": 15.0,
+                    "shift_nt": 10,
+                    "strand": "w",
+                    "members": [
+                        {
+                            "strand": "w",
+                            "rows": [
+                                {"anchor_position": 110, "window_start": 110, "window_end": 319, "score": 15.0, "best_register": 0},
+                                {"anchor_position": 131, "window_start": 131, "window_end": 340, "score": 14.0, "best_register": 0},
+                            ],
+                            "peak_row": {"anchor_position": 110, "window_start": 110, "window_end": 319, "score": 15.0, "best_register": 0},
+                            "peak_score": 15.0,
+                            "register_origin": 110,
+                            "shift_nt": 10,
+                            "min_start": 110,
+                            "max_end": 340,
+                        },
+                        {
+                            "strand": "c",
+                            "rows": [
+                                {"anchor_position": 301, "window_start": 92, "window_end": 301, "score": 14.5, "best_register": 0},
+                                {"anchor_position": 280, "window_start": 71, "window_end": 280, "score": 13.5, "best_register": 0},
+                            ],
+                            "peak_row": {"anchor_position": 301, "window_start": 92, "window_end": 301, "score": 14.5, "best_register": 0},
+                            "peak_score": 14.5,
+                            "register_origin": 301,
+                            "shift_nt": 10,
+                            "min_start": 92,
+                            "max_end": 301,
+                        },
+                    ],
+                }
+            ],
+        }
+
+        layers = locus_plots._build_alternative_plot_layers(summary, 21)
+
+        self.assertEqual(len(layers["legend_groups"]["overlapping_alternative"]["colors"]), 1)
+        self.assertTrue(layers["guide_specs_w"])
+        self.assertTrue(layers["guide_specs_c"])
+        overlay_colors = {row["edgecolor"] for row in layers["overlay_rows"]}
+        self.assertEqual(len(overlay_colors), 1)
 
     def test_format_locus_title_italicizes_phas_classes(self):
         self.assertIn(r"$\it{PHAS}$", locus_plots._format_locus_title("libA", "chr1:100..196", 24, "PHAS"))
@@ -145,6 +195,8 @@ class LocusPlotHelperTests(unittest.TestCase):
         self.assertIn((172, 172, "extended_exact", "EXTENDED_EXACT"), observed)
         self.assertNotIn((99, 100, "core_offset", "OFFSET_LEFT_IGNORED"), observed)
         self.assertNotIn((171, 172, "extended_exact", "EXTENDED_OFFSET_IGNORED"), observed)
+        self.assertTrue(all("window_unit_id" in row for row in export_rows))
+        self.assertTrue(all("window_unit_role" in row for row in export_rows))
 
 
 class LocusPlotExportIntegrationTests(unittest.TestCase):
@@ -179,8 +231,93 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
         self.assertNotIn("Origin ambiguity", titles)
         self.assertIn("Interpretation", titles)
         self.assertIn("Notes", titles)
+        self.assertEqual(payload["relaxed_peak_score"], "NA")
         note_lines = [line for section in sections if section["title"] == "Notes" for line in section["lines"]]
         self.assertTrue(any("10-cycle window" in line for line in note_lines))
+        self.assertFalse(any("Grey" in line for line in note_lines))
+
+    def test_context_section_uses_non_in_phase_title_and_plural_sentence_without_promoted_units(self):
+        task = {
+            "Howell_exact_support_score": 14.7,
+            "Peak_Howell_score": 15.14,
+            "Howell_origin_class": "coherent_extension",
+            "Howell_extension_window_count": 86,
+            "Howell_extension_span_nt": 317,
+            "Howell_origin_window_count": 0,
+            "Howell_origin_frame_count": 0,
+            "Howell_origin_margin": np.nan,
+            "Howell_additional_peak_count": 2,
+            "Howell_additional_peak_best_score": 12.9,
+            "Howell_promoted_additional_peak_count": 0,
+            "Howell_promoted_additional_peak_best_score": np.nan,
+            "Howell_overlapping_alt_count": 0,
+            "Howell_overlapping_alt_best_score": np.nan,
+            "Howell_overlapping_alt_best_shift_nt": np.nan,
+            "Howell_crowding_window_count": 2,
+            "Howell_crowding_best_score": 13.73,
+            "Howell_crowding_score_gap": 0.82,
+            "final_class": "PHAS",
+        }
+
+        payload = locus_plots._build_ambiguity_sidebar_payload(task, plot_mode="clean")
+        sections = locus_plots._build_strip_sections(task, payload, plot_mode="clean")
+        context_section = next(section for section in sections if section["title"] == "Non-in-phase context windows")
+
+        self.assertEqual(
+            payload["non_in_phase_context_sentence"],
+            "Two non-in-phase context windows were detected near the main Howell peak, but no secondary candidate unit was promoted.",
+        )
+        self.assertIn(payload["non_in_phase_context_sentence"], context_section["lines"])
+        self.assertNotIn("Overlapping alternative candidates", [section["title"] for section in sections])
+        self.assertNotIn("Other local peaks", [section["title"] for section in sections])
+
+    def test_context_section_uses_singular_sentence_for_one_window(self):
+        task = {
+            "Howell_exact_support_score": 14.7,
+            "Peak_Howell_score": 15.14,
+            "Howell_origin_class": "coherent_extension",
+            "Howell_overlapping_alt_count": 0,
+            "Howell_promoted_additional_peak_count": 0,
+            "Howell_crowding_window_count": 1,
+            "Howell_crowding_best_score": 13.73,
+            "Howell_crowding_score_gap": 0.82,
+            "final_class": "PHAS",
+        }
+
+        payload = locus_plots._build_ambiguity_sidebar_payload(task, plot_mode="clean")
+        self.assertEqual(
+            payload["non_in_phase_context_sentence"],
+            "One non-in-phase context window was detected near the main Howell peak, but no secondary candidate unit was promoted.",
+        )
+
+    def test_context_section_uses_additional_sentence_when_promoted_units_exist(self):
+        task = {
+            "Howell_exact_support_score": 14.7,
+            "Peak_Howell_score": 15.14,
+            "Howell_origin_class": "coherent_extension",
+            "Howell_additional_peak_count": 1,
+            "Howell_additional_peak_best_score": 12.9,
+            "Howell_promoted_additional_peak_count": 0,
+            "Howell_promoted_additional_peak_best_score": np.nan,
+            "Howell_overlapping_alt_count": 1,
+            "Howell_overlapping_alt_best_score": 14.5,
+            "Howell_overlapping_alt_best_shift_nt": 2.0,
+            "Howell_crowding_window_count": 2,
+            "Howell_crowding_best_score": 13.73,
+            "Howell_crowding_score_gap": 0.82,
+            "final_class": "PHAS",
+        }
+
+        payload = locus_plots._build_ambiguity_sidebar_payload(task, plot_mode="clean")
+        sections = locus_plots._build_strip_sections(task, payload, plot_mode="clean")
+        context_section = next(section for section in sections if section["title"] == "Non-in-phase context windows")
+
+        self.assertEqual(
+            payload["non_in_phase_context_sentence"],
+            "Two additional non-in-phase context windows remain unpromoted near the main Howell peak.",
+        )
+        self.assertIn(payload["non_in_phase_context_sentence"], context_section["lines"])
+        self.assertIn("Overlapping alternative candidates", [section["title"] for section in sections])
 
     def test_clean_mode_analyze_single_locus_uses_browser_style_other_points(self):
         task = {
@@ -346,6 +483,42 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
         self.assertIn("other_local_peak", payload["alternative_legend_groups"])
         self.assertIn("overlapping_alternative", payload["alternative_legend_groups"])
         self.assertTrue(payload["alternative_howell_overlay_rows"])
+        self.assertEqual(int(payload["Howell_promoted_additional_peak_count"]), 1)
+
+    def test_export_rows_include_main_unit_metadata(self):
+        labeled_features = pd.DataFrame(
+            [
+                {"identifier": "chr1:100..196", "alib": "libA", "cID": "cluster_1", "label": "PHAS", "final_class": "PHAS"},
+            ]
+        )
+        clusters_data = pd.DataFrame(
+            [
+                {"clusterID": "cluster_1", "identifier": "chr1:100..196", "alib": "libA", "pos": 100, "abun": 5, "len": 24, "strand": "w", "tag_seq": "A1", "hits": 1},
+                {"clusterID": "cluster_1", "identifier": "chr1:100..196", "alib": "libA", "pos": 124, "abun": 6, "len": 24, "strand": "w", "tag_seq": "A2", "hits": 1},
+                {"clusterID": "cluster_1", "identifier": "chr1:100..196", "alib": "libA", "pos": 148, "abun": 7, "len": 24, "strand": "w", "tag_seq": "A3", "hits": 1},
+                {"clusterID": "cluster_1", "identifier": "chr1:100..196", "alib": "libA", "pos": 172, "abun": 8, "len": 24, "strand": "w", "tag_seq": "A4", "hits": 1},
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as outdir:
+            with mock.patch.object(locus_plots, "run_parallel_with_progress", side_effect=_serial_parallel_runner):
+                with mock.patch.object(locus_plots.rt, "plot_staging", "direct"):
+                    with mock.patch.object(locus_plots.rt, "save_snapshot", return_value=None):
+                        locus_plots.write_individual_phas_locus_plots(
+                            "KNN",
+                            labeled_features,
+                            clusters_data,
+                            job_outdir=outdir,
+                            job_phase=24,
+                        )
+
+            export_df = pd.read_csv(os.path.join(outdir, "24_KNN_phasiRNAs.tsv"), sep="\t")
+            self.assertIn("window_unit_id", export_df.columns)
+            self.assertIn("window_unit_role", export_df.columns)
+            self.assertIn("window_unit_rank", export_df.columns)
+            self.assertIn("window_unit_shift_nt", export_df.columns)
+            self.assertEqual(sorted(export_df["window_unit_role"].unique().tolist()), ["main_hpsp"])
+            self.assertEqual(sorted(export_df["window_unit_id"].unique().tolist()), ["unit_main"])
 
     def test_write_individual_plots_routes_phas_like_to_separate_outputs(self):
         labeled_features = pd.DataFrame(
