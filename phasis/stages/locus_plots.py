@@ -1166,6 +1166,7 @@ def _add_grouped_legends(
         loc="upper left",
         bbox_to_anchor=(abundance_legend_x, legend_y),
         ncol=1,
+        labelspacing=0.78,
         handler_map={tuple: HandlerTuple(ndivide=1, pad=0.0)},
         **legend_common,
     )
