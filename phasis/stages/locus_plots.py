@@ -96,17 +96,41 @@ DARK_GREY = "#5A5A5A"
 HPSP_RED = "#D62828"
 CENTER_LINE_COLOR = "#8C8C8C"
 NON_PHASE_GREY = "#9A9A9A"
+CONTEXT_PHASE_BLUE = "#A6D8FF"
 EXTENDED_GUIDE_COLOR = "#000000"
 DETACHABLE_STRIP_BG = "#FAFAFA"
 DETACHABLE_SEPARATOR_COLOR = "#9A9A9A"
 DETACHABLE_SEPARATOR_STYLE = (0, (1.2, 2.2))
 ALTERNATIVE_CATEGORY_LABELS = {
-    "other_local_peak": "Other local peaks",
-    "overlapping_alternative": "Overlapping alternative candidates",
+    "other_local_peak": "Secondary phased windows",
+    "overlapping_alternative": "Overlapping alternative windows",
 }
 ALTERNATIVE_CATEGORY_PRIORITY = {
     "overlapping_alternative": 0,
     "other_local_peak": 1,
+}
+SECONDARY_CATEGORY_BASE_COLORS = {
+    "overlapping_alternative": "#0F8B8D",
+    "other_local_peak": "#A63A50",
+    "secondary_units": "#0F8B8D",
+}
+SECONDARY_CATEGORY_COLOR_SERIES = {
+    "overlapping_alternative": [
+        "#0B7285",
+        "#1B9E77",
+        "#0E7490",
+        "#2D6A4F",
+        "#1F7A8C",
+        "#4C956C",
+    ],
+    "other_local_peak": [
+        "#A63A50",
+        "#C06C84",
+        "#7A3E48",
+        "#D891B7",
+        "#8E4A67",
+        "#BF6B7A",
+    ],
 }
 ORIGIN_CLASS_LABELS = {
     "insufficient_exact_support": "Insufficient exact support",
@@ -119,19 +143,19 @@ LOCUS_LAYOUT = {
     "figsize": (13.2, 6.8),
     "main_left": 0.08,
     "main_right": 0.80,
-    "strip_left": 0.835,
-    "strip_right": 0.98,
+    "strip_left": 0.826,
+    "strip_right": 0.985,
     "abun_bottom": 0.50,
-    "abun_height": 0.28,
-    "howell_bottom": 0.11,
-    "howell_height": 0.28,
-    "strip_bottom": 0.13,
-    "strip_top": 0.80,
-    "separator_x": 0.818,
+    "abun_height": 0.29,
+    "howell_bottom": 0.08,
+    "howell_height": 0.29,
+    "strip_bottom": 0.085,
+    "strip_top": 0.835,
+    "separator_x": 0.812,
     "separator_bottom": 0.085,
     "separator_top": 0.895,
-    "legend_y": 0.915,
-    "title_y": 0.975,
+    "legend_y": 0.900,
+    "title_y": 0.985,
 }
 
 
@@ -194,14 +218,18 @@ def _adjust_phase_family_color(
 
 
 def _alternative_color_series(phase_value: int, category: str, *, count: int = MAX_COLORED_ALTERNATIVE_CANDIDATES) -> list[str]:
-    base_color = _phase_color_hex(phase_value)
+    predefined = SECONDARY_CATEGORY_COLOR_SERIES.get(str(category).strip())
+    if predefined:
+        return [predefined[idx % len(predefined)] for idx in range(max(int(count), 0))]
+
+    base_color = SECONDARY_CATEGORY_BASE_COLORS.get(str(category).strip(), _phase_color_hex(phase_value))
     recipes = [
-        (0.020, -0.010, 1.04),
-        (0.016, 0.040, 0.98),
-        (0.012, 0.090, 0.94),
-        (0.008, 0.135, 0.90),
-        (0.004, 0.185, 0.86),
-        (0.000, 0.235, 0.82),
+        (0.000, -0.045, 1.10),
+        (0.008, 0.020, 1.00),
+        (0.014, 0.075, 0.94),
+        (0.020, 0.125, 0.88),
+        (0.026, 0.175, 0.82),
+        (0.032, 0.225, 0.76),
     ]
     colors = []
     for idx in range(max(int(count), 0)):
@@ -259,6 +287,41 @@ def _normalize_strand_code(strand_code: str) -> str:
     if text in {"c", "-", "crick", "0", "false"}:
         return "c"
     return "w"
+
+
+def _promoted_unit_member_strands(unit: dict) -> set[str]:
+    strands: set[str] = set()
+    for member in unit.get("members") or []:
+        if not isinstance(member, dict):
+            continue
+        # Count only strands that are actually represented in the promoted unit.
+        if not (member.get("rows") or member.get("peak_row")):
+            continue
+        strands.add(_normalize_strand_code(member.get("strand", unit.get("strand", "w"))))
+    if strands:
+        return strands
+
+    raw_strands = unit.get("member_strands")
+    if isinstance(raw_strands, str):
+        raw_strands = re.split(r"[,;/\s]+", raw_strands.strip())
+    for strand in raw_strands or []:
+        strands.add(_normalize_strand_code(strand))
+    if strands:
+        return strands
+
+    if unit.get("rows") or unit.get("peak_row"):
+        strands.add(_normalize_strand_code(unit.get("strand", "w")))
+    return strands
+
+
+def _promoted_unit_pair_counts(units) -> tuple[int, int]:
+    unit_list = list(units or [])
+    paired = 0
+    for unit in unit_list:
+        strands = _promoted_unit_member_strands(unit if isinstance(unit, dict) else {})
+        if {"w", "c"}.issubset(strands):
+            paired += 1
+    return paired, len(unit_list) - paired
 
 
 def _format_phas_text(text_value: str) -> str:
@@ -495,6 +558,27 @@ def _candidate_unit_members(candidate: dict) -> list[dict]:
     return [dict(candidate)]
 
 
+def _unit_howell_position_index(unit: dict | None) -> set[tuple[str, int]]:
+    positions: set[tuple[str, int]] = set()
+    if not unit:
+        return positions
+
+    for member in _candidate_unit_members(unit):
+        strand_code = _normalize_strand_code(member.get("strand", unit.get("strand", "w")))
+        for row in list(member.get("rows") or []):
+            try:
+                positions.add((strand_code, int(row.get("anchor_position"))))
+            except Exception:
+                continue
+        peak_row = member.get("peak_row")
+        if isinstance(peak_row, dict):
+            try:
+                positions.add((strand_code, int(peak_row.get("anchor_position"))))
+            except Exception:
+                pass
+    return positions
+
+
 def _build_colored_unit_guide_specs(candidate: dict, phase_value: int) -> list[dict]:
     color = str(candidate.get("color", _phase_color_hex(phase_value)))
     seen = set()
@@ -553,6 +637,7 @@ def _build_candidate_exact_overlay_rows(candidate: dict, phase_value: int) -> li
                 "linewidth": 0.8,
                 "size": 24,
                 "category": candidate.get("category"),
+                "zorder": 5.0,
             }
         )
     return rows
@@ -611,6 +696,170 @@ def _build_abundance_rows(cluster_df: pd.DataFrame):
     return rows
 
 
+def _main_unit_linewidth(unit_role: str) -> float:
+    role_local = str(unit_role or "").strip()
+    if role_local == "main_partner":
+        return 1.5
+    if role_local == "main_hpsp":
+        return 1.3
+    return 1.1
+
+
+def _build_main_unit_abundance_overlay_rows(export_rows, phase_value: int) -> list[dict]:
+    rows = []
+    if not export_rows:
+        return rows
+
+    main_color = _main_unit_color(phase_value)
+    seen = set()
+    for row in export_rows:
+        if str(row.get("window_unit_id", "")).strip() != "unit_main":
+            continue
+        try:
+            x_value = float(row.get("observed_pos"))
+            abun_value = float(row.get("abun", 0.0) or 0.0)
+        except Exception:
+            continue
+        strand_code = _normalize_strand_code(row.get("strand", "w"))
+        y_value = abun_value if strand_code == "w" else -abun_value
+        unit_role = str(row.get("window_unit_role") or "main_hpsp")
+        hits_value = row.get("hits", np.nan)
+        is_multi = False if pd.isna(hits_value) else float(hits_value) > 1.0
+        key = (
+            unit_role,
+            strand_code,
+            round(x_value, 6),
+            round(y_value, 6),
+            str(row.get("tag_seq", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "x": x_value,
+                "y": y_value,
+                "edgecolor": main_color,
+                "facecolor": "none" if is_multi else _read_length_color_hex(phase_value),
+                "marker": "D",
+                "linewidth": _main_unit_linewidth(unit_role),
+                "size": 28 if unit_role == "main_partner" else 24,
+                "alpha": 1.0,
+                "unit_role": unit_role,
+                "zorder": 4.2,
+            }
+        )
+    return rows
+
+
+def _build_secondary_unit_abundance_overlay_rows(export_rows, selected_candidates, phase_value: int) -> list[dict]:
+    rows = []
+    if not export_rows or not selected_candidates:
+        return rows
+
+    color_by_rank = {}
+    for candidate in selected_candidates or []:
+        try:
+            rank_value = int(candidate.get("secondary_rank") or 0)
+        except Exception:
+            rank_value = 0
+        if rank_value <= 0:
+            continue
+        color_by_rank[rank_value] = {
+            "color": str(candidate.get("color", _phase_color_hex(phase_value))),
+            "category": str(candidate.get("category") or ""),
+        }
+
+    seen = set()
+    for row in export_rows:
+        unit_id = str(row.get("window_unit_id", "") or "")
+        if not unit_id.startswith("unit_secondary_"):
+            continue
+        try:
+            rank_value = int(row.get("window_unit_rank") or 0)
+        except Exception:
+            continue
+        color_entry = color_by_rank.get(rank_value)
+        if not color_entry:
+            continue
+        try:
+            x_value = float(row.get("observed_pos"))
+            abun_value = float(row.get("abun", 0.0) or 0.0)
+        except Exception:
+            continue
+        strand_code = _normalize_strand_code(row.get("strand", "w"))
+        y_value = abun_value if strand_code == "w" else -abun_value
+        hits_value = row.get("hits", np.nan)
+        is_multi = False if pd.isna(hits_value) else float(hits_value) > 1.0
+        unit_role = str(row.get("window_unit_role") or "")
+        key = (
+            unit_id,
+            unit_role,
+            strand_code,
+            round(x_value, 6),
+            round(y_value, 6),
+            str(row.get("tag_seq", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "x": x_value,
+                "y": y_value,
+                "edgecolor": color_entry["color"],
+                "facecolor": "none" if is_multi else _read_length_color_hex(phase_value),
+                "marker": "D",
+                "linewidth": 1.35,
+                "size": 26,
+                "alpha": 0.98,
+                "unit_role": unit_role,
+                "category": color_entry["category"],
+                "zorder": 4.0,
+            }
+        )
+    return rows
+
+
+def _build_main_partner_howell_overlay_rows(main_unit: dict | None, phase_value: int) -> list[dict]:
+    if not main_unit:
+        return []
+
+    rows = []
+    seen = set()
+    main_color = _main_unit_color(phase_value)
+    for member in list(main_unit.get("members") or []):
+        if str(member.get("unit_role") or "").strip() != "main_partner":
+            continue
+        strand_code = _normalize_strand_code(member.get("strand", "w"))
+        direction = 1.0 if strand_code == "w" else -1.0
+        for row in member.get("rows", []) or []:
+            try:
+                x_value = float(row.get("anchor_position"))
+                score_value = float(row.get("score", 0.0) or 0.0)
+            except Exception:
+                continue
+            y_value = direction * score_value
+            key = (strand_code, round(x_value, 6), round(y_value, 6))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "x": x_value,
+                    "y": y_value,
+                    "edgecolor": main_color,
+                    "facecolor": main_color,
+                    "alpha": 0.98,
+                    "linewidth": 0.8,
+                    "size": 30,
+                    "unit_role": "main_partner",
+                    "zorder": 5.4,
+                }
+            )
+    return rows
+
+
 def _build_howell_rows(
     trace_rows,
     phase_value: int,
@@ -619,6 +868,7 @@ def _build_howell_rows(
     plot_mode: str = "debug",
     trace_context=None,
     exact_color: str | None = None,
+    main_unit_positions: set[tuple[str, int]] | None = None,
 ):
     rows = []
     strand_local = _normalize_strand_code(strand_code)
@@ -633,6 +883,8 @@ def _build_howell_rows(
     hpsp_position = None if register_origin is None else int(register_origin)
     phase_color = str(exact_color or _phase_color_hex(phase_value))
     direction = 1.0 if _is_forward_strand(strand_code) else -1.0
+    membership_filter_active = main_unit_positions is not None
+    main_unit_positions = main_unit_positions or set()
 
     for row in strand_rows:
         anchor_position = int(row["anchor_position"])
@@ -640,6 +892,7 @@ def _build_howell_rows(
         score_value = float(row.get("score", 0.0) or 0.0)
         relation = str(row.get("phase_relation", "other") or "other")
         is_hpsp = bool(row.get("is_hpsp", False))
+        is_main_unit_member = (strand_local, anchor_position) in main_unit_positions
         edgecolor = HPSP_RED if is_hpsp else phase_color
         facecolor = "none"
         alpha_value = 1.0
@@ -653,11 +906,25 @@ def _build_howell_rows(
             linewidth = 0.9
             size = 26
         elif relation == "exact":
-            facecolor = phase_color
-            alpha_value = 1.0
+            if membership_filter_active and not is_main_unit_member:
+                edgecolor = CONTEXT_PHASE_BLUE
+                facecolor = CONTEXT_PHASE_BLUE
+                alpha_value = 0.58
+                linewidth = 0.65
+                size = 18
+            else:
+                facecolor = phase_color
+                alpha_value = 1.0
         elif relation == "offset":
-            facecolor = "none"
-            alpha_value = 1.0
+            if membership_filter_active and not is_main_unit_member:
+                edgecolor = CONTEXT_PHASE_BLUE
+                facecolor = "none"
+                alpha_value = 0.62
+                linewidth = 0.65
+                size = 18
+            else:
+                facecolor = "none"
+                alpha_value = 1.0
         else:
             edgecolor = NON_PHASE_GREY
             facecolor = "none"
@@ -705,19 +972,21 @@ def _rank_plot_alternative_candidates(summary: dict, phase_value: int) -> list[d
     )
     selected = candidate_pool[:MAX_COLORED_ALTERNATIVE_CANDIDATES]
 
-    secondary_colors = _alternative_color_series(
-        phase_value,
-        "secondary_units",
-        count=MAX_COLORED_ALTERNATIVE_CANDIDATES,
-    )
+    category_counts: dict[str, int] = {}
     for rank_index, candidate in enumerate(selected, start=1):
-        candidate["category_rank"] = sum(
-            1
-            for earlier in selected[: rank_index - 1]
-            if str(earlier.get("category", "")).strip() == str(candidate.get("category", "")).strip()
-        ) + 1
+        category = str(candidate.get("category", "")).strip()
+        category_counts[category] = int(category_counts.get(category, 0)) + 1
+        candidate["category_rank"] = category_counts[category]
         candidate["secondary_rank"] = int(rank_index)
-        candidate["color"] = secondary_colors[rank_index - 1]
+    for candidate in selected:
+        category = str(candidate.get("category", "")).strip()
+        category_rank = int(candidate.get("category_rank", 1) or 1)
+        color_series = _alternative_color_series(
+            phase_value,
+            category,
+            count=max(category_rank, 1),
+        )
+        candidate["color"] = color_series[category_rank - 1]
     return selected
 
 
@@ -757,6 +1026,41 @@ def _build_alternative_plot_layers(summary: dict, phase_value: int) -> dict:
 def _build_plot_legend_groups(phase_value: int, *, plot_mode: str = "clean", alternative_legend_groups=None):
     phase_color = _main_unit_color(phase_value)
     howell_third_label = "Non-in-phase phased window"
+    phasiRNA_halo_handle = (
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            color="none",
+            markeredgecolor=phase_color,
+            markerfacecolor="none",
+            markeredgewidth=1.1,
+            markersize=10,
+            alpha=0.30,
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            color="none",
+            markeredgecolor=phase_color,
+            markerfacecolor="none",
+            markeredgewidth=1.3,
+            markersize=8,
+            alpha=0.55,
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            color="none",
+            markeredgecolor=phase_color,
+            markerfacecolor="none",
+            markeredgewidth=1.5,
+            markersize=6,
+            alpha=0.90,
+        ),
+    )
     legend_groups = {
         "read_lengths": [
             Line2D([0], [0], marker="D", color="none", markeredgecolor=LIGHT_GREY, markerfacecolor=LIGHT_GREY, markersize=5, label="<=20 nt"),
@@ -769,7 +1073,9 @@ def _build_plot_legend_groups(phase_value: int, *, plot_mode: str = "clean", alt
         "abundance": [
             Line2D([0], [0], marker="D", color="none", markeredgecolor="#444444", markerfacecolor="#444444", markersize=6, label="Uni-mapper read"),
             Line2D([0], [0], marker="D", color="none", markeredgecolor="#444444", markerfacecolor="none", markersize=6, label="Multi-mapper read"),
+            phasiRNA_halo_handle,
         ],
+        "abundance_labels": ["Uni-mapper read", "Multi-mapper read", "phasiRNA"],
         "howell": [
             Line2D([0], [0], marker="o", color="none", markeredgecolor=phase_color, markerfacecolor=phase_color, markersize=6, label="Exact in-phase"),
             Line2D([0], [0], marker="o", color="none", markeredgecolor=phase_color, markerfacecolor="none", markersize=6, label="Offset (+/-1)"),
@@ -807,38 +1113,73 @@ def _add_grouped_legends(
         "borderaxespad": 0.0,
     }
     main_width = float(main_right) - float(main_left)
-    anchor_positions = (
-        float(main_left),
-        float(main_left) + main_width * 0.23,
-        float(main_left) + main_width * 0.43,
-        float(main_left) + main_width * 0.60,
+    read_legend_x = float(main_left)
+    abundance_legend_x = float(main_left) + main_width * 0.23
+    score_legend_x = float(main_left) + main_width * 0.43
+    hpsp_legend_x = float(main_left) + main_width * 0.60
+    context_y = min(float(legend_y) + 0.018, 0.930)
+    alt_y = max(float(LOCUS_LAYOUT["abun_bottom"]) + float(LOCUS_LAYOUT["abun_height"]) + 0.028, float(legend_y) - 0.088)
+    divider_x = float(main_left) + main_width * 0.385
+
+    fig.text(
+        read_legend_x,
+        context_y,
+        "Abundance context",
+        ha="left",
+        va="bottom",
+        fontsize=7.5,
+        fontweight="semibold",
+        color="#333333",
+    )
+    fig.text(
+        score_legend_x,
+        context_y,
+        "Score context",
+        ha="left",
+        va="bottom",
+        fontsize=7.5,
+        fontweight="semibold",
+        color="#333333",
+    )
+    fig.add_artist(
+        Line2D(
+            [divider_x, divider_x],
+            [alt_y - 0.018, context_y + 0.006],
+            transform=fig.transFigure,
+            color=DETACHABLE_SEPARATOR_COLOR,
+            linewidth=0.8,
+            linestyle=DETACHABLE_SEPARATOR_STYLE,
+            zorder=19,
+        )
     )
 
     legend_read = fig.legend(
         handles=legend_groups["read_lengths"],
         loc="upper left",
-        bbox_to_anchor=(anchor_positions[0], legend_y),
+        bbox_to_anchor=(read_legend_x, legend_y),
         ncol=2,
         **legend_common,
     )
     legend_abundance = fig.legend(
         handles=legend_groups["abundance"],
+        labels=legend_groups["abundance_labels"],
         loc="upper left",
-        bbox_to_anchor=(anchor_positions[1], legend_y),
+        bbox_to_anchor=(abundance_legend_x, legend_y),
         ncol=1,
+        handler_map={tuple: HandlerTuple(ndivide=1, pad=0.0)},
         **legend_common,
     )
     legend_howell = fig.legend(
         handles=legend_groups["howell"],
         loc="upper left",
-        bbox_to_anchor=(anchor_positions[2], legend_y),
+        bbox_to_anchor=(score_legend_x, legend_y),
         ncol=1,
         **legend_common,
     )
     legend_hpsp = fig.legend(
         handles=legend_groups["hpsp"],
         loc="upper left",
-        bbox_to_anchor=(anchor_positions[3], legend_y),
+        bbox_to_anchor=(hpsp_legend_x, legend_y),
         ncol=1,
         **legend_common,
     )
@@ -851,10 +1192,9 @@ def _add_grouped_legends(
     alternative_groups = legend_groups.get("alternatives", [])
     if alternative_groups:
         alt_anchor_positions = (
-            float(main_left) + main_width * 0.43,
-            float(main_left) + main_width * 0.62,
+            score_legend_x,
+            float(main_left) + main_width * 0.56,
         )
-        alt_y = max(float(legend_y) - 0.082, LOCUS_LAYOUT["abun_bottom"] + LOCUS_LAYOUT["abun_height"] + 0.03)
         for idx, group in enumerate(alternative_groups[:2]):
             swatches = tuple(
                 Line2D(
@@ -1458,32 +1798,22 @@ def _small_count_text(value: int) -> str:
 
 
 def _non_in_phase_context_sentence(payload: dict) -> str | None:
-    crowding_count = payload.get("crowding_window_count_value")
-    if crowding_count is None:
+    exact_context_count = payload.get("exact_context_window_count_value")
+    if exact_context_count is None:
         return None
     try:
-        count_local = int(crowding_count)
+        count_local = int(exact_context_count)
     except Exception:
         return None
     if count_local <= 0:
         return None
 
-    promoted_overlap_count = int(payload.get("overlapping_alt_count_value") or 0)
-    promoted_distal_count = int(payload.get("promoted_additional_peak_count_value") or 0)
-    promoted_total = int(promoted_overlap_count + promoted_distal_count)
-
     count_text = _small_count_text(count_local)
     noun = "window" if count_local == 1 else "windows"
-    if promoted_total <= 0:
-        verb = "was" if count_local == 1 else "were"
-        return (
-            f"{count_text} non-in-phase context {noun} {verb} detected "
-            f"near the main Howell peak, but no secondary candidate unit was promoted."
-        )
-    verb = "remains" if count_local == 1 else "remain"
+    verb = "overlaps" if count_local == 1 else "overlap"
     return (
-        f"{count_text} additional non-in-phase context {noun} {verb} "
-        f"unpromoted near the main Howell peak."
+        f"{count_text} exact-only non-in-phase context {noun} {verb} "
+        f"the main scored peak on the same strand."
     )
 
 
@@ -1494,8 +1824,6 @@ def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
     exact_support = payload["exact_support_value"]
     extension_window_count = payload["extension_window_count_value"] or 0
     origin_window_count = payload["origin_window_count_value"] or 0
-    alt_register_count = payload["raw_alt_register_count_value"] or 0
-    crowding_window_count = payload["crowding_window_count_value"] or 0
 
     lines = []
     if final_class == "non-PHAS" and (
@@ -1504,10 +1832,9 @@ def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
         or origin_class_raw == "insufficient_exact_support"
     ):
         return [
-            "Relaxed HPSP detected",
+            "Relaxed peak detected",
             "Exact-only support absent",
             "No reliable exact frame",
-            _format_phas_text("Classified as non-PHAS"),
         ]
 
     if exact_support is not None and exact_support > 0.0:
@@ -1515,21 +1842,14 @@ def _build_interpretation_lines(task: dict, payload: dict) -> list[str]:
         lines.append(f"{support_label} exact support")
     if origin_window_count == 0:
         lines.append("No competing exact frames")
-    if alt_register_count == 0:
-        lines.append("No alternate strong registers")
     if origin_class_raw == "coherent_extension" and extension_window_count > 0:
         lines.append("Broad same-frame extension")
     overlapping_alt_count = payload["overlapping_alt_count_value"] or 0
     if overlapping_alt_count > 0:
-        lines.append("Promoted secondary relaxed candidate units present")
+        lines.append("Promoted secondary windows present")
     if final_class == "PHAS-like":
         if relaxed_peak_score is not None and relaxed_peak_score < 20.0:
-            lines.append("Modest relaxed Howell support")
-        lines.append(_format_phas_text("Classified as PHAS-like"))
-    elif final_class == "PHAS":
-        lines.append(_format_phas_text("Classified as PHAS"))
-    elif final_class == "non-PHAS":
-        lines.append(_format_phas_text("Classified as non-PHAS"))
+            lines.append("Modest relaxed support")
 
     deduped = []
     seen = set()
@@ -1560,9 +1880,24 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
     overlapping_alt_count = _clean_ambiguity_count(task.get("Howell_overlapping_alt_count"))
     overlapping_alt_best_score = _clean_ambiguity_float(task.get("Howell_overlapping_alt_best_score"))
     overlapping_alt_best_shift_nt = _clean_ambiguity_float(task.get("Howell_overlapping_alt_best_shift_nt"))
+    main_partner_present = task.get("Main_opposite_partner_present")
+    main_partner_shift_nt = _clean_ambiguity_float(task.get("Main_opposite_partner_shift_nt"))
+    promoted_additional_paired_count = _clean_ambiguity_count(task.get("Howell_promoted_additional_peak_paired_count"))
+    promoted_additional_unpaired_count = _clean_ambiguity_count(task.get("Howell_promoted_additional_peak_unpaired_count"))
+    promoted_overlapping_paired_count = _clean_ambiguity_count(task.get("Howell_promoted_overlapping_alt_paired_count"))
+    promoted_overlapping_unpaired_count = _clean_ambiguity_count(task.get("Howell_promoted_overlapping_alt_unpaired_count"))
     crowding_window_count = _clean_ambiguity_count(task.get("Howell_crowding_window_count"))
     crowding_best_score = _clean_ambiguity_float(task.get("Howell_crowding_best_score"))
     crowding_score_gap = _clean_ambiguity_float(task.get("Howell_crowding_score_gap"))
+    exact_context_window_count = _clean_ambiguity_count(task.get("Howell_exact_context_window_count"))
+    exact_context_best_score = _clean_ambiguity_float(task.get("Howell_exact_context_best_score"))
+    exact_context_score_gap = _clean_ambiguity_float(task.get("Howell_exact_context_score_gap"))
+    if exact_context_window_count is None:
+        exact_context_window_count = origin_window_count
+    if exact_context_score_gap is None:
+        exact_context_score_gap = origin_margin
+    if exact_context_best_score is None and exact_support is not None and exact_context_score_gap is not None:
+        exact_context_best_score = float(exact_support) - float(exact_context_score_gap)
     payload = {
         "exact_support": "NA" if exact_support is None else f"{exact_support:.2f}",
         "exact_support_value": exact_support,
@@ -1595,12 +1930,40 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
         "overlapping_alt_best_score_value": overlapping_alt_best_score,
         "overlapping_alt_best_shift_nt": _format_shift_nt_text(overlapping_alt_best_shift_nt),
         "overlapping_alt_best_shift_nt_value": overlapping_alt_best_shift_nt,
+        "main_partner_present_value": (
+            None
+            if main_partner_present is None
+            else bool(main_partner_present)
+        ),
+        "main_partner_present_text": (
+            "NA"
+            if main_partner_present is None
+            else ("detected" if bool(main_partner_present) else "not detected")
+        ),
+        "main_partner_shift_nt": _format_shift_nt_text(main_partner_shift_nt),
+        "main_partner_shift_nt_value": main_partner_shift_nt,
+        "promoted_additional_paired_count_value": promoted_additional_paired_count,
+        "promoted_additional_unpaired_count_value": promoted_additional_unpaired_count,
+        "promoted_overlapping_paired_count_value": promoted_overlapping_paired_count,
+        "promoted_overlapping_unpaired_count_value": promoted_overlapping_unpaired_count,
         "crowding_window_count": "NA" if crowding_window_count is None else str(crowding_window_count),
         "crowding_window_count_value": crowding_window_count,
         "crowding_best_score": "NA" if crowding_best_score is None else f"{crowding_best_score:.2f}",
         "crowding_best_score_value": crowding_best_score,
         "crowding_score_gap": "NA" if crowding_score_gap is None else f"{crowding_score_gap:.2f}",
         "crowding_score_gap_value": crowding_score_gap,
+        "exact_context_window_count": (
+            "NA" if exact_context_window_count is None else str(exact_context_window_count)
+        ),
+        "exact_context_window_count_value": exact_context_window_count,
+        "exact_context_best_score": (
+            "NA" if exact_context_best_score is None else f"{exact_context_best_score:.2f}"
+        ),
+        "exact_context_best_score_value": exact_context_best_score,
+        "exact_context_score_gap": (
+            "NA" if exact_context_score_gap is None else f"{exact_context_score_gap:.2f}"
+        ),
+        "exact_context_score_gap_value": exact_context_score_gap,
         "raw_overlap_count": "NA" if overlap_count is None else str(overlap_count),
         "raw_overlap_count_value": overlap_count,
         "raw_alt_register_count": "NA" if alt_register_count is None else str(alt_register_count),
@@ -1617,32 +1980,44 @@ def _build_ambiguity_sidebar_payload(task: dict, *, plot_mode: str = "clean") ->
 def _build_ambiguity_sidebar_note(task: dict, *, plot_mode: str = "clean") -> str:
     exact_support = _clean_ambiguity_float(task.get("Howell_exact_support_score"))
     if exact_support is None or exact_support <= 0.0:
-        return "Exact-only interpretation unavailable.\nRelaxed HPSP lacks exact support.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
+        return "Exact-only interpretation unavailable.\nRelaxed peak lacks exact support.\nEach point summarizes a scored 10-cycle window anchored at one mapped sRNA."
     if _normalize_locus_plot_mode(plot_mode) == "clean":
-        return "Non-in-phase phased windows are shown as hollow points.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
-    return "Non-in-phase phased windows are shown as hollow points.\nEach Howell point summarizes a 10-cycle window anchored at that mapped sRNA."
+        return "Non-in-phase phased windows are shown as hollow points.\nEach point summarizes a scored 10-cycle window anchored at one mapped sRNA."
+    return "Non-in-phase phased windows are shown as hollow points.\nEach point summarizes a scored 10-cycle window anchored at one mapped sRNA."
 
 
 def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean") -> list[dict]:
+    top_lines = [
+        f"Exact-only support: {payload['exact_support']}",
+        f"Relaxed peak: {payload['relaxed_peak_score']}",
+        f"Class: {payload['origin_class']}",
+    ]
+    top_weights = ["bold", "bold", "bold"]
+    if payload.get("main_partner_present_value") is not None:
+        partner_line = f"Main opposite-strand partner: {payload['main_partner_present_text']}"
+        if (
+            bool(payload.get("main_partner_present_value"))
+            and payload.get("main_partner_shift_nt_value") is not None
+        ):
+            partner_line += f" ({payload['main_partner_shift_nt']})"
+        top_lines.append(partner_line)
+        top_weights.append("bold")
+
     sections = [
         {
             "title": None,
-            "title_fontsize": 8.6,
+            "title_fontsize": 8.8,
             "line_fontsize": 7.8,
             "line_wrap_width": 28,
-            "line_weights": ["bold", "bold", "bold"],
-            "lines": [
-                f"Exact-only Howell Support: {payload['exact_support']}",
-                f"Relaxed peak: {payload['relaxed_peak_score']}",
-                f"Class: {payload['origin_class']}",
-            ],
+            "line_weights": top_weights,
+            "lines": top_lines,
         }
     ]
 
     show_context_section = (
-        (payload["crowding_window_count_value"] or 0) > 0
-        or payload["crowding_best_score_value"] is not None
-        or payload["crowding_score_gap_value"] is not None
+        (payload["exact_context_window_count_value"] or 0) > 0
+        or payload["exact_context_best_score_value"] is not None
+        or payload["exact_context_score_gap_value"] is not None
     )
 
     interpretation_lines = list(payload["interpretation_lines"] or [])
@@ -1679,11 +2054,12 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
             }
         )
 
-    if (
-        payload["origin_window_count_value"] is not None
-        or payload["origin_frame_count_value"] is not None
+    show_origin_ambiguity = (
+        (payload["origin_window_count_value"] or 0) > 0
+        or (payload["origin_frame_count_value"] or 0) > 0
         or payload["origin_margin_value"] is not None
-    ):
+    )
+    if show_origin_ambiguity:
         sections.append(
             {
                 "title": "Origin ambiguity",
@@ -1692,22 +2068,32 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
                 "lines": [
                     f"Windows: {payload['origin_window_count']}",
                     f"Frames: {payload['origin_frame_count']}",
-                    f"Margin: {payload['origin_margin']}",
+                    f"Score margin: {payload['origin_margin']}",
                 ],
             }
         )
 
     if (payload["promoted_additional_peak_count_value"] or 0) > 0:
+        section_lines = [
+            f"Count: {payload['promoted_additional_peak_count_value']}",
+            f"Best: {payload['promoted_additional_peak_best_score']}",
+            f"Cutoff: {payload['additional_peak_cutoff']}",
+        ]
+        paired_value = payload.get("promoted_additional_paired_count_value")
+        unpaired_value = payload.get("promoted_additional_unpaired_count_value")
+        if paired_value is not None or unpaired_value is not None:
+            section_lines.extend(
+                [
+                    f"Paired: {0 if paired_value is None else paired_value}",
+                    f"Unpaired: {0 if unpaired_value is None else unpaired_value}",
+                ]
+            )
         sections.append(
             {
-                "title": "Other local peaks",
+                "title": _alternative_category_label("other_local_peak"),
                 "title_fontsize": 8.0,
                 "line_fontsize": 7.2,
-                "lines": [
-                    f"Count: {payload['promoted_additional_peak_count_value']}",
-                    f"Best: {payload['promoted_additional_peak_best_score']}",
-                    f"Cutoff: {payload['additional_peak_cutoff']}",
-                ],
+                "lines": section_lines,
             }
         )
 
@@ -1716,31 +2102,41 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
         or payload["overlapping_alt_best_score_value"] is not None
         or payload["overlapping_alt_best_shift_nt_value"] is not None
     ):
+        section_lines = [
+            f"Count: {payload['overlapping_alt_count']}",
+            f"Best: {payload['overlapping_alt_best_score']}",
+            f"Shift: {payload['overlapping_alt_best_shift_nt']}",
+        ]
+        paired_value = payload.get("promoted_overlapping_paired_count_value")
+        unpaired_value = payload.get("promoted_overlapping_unpaired_count_value")
+        if paired_value is not None or unpaired_value is not None:
+            section_lines.extend(
+                [
+                    f"Paired: {0 if paired_value is None else paired_value}",
+                    f"Unpaired: {0 if unpaired_value is None else unpaired_value}",
+                ]
+            )
         sections.append(
             {
-                "title": "Overlapping alternative candidates",
+                "title": _alternative_category_label("overlapping_alternative"),
                 "title_fontsize": 8.0,
                 "line_fontsize": 7.2,
-                "lines": [
-                    f"Count: {payload['overlapping_alt_count']}",
-                    f"Best: {payload['overlapping_alt_best_score']}",
-                    f"Shift: {payload['overlapping_alt_best_shift_nt']}",
-                ],
+                "lines": section_lines,
             }
         )
 
     if show_context_section:
         crowding_lines = [
-            f"Windows: {payload['crowding_window_count']}",
-            f"Best: {payload['crowding_best_score']}",
-            f"Gap: {payload['crowding_score_gap']}",
+            f"Windows: {payload['exact_context_window_count']}",
+            f"Best: {payload['exact_context_best_score']}",
+            f"Score gap: {payload['exact_context_score_gap']}",
         ]
         context_sentence = payload.get("non_in_phase_context_sentence")
         if context_sentence:
             crowding_lines.append(context_sentence)
         sections.append(
             {
-                "title": "Non-in-phase context windows",
+                "title": "Exact-only non-in-phase context",
                 "title_fontsize": 8.0,
                 "line_fontsize": 7.2,
                 "title_wrap_width": 28,
@@ -1758,7 +2154,7 @@ def _build_strip_sections(task: dict, payload: dict, *, plot_mode: str = "clean"
                 "lines": [
                     f"Near-tied: {payload['raw_overlap_count']}",
                     f"Alt regs: {payload['raw_alt_register_count']}",
-                    f"Raw margin: {payload['raw_overlap_margin']}",
+                    f"Raw score margin: {payload['raw_overlap_margin']}",
                 ],
             }
         )
@@ -1785,8 +2181,8 @@ def _draw_strip_line(
     fontsize: float,
     fontweight: str = "normal",
     color: str = "#333333",
-    line_gap: float = 0.032,
-    paragraph_gap: float = 0.008,
+    line_gap: float = 0.026,
+    paragraph_gap: float = 0.006,
 ) -> float:
     wrapped_text = str(text_value)
     ax.text(
@@ -1819,15 +2215,15 @@ def _estimate_strip_section_height(sections) -> float:
                 width=int(section.get("title_wrap_width", 28)),
             )
             title_lines = max(wrapped_title.count("\n") + 1, 1)
-            total += (0.032 * title_lines) + 0.008
+            total += (0.026 * title_lines) + 0.006
         for line in section.get("lines", []):
             wrapped_line = _wrap_strip_text(
                 str(line),
                 width=int(section.get("line_wrap_width", 28)),
             )
             line_count = max(wrapped_line.count("\n") + 1, 1)
-            total += (0.030 * line_count) + 0.004
-        total += 0.010
+            total += (0.024 * line_count) + 0.003
+        total += 0.007
     return float(total)
 
 
@@ -1837,13 +2233,13 @@ def _fit_strip_sections(sections) -> list[dict]:
         return sections_local
 
     required_height = _estimate_strip_section_height(sections_local)
-    if required_height <= 0.90:
+    if required_height <= 0.965:
         return sections_local
 
-    scale = max(0.82, 0.90 / max(required_height, 0.01))
+    scale = max(0.90, 0.965 / max(required_height, 0.01))
     for section in sections_local:
-        section["title_fontsize"] = max(7.0, float(section.get("title_fontsize", 8.0)) * scale)
-        section["line_fontsize"] = max(6.0, float(section.get("line_fontsize", 7.2)) * scale)
+        section["title_fontsize"] = max(7.4, float(section.get("title_fontsize", 8.0)) * scale)
+        section["line_fontsize"] = max(6.8, float(section.get("line_fontsize", 7.2)) * scale)
     return sections_local
 
 
@@ -1965,6 +2361,7 @@ def _analyze_single_locus(task: dict) -> dict:
 
     abundance_rows = _build_abundance_rows(cluster_df)
     plot_mode = _current_locus_plot_mode()
+    main_unit_howell_positions = _unit_howell_position_index(main_unit) if main_unit else None
     exact_competitor_context = st_feat.collect_exact_only_peak_competitors(
         cluster_df,
         phase=phase_value,
@@ -1976,6 +2373,7 @@ def _analyze_single_locus(task: dict) -> dict:
         plot_mode=plot_mode,
         trace_context=browser_trace_context,
         exact_color=main_phase_color,
+        main_unit_positions=main_unit_howell_positions,
     )
     howell_rows_c, _hpsp_c, hpsp_row_c = _build_howell_rows(
         c_trace,
@@ -1984,6 +2382,7 @@ def _analyze_single_locus(task: dict) -> dict:
         plot_mode=plot_mode,
         trace_context=browser_trace_context,
         exact_color=main_phase_color,
+        main_unit_positions=main_unit_howell_positions,
     )
     howell_rows = howell_rows_w + howell_rows_c
     main_unit_guides = _build_main_unit_guide_specs(main_unit, phase_value)
@@ -1991,11 +2390,37 @@ def _analyze_single_locus(task: dict) -> dict:
     guide_specs_c = main_unit_guides["c"]
     alternative_layers = _build_alternative_plot_layers(additional_peak_summary, phase_value)
     exact_peak_summary = exact_competitor_context.get("summary") or {}
+    exact_competing_windows = list(exact_competitor_context.get("competing_windows") or [])
+    exact_context_window_count = int(len(exact_competing_windows))
+    if exact_competing_windows:
+        exact_context_best_score = max(
+            float(candidate.get("exact_score", 0.0) or 0.0)
+            for candidate in exact_competing_windows
+        )
+    else:
+        exact_context_best_score = np.nan
+    exact_support_value = exact_peak_summary.get("Howell_exact_support_score")
+    if (
+        exact_context_window_count > 0
+        and exact_support_value is not None
+        and not pd.isna(exact_support_value)
+        and not pd.isna(exact_context_best_score)
+    ):
+        exact_context_score_gap = float(exact_support_value) - float(exact_context_best_score)
+    else:
+        exact_context_score_gap = np.nan
 
     export_rows = []
     if main_unit:
+        main_partner_unit_shift_nt = (main_unit or {}).get("main_partner_shift_nt", np.nan)
         for member in list(main_unit.get("members") or []):
             role = str(member.get("unit_role") or "main_hpsp")
+            if role == "main_hpsp":
+                export_shift_nt = 0
+            elif role == "main_partner":
+                export_shift_nt = main_partner_unit_shift_nt
+            else:
+                export_shift_nt = member.get("shift_nt", np.nan)
             export_rows.extend(
                 _export_rows_for_unit_member(
                     cluster_df,
@@ -2007,7 +2432,7 @@ def _analyze_single_locus(task: dict) -> dict:
                     window_unit_id="unit_main",
                     window_unit_role=role,
                     window_unit_rank=0,
-                    window_unit_shift_nt=(0 if role == "main_hpsp" else member.get("shift_nt", np.nan)),
+                    window_unit_shift_nt=export_shift_nt,
                 )
             )
     else:
@@ -2079,6 +2504,32 @@ def _analyze_single_locus(task: dict) -> dict:
     promoted_additional_peak_groups = additional_peak_summary.get("promoted_additional_peak_groups")
     if promoted_additional_peak_groups is None:
         promoted_additional_peak_groups = additional_peak_summary.get("additional_peak_groups", []) or []
+    promoted_secondary_units = list(additional_peak_summary.get("promoted_secondary_units", []) or [])
+    promoted_other_local_peak_units = [
+        dict(unit)
+        for unit in promoted_secondary_units
+        if str(unit.get("category", "")).strip() == "other_local_peak"
+    ]
+    promoted_overlapping_alt_units = [
+        dict(unit)
+        for unit in promoted_secondary_units
+        if str(unit.get("category", "")).strip() == "overlapping_alternative"
+    ]
+    promoted_other_paired_count, promoted_other_unpaired_count = _promoted_unit_pair_counts(
+        promoted_other_local_peak_units
+    )
+    promoted_overlap_paired_count, promoted_overlap_unpaired_count = _promoted_unit_pair_counts(
+        promoted_overlapping_alt_units
+    )
+    main_partner_present = bool((main_unit or {}).get("main_partner_present"))
+    main_partner_shift_nt = (main_unit or {}).get("main_partner_shift_nt", np.nan)
+    main_abundance_overlay_rows = _build_main_unit_abundance_overlay_rows(export_rows, phase_value)
+    secondary_abundance_overlay_rows = _build_secondary_unit_abundance_overlay_rows(
+        export_rows,
+        alternative_layers.get("selected_candidates", []),
+        phase_value,
+    )
+    main_howell_overlay_rows = _build_main_partner_howell_overlay_rows(main_unit, phase_value)
 
     return {
         "plot_payload": {
@@ -2091,6 +2542,9 @@ def _analyze_single_locus(task: dict) -> dict:
             "guide_specs_w": guide_specs_w,
             "guide_specs_c": guide_specs_c,
             "main_unit_color": main_phase_color,
+            "main_abundance_overlay_rows": main_abundance_overlay_rows,
+            "secondary_abundance_overlay_rows": secondary_abundance_overlay_rows,
+            "main_howell_overlay_rows": main_howell_overlay_rows,
             "alternative_guide_specs_w": alternative_layers["guide_specs_w"],
             "alternative_guide_specs_c": alternative_layers["guide_specs_c"],
             "alternative_howell_overlay_rows": alternative_layers["overlay_rows"],
@@ -2163,6 +2617,12 @@ def _analyze_single_locus(task: dict) -> dict:
                     )
                 ),
             ),
+            "Howell_promoted_additional_peak_paired_count": int(
+                promoted_other_paired_count
+            ),
+            "Howell_promoted_additional_peak_unpaired_count": int(
+                promoted_other_unpaired_count
+            ),
             "Howell_overlapping_alt_count": _coalesce_task_metric(
                 task.get("Howell_overlapping_alt_count"),
                 additional_peak_summary.get("Howell_overlapping_alt_count"),
@@ -2174,6 +2634,12 @@ def _analyze_single_locus(task: dict) -> dict:
             "Howell_overlapping_alt_best_shift_nt": _coalesce_task_metric(
                 task.get("Howell_overlapping_alt_best_shift_nt"),
                 additional_peak_summary.get("Howell_overlapping_alt_best_shift_nt"),
+            ),
+            "Howell_promoted_overlapping_alt_paired_count": int(
+                promoted_overlap_paired_count
+            ),
+            "Howell_promoted_overlapping_alt_unpaired_count": int(
+                promoted_overlap_unpaired_count
             ),
             "Howell_crowding_window_count": _coalesce_task_metric(
                 task.get("Howell_crowding_window_count"),
@@ -2187,6 +2653,18 @@ def _analyze_single_locus(task: dict) -> dict:
                 task.get("Howell_crowding_score_gap"),
                 browser_trace_context.get("Howell_crowding_score_gap"),
             ),
+            "Howell_exact_context_window_count": _coalesce_task_metric(
+                task.get("Howell_exact_context_window_count"),
+                exact_context_window_count,
+            ),
+            "Howell_exact_context_best_score": _coalesce_task_metric(
+                task.get("Howell_exact_context_best_score"),
+                exact_context_best_score,
+            ),
+            "Howell_exact_context_score_gap": _coalesce_task_metric(
+                task.get("Howell_exact_context_score_gap"),
+                exact_context_score_gap,
+            ),
             "Peak_Howell_score": task.get("Peak_Howell_score"),
             "Howell_exact_relaxed_ratio": task.get("Howell_exact_relaxed_ratio"),
             "Howell_strict_relaxed_ratio": task.get("Howell_strict_relaxed_ratio"),
@@ -2194,6 +2672,8 @@ def _analyze_single_locus(task: dict) -> dict:
             "final_class": task.get("final_class"),
             "report_label": task.get("report_label"),
             "qc_reason": task.get("qc_reason"),
+            "Main_opposite_partner_present": main_partner_present,
+            "Main_opposite_partner_shift_nt": main_partner_shift_nt,
         },
         "phasiRNA_rows": export_rows,
     }
@@ -2290,6 +2770,32 @@ def _write_single_locus_plot(task: dict) -> str:
             zorder=3,
         )
 
+    for row in task.get("secondary_abundance_overlay_rows", []) or []:
+        axes[0].scatter(
+            row["x"],
+            row["y"],
+            s=row["size"],
+            marker=row.get("marker", "D"),
+            facecolors=row["facecolor"],
+            edgecolors=row["edgecolor"],
+            linewidths=row["linewidth"],
+            alpha=row["alpha"],
+            zorder=row.get("zorder", 4.0),
+        )
+
+    for row in task.get("main_abundance_overlay_rows", []) or []:
+        axes[0].scatter(
+            row["x"],
+            row["y"],
+            s=row["size"],
+            marker=row.get("marker", "D"),
+            facecolors=row["facecolor"],
+            edgecolors=row["edgecolor"],
+            linewidths=row["linewidth"],
+            alpha=row["alpha"],
+            zorder=row.get("zorder", 4.2),
+        )
+
     for row in howell_rows:
         if row.get("is_hpsp", False):
             continue
@@ -2315,7 +2821,20 @@ def _write_single_locus_plot(task: dict) -> str:
             edgecolors=row["edgecolor"],
             linewidths=row["linewidth"],
             alpha=row["alpha"],
-            zorder=5,
+            zorder=row.get("zorder", 5),
+        )
+
+    for row in task.get("main_howell_overlay_rows", []) or []:
+        axes[1].scatter(
+            row["x"],
+            row["y"],
+            s=row["size"],
+            marker="o",
+            facecolors=row["facecolor"],
+            edgecolors=row["edgecolor"],
+            linewidths=row["linewidth"],
+            alpha=row["alpha"],
+            zorder=row.get("zorder", 5.4),
         )
 
     for row in howell_rows:
