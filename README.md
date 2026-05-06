@@ -185,35 +185,49 @@ In the filenames below, `{method}` is the classifier used for the run, currently
 8. **Individual *PHAS* locus diagnostic plots**  
    Directory: **`{phase}_{method}_PHAS_locus_plots/`**  
    Phasis writes one PNG per final *PHAS* call, named as **`{alib}__{identifier}.png`**. Each plot has two panels for the same locus:
-   - the top panel shows strand-separated read abundance, colored by sRNA length and styled as filled/open diamonds for uni- and multi-mappers
-   - the bottom panel shows the relaxed Howell-score trace on both strands, including the exact/offset register pattern and the highest phasing score position (HPSP)
-   - the **phase-colored vertical bars** mark the 10-cycle register window that actually contributes to the Howell score around the HPSP for that strand
-   - the **darker extension bars** mark additional positions outside that 10-cycle window that still map to the same phased register
-   - the **red vertical bar** marks the HPSP register anchor itself
+   - the top panel is the **abundance context**. It shows strand-separated read abundance. Diamonds are colored by sRNA length, filled diamonds are uni-mappers, and open diamonds are multi-mappers.
+   - the bottom panel is the **score context**. It shows the scored 10-cycle phasing windows anchored at mapped phase-length sRNAs.
+   - the phase-colored **phasiRNA halo** in the top panel marks reads that were assigned to a called phased window. The halo color follows the analyzed phase length, so a 21-*PHAS* call and a 24-*PHAS* call use different phase-family colors.
+   - in the score context, strong phase-family blue is reserved for the main phased unit and its accepted opposite-strand main partner. Secondary phased windows use separate colors so they can be interpreted as additional promoted phased units rather than as part of the main register.
+   - hollow grey score points are nearby context windows that were scored but were not promoted into the main or secondary phased units.
+   - the red point marks the highest phasing score position / register anchor (HPSP).
 
-   These figures are meant to help users visually inspect the phasing register at each called locus and judge whether a run should be made more or less restrictive.
+   These figures are meant to help users visually inspect the phasing register at each called locus, confirm whether an opposite-strand partner was accepted, and distinguish the main phased unit from secondary or overlapping phased windows.
 
    Example:
 
    ![Example individual PHAS locus plot](docs/images/phas_locus_plot_example.png)
 
+   In the example above, the blue window is the main phased unit. The right sidebar reports strong exact support, a coherent extension, and an accepted main opposite-strand partner with a normalized `+2 nt` shift. The rose-colored blocks are secondary phased windows: they are strong enough to be promoted and are shown with their own guides, halos, and score points rather than being folded into the main blue register. The sidebar summarizes these as `Secondary phased windows` and reports how many were paired across strands.
+
+   The right sidebar is a compact interpretation guide:
+   - `Exact-only support` is the stricter support score for reads exactly on the phased register.
+   - `Relaxed peak` is the best relaxed score, allowing the broader context used to find candidate phased structure.
+   - `Main opposite-strand partner` reports whether a canonical opposite-strand partner was accepted for the main unit.
+   - `Coherent extension` reports how many scored windows extend the same main register and the span covered by that extension.
+   - `Secondary phased windows` and `Overlapping alternative windows` report promoted additional phased units. `Paired` means both strands were promoted for that unit; `Unpaired` means only one promoted strand was retained.
+
 9. **Per-locus phased-register phasiRNA table**  
    Filename: **`{phase}_{method}_phasiRNAs.tsv`**  
-   This TSV contains one row per exported phase-length phasiRNA that supports a final *PHAS* locus in the plotted phased register. It records the observed read position, the expected register position, the support class (`core_exact`, `core_offset`, or `extended_exact`), the abundance, the sequence, and the mapper count when available.
+   This TSV contains one row per exported phase-length phasiRNA that supports a final *PHAS* locus in the plotted phased register. It records the observed read position, the expected register position, the support class (`core_exact`, `core_offset`, or `extended_exact`), the abundance, the sequence, the mapper count when available, and the phased-window unit assignment.
 
    Small synthetic 24-nt example:
 
-   | identifier | cID | alib | phase | strand | observed_pos | expected_register_pos | register_class | abun | tag_seq | hits |
-   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-   | chr1:100..196 | cluster_1 | libA | 24 | w | 100 | 100 | core_exact | 53 | ATCG... | 1 |
-   | chr1:100..196 | cluster_1 | libA | 24 | w | 125 | 124 | core_offset | 31 | TGCA... | 1 |
-   | chr1:100..196 | cluster_1 | libA | 24 | w | 172 | 172 | extended_exact | 18 | GATC... | 2 |
+   | identifier | cID | alib | phase | strand | observed_pos | expected_register_pos | register_class | window_unit_id | window_unit_role | window_unit_rank | window_unit_shift_nt | abun | tag_seq | hits |
+   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+   | chr1:100..196 | cluster_1 | libA | 24 | w | 100 | 100 | core_exact | unit_main | main_hpsp | 0 | 0 | 53 | ATCG... | 1 |
+   | chr1:100..196 | cluster_1 | libA | 24 | w | 125 | 124 | core_offset | unit_main | main_extension | 0 | 0 | 31 | TGCA... | 1 |
+   | chr1:100..196 | cluster_1 | libA | 24 | c | 291 | 291 | core_exact | unit_main | main_partner | 0 | +2 | 44 | CTAG... | 1 |
+   | chr1:100..196 | cluster_1 | libA | 24 | w | 172 | 172 | extended_exact | unit_secondary_1 | other_local_peak | 1 | NA | 18 | GATC... | 2 |
 
    How to read these columns:
    - `expected_register_pos` is the phased genomic register position that PHASIS is tracking for that row.
    - `core_exact` means the read mapped exactly onto one of the 10-cycle register positions used in the Howell-score quantification window.
    - `core_offset` means there was no exact phase-length read at that core register position, so PHASIS exported the winning `+/-1` offset read instead. In the example above, the expected phased position is `124`, but the exported read was observed at `125`.
    - `extended_exact` means the read mapped exactly to the same phased register outside the core 10-cycle Howell window. These are the reads that correspond to the darker extension guide lines in the locus plot.
+   - `window_unit_id` groups rows by reconstructed phased unit. `unit_main` is the primary phased unit; `unit_secondary_1`, `unit_secondary_2`, and so on are promoted secondary or overlapping phased windows.
+   - `window_unit_role` describes how the row was used: `main_hpsp`, `main_partner`, `main_extension`, `other_local_peak`, or `overlapping_alternative`.
+   - `window_unit_rank` orders promoted secondary units within the locus, and `window_unit_shift_nt` reports the normalized partner shift for accepted main partners or the shift assigned to promoted secondary units when available.
    - Offset-only reads are not exported for the extended register.
    - A locus can have more than one exported row for the same `expected_register_pos` if multiple phase-length reads with different sequences map exactly at that same phased position.
 
