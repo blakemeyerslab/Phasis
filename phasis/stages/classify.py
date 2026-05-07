@@ -36,13 +36,13 @@ FINAL_CLASS_VALUES = {"PHAS", "PHAS-like", "non-PHAS"}
 NON_PHAS = "non-PHAS"
 PHAS = "PHAS"
 PHAS_LIKE = "PHAS-like"
-QC_REASON_PASS = "pass"
-QC_REASON_CLASSIFIER_NON_PHAS = "classifier_non_phas"
-QC_REASON_INSUFFICIENT_EXACT_SUPPORT = "insufficient_exact_support"
-QC_REASON_LOW_SCORE_CROWDED = "low_score_crowded_window_context"
-QC_REASON_WEAK_SCAFFOLD_CONTEXT = "weak_scaffold_alternative_context"
-QC_REASON_LEGACY = "legacy_classification"
-QC_REASON_MANUAL_OVERRIDE = "manual_override"
+EVIDENCE_REASON_PASS = "pass"
+EVIDENCE_REASON_CLASSIFIER_NON_PHAS = "classifier_non_phas"
+EVIDENCE_REASON_INSUFFICIENT_EXACT_SUPPORT = "insufficient_exact_support"
+EVIDENCE_REASON_LOW_SCORE_CROWDED = "low_score_crowded_window_context"
+EVIDENCE_REASON_WEAK_SCAFFOLD_CONTEXT = "weak_scaffold_alternative_context"
+EVIDENCE_REASON_LEGACY = "legacy_classification"
+EVIDENCE_REASON_MANUAL_OVERRIDE = "manual_override"
 PHAS_LIKE_MIN_RELAXED_SCORE = 12.5
 PHAS_LIKE_MAX_RELAXED_SCORE = 20.0
 PHAS_LIKE_MIN_CROWDING_WINDOWS = 5
@@ -113,7 +113,7 @@ def _normalize_override_class(value) -> str:
     return normalized
 
 
-def _normalize_qc_alib(alib_value, *, phase) -> str:
+def _normalize_evidence_alib(alib_value, *, phase) -> str:
     if alib_value is None:
         return ""
     if phase is None:
@@ -128,7 +128,7 @@ def _normalize_qc_alib(alib_value, *, phase) -> str:
 def _build_detection_key(identifier_value, alib_value, *, phase) -> tuple[str, str]:
     return (
         str(identifier_value or "").strip(),
-        _normalize_qc_alib(alib_value, phase=phase).strip(),
+        _normalize_evidence_alib(alib_value, phase=phase).strip(),
     )
 
 
@@ -167,25 +167,28 @@ def _read_classification_overrides(
                 f"Duplicate classification override key detected for identifier={key[0]!r}, alib={key[1]!r}"
             )
         seen.add(key)
-        qc_reason = str(getattr(row, "qc_reason", "") or "").strip() or QC_REASON_MANUAL_OVERRIDE
+        evidence_reason = (
+            str(getattr(row, "evidence_reason", "") or "").strip()
+            or EVIDENCE_REASON_MANUAL_OVERRIDE
+        )
         note = str(getattr(row, "note", "") or "").strip()
         lookup[key] = {
             "final_class": _normalize_override_class(getattr(row, "final_class", "")),
-            "qc_reason": qc_reason,
+            "evidence_reason": evidence_reason,
             "note": note,
         }
     return lookup
 
 
-def _automatic_qc_classification(row) -> tuple[str, str]:
-    pre_qc_label = str(row.get("pre_qc_label", NON_PHAS) or NON_PHAS)
-    if pre_qc_label != PHAS:
-        return NON_PHAS, QC_REASON_CLASSIFIER_NON_PHAS
+def _automatic_evidence_classification(row) -> tuple[str, str]:
+    initial_classifier_label = str(row.get("initial_classifier_label", NON_PHAS) or NON_PHAS)
+    if initial_classifier_label != PHAS:
+        return NON_PHAS, EVIDENCE_REASON_CLASSIFIER_NON_PHAS
 
     exact_support = _safe_float(row.get("Howell_exact_support_score"))
     origin_class = str(row.get("Howell_origin_class", "") or "").strip()
-    if (not np.isnan(exact_support) and exact_support <= 0.0) or origin_class == QC_REASON_INSUFFICIENT_EXACT_SUPPORT:
-        return NON_PHAS, QC_REASON_INSUFFICIENT_EXACT_SUPPORT
+    if (not np.isnan(exact_support) and exact_support <= 0.0) or origin_class == EVIDENCE_REASON_INSUFFICIENT_EXACT_SUPPORT:
+        return NON_PHAS, EVIDENCE_REASON_INSUFFICIENT_EXACT_SUPPORT
 
     relaxed_peak_score = _safe_float(row.get("Peak_Howell_score"))
     crowding_window_count = _safe_int(row.get("Howell_crowding_window_count"), default=0)
@@ -196,7 +199,7 @@ def _automatic_qc_classification(row) -> tuple[str, str]:
         and PHAS_LIKE_MIN_RELAXED_SCORE < relaxed_peak_score < PHAS_LIKE_MAX_RELAXED_SCORE
         and crowding_window_count >= PHAS_LIKE_MIN_CROWDING_WINDOWS
     ):
-        return PHAS_LIKE, QC_REASON_LOW_SCORE_CROWDED
+        return PHAS_LIKE, EVIDENCE_REASON_LOW_SCORE_CROWDED
 
     exact_relaxed_ratio = _safe_float(row.get("Howell_exact_relaxed_ratio"))
     if np.isnan(exact_relaxed_ratio):
@@ -235,12 +238,12 @@ def _automatic_qc_classification(row) -> tuple[str, str]:
         and support_weakness
         and context_weakness
     ):
-        return PHAS_LIKE, QC_REASON_WEAK_SCAFFOLD_CONTEXT
+        return PHAS_LIKE, EVIDENCE_REASON_WEAK_SCAFFOLD_CONTEXT
 
-    return PHAS, QC_REASON_PASS
+    return PHAS, EVIDENCE_REASON_PASS
 
 
-def apply_qc_reclassification(
+def apply_evidence_classification(
     features: pd.DataFrame,
     *,
     phase=None,
@@ -249,9 +252,9 @@ def apply_qc_reclassification(
 ) -> pd.DataFrame:
     out = features.copy()
     if "label" not in out.columns:
-        raise ValueError("QC reclassification requires a 'label' column from the classifier stage")
+        raise ValueError("Evidence classification requires a 'label' column from the classifier stage")
 
-    out["pre_qc_label"] = out["label"].astype(str)
+    out["initial_classifier_label"] = out["label"].astype(str)
     out["Howell_exact_relaxed_ratio"] = [
         _safe_ratio(exact_support, peak_score)
         for exact_support, peak_score in zip(
@@ -275,18 +278,18 @@ def apply_qc_reclassification(
     ]
 
     final_classes = []
-    qc_reasons = []
+    evidence_reasons = []
     for row in out.to_dict("records"):
         if legacy_classification:
-            final_class = PHAS if str(row.get("pre_qc_label", NON_PHAS) or NON_PHAS) == PHAS else NON_PHAS
-            qc_reason = QC_REASON_LEGACY
+            final_class = PHAS if str(row.get("initial_classifier_label", NON_PHAS) or NON_PHAS) == PHAS else NON_PHAS
+            evidence_reason = EVIDENCE_REASON_LEGACY
         else:
-            final_class, qc_reason = _automatic_qc_classification(row)
+            final_class, evidence_reason = _automatic_evidence_classification(row)
         final_classes.append(final_class)
-        qc_reasons.append(qc_reason)
+        evidence_reasons.append(evidence_reason)
 
     out["final_class"] = final_classes
-    out["qc_reason"] = qc_reasons
+    out["evidence_reason"] = evidence_reasons
     out["override_note"] = ""
 
     overrides = _read_classification_overrides(overrides_path, phase=phase)
@@ -297,7 +300,7 @@ def apply_qc_reclassification(
             if not override:
                 continue
             out.at[idx, "final_class"] = override["final_class"]
-            out.at[idx, "qc_reason"] = override["qc_reason"]
+            out.at[idx, "evidence_reason"] = override["evidence_reason"]
             out.at[idx, "override_note"] = override["note"]
 
     out["report_label"] = np.where(out["final_class"] == PHAS, PHAS, NON_PHAS)

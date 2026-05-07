@@ -43,12 +43,13 @@ DEFAULT_PANEL = [_parse_plot_stub(item) for item in DEFAULT_PANEL_PLOTS]
 
 
 def _load_result_tables(result_dir: Path, phase: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    qc = pd.read_csv(result_dir / f"{phase}_KNN_classification_qc.tsv", sep="\t")
+    evidence_path = result_dir / f"{phase}_KNN_classification_evidence.tsv"
+    evidence = pd.read_csv(evidence_path, sep="\t")
     all_clusters = pd.read_csv(result_dir / f"{phase}_KNN_all_clusters.tsv", sep="\t")
     phas = pd.read_csv(result_dir / f"{phase}_KNN_phasiRNAs.tsv", sep="\t")
     phas_like = pd.read_csv(result_dir / f"{phase}_KNN_PHAS_like_phasiRNAs.tsv", sep="\t")
     exports = pd.concat([phas, phas_like], ignore_index=True)
-    return qc, all_clusters, exports
+    return evidence, all_clusters, exports
 
 
 def _load_trace_table(result_dir: Path, phase: int) -> pd.DataFrame:
@@ -202,19 +203,19 @@ def _build_record(
     lib: str,
     identifier: str,
     *,
-    qc: pd.DataFrame,
+    evidence: pd.DataFrame,
     all_clusters: pd.DataFrame,
     exports: pd.DataFrame,
     trace: pd.DataFrame,
     panel_group: str,
 ) -> dict | None:
-    qc_row = qc[(qc["identifier"] == identifier) & (qc["alib"] == lib)]
+    evidence_row = evidence[(evidence["identifier"] == identifier) & (evidence["alib"] == lib)]
     cluster_row = all_clusters[(all_clusters["identifier"] == identifier) & (all_clusters["alib"] == lib)]
     export_rows = exports[(exports["identifier"] == identifier) & (exports["alib"] == lib)]
-    if qc_row.empty or cluster_row.empty:
+    if evidence_row.empty or cluster_row.empty:
         return None
 
-    q = qc_row.iloc[0]
+    q = evidence_row.iloc[0]
     c = cluster_row.iloc[0]
     roles = sorted(export_rows["window_unit_role"].dropna().astype(str).unique().tolist()) if not export_rows.empty else []
     strands = sorted(export_rows["strand"].dropna().astype(str).unique().tolist()) if not export_rows.empty else []
@@ -223,7 +224,7 @@ def _build_record(
         "alib": lib,
         "identifier": identifier,
         "final_class": q.get("final_class"),
-        "qc_reason": q.get("qc_reason"),
+        "evidence_reason": q.get("evidence_reason"),
         "origin_class": q.get("Howell_origin_class"),
         "winner_strand_guess": _winner_strand(c),
         "w_Howell_score": c.get("w_Howell_score"),
@@ -252,7 +253,7 @@ def _build_record(
 
 
 def _select_positive_controls(
-    qc: pd.DataFrame,
+    evidence: pd.DataFrame,
     all_clusters: pd.DataFrame,
     exports: pd.DataFrame,
     *,
@@ -268,7 +269,7 @@ def _select_positive_controls(
     if positives.empty:
         return []
     merged = positives.merge(
-        qc[["identifier", "alib", "Peak_Howell_score", "Howell_exact_support_score"]],
+        evidence[["identifier", "alib", "Peak_Howell_score", "Howell_exact_support_score"]],
         on=["identifier", "alib"],
         how="left",
     )
@@ -288,7 +289,7 @@ def _select_positive_controls(
 
 
 def build_debug_panel(result_dir: Path, *, phase: int = 21, positive_controls: int = 6) -> pd.DataFrame:
-    qc, all_clusters, exports = _load_result_tables(result_dir, phase)
+    evidence, all_clusters, exports = _load_result_tables(result_dir, phase)
     trace = _load_trace_table(result_dir, phase)
     panel_keys = set(DEFAULT_PANEL)
     records = []
@@ -296,7 +297,7 @@ def build_debug_panel(result_dir: Path, *, phase: int = 21, positive_controls: i
         record = _build_record(
             lib,
             identifier,
-            qc=qc,
+            evidence=evidence,
             all_clusters=all_clusters,
             exports=exports,
             trace=trace,
@@ -306,7 +307,7 @@ def build_debug_panel(result_dir: Path, *, phase: int = 21, positive_controls: i
             records.append(record)
 
     for lib, identifier in _select_positive_controls(
-        qc,
+        evidence,
         all_clusters,
         exports,
         panel_keys=panel_keys,
@@ -315,7 +316,7 @@ def build_debug_panel(result_dir: Path, *, phase: int = 21, positive_controls: i
         record = _build_record(
             lib,
             identifier,
-            qc=qc,
+            evidence=evidence,
             all_clusters=all_clusters,
             exports=exports,
             trace=trace,

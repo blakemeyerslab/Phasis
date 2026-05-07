@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-mismat", default=0, type=int,
                         help="Mismatches allowed for mapping [default 0]")
     parser.add_argument("-libformat", default="F", type=str,
-                        help="QC format: FASTA (F), tag-count (T), or FASTQ (Q) [default F]")
+                        help="Library format: FASTA (F), tag-count (T), or FASTQ (Q) [default F]")
     parser.add_argument("-phase", default=21, type=int,
                         help="Desired phase length [default 21]")
     parser.add_argument("-clustbuffer", default=300, type=int,
@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--legacy_classification",
         dest="legacy_classification",
         action="store_true",
-        help="Restore the legacy binary PHAS/non-PHAS labeling without the default 2.7 QC reclassification layer",
+        help="Restore the legacy binary PHAS/non-PHAS labeling without the default evidence interpretation layer",
     )
     parser.add_argument(
         "--classification_overrides",
@@ -103,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         type=str,
         default=None,
-        help="Optional TSV with per-detection final_class overrides keyed by identifier and alib",
+        help="Optional TSV with per-detection final_class overrides keyed by identifier and alib; may include evidence_reason and note",
     )
     parser.add_argument(
         "--locus_plot_mode",

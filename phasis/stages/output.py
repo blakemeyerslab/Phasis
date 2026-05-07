@@ -1021,19 +1021,19 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
     all_out   = _join_outdir(outdir, f"{phase}_{method_name}_all_clusters.tsv")
     calls_out = _join_outdir(outdir, f"{phase}_{method_name}_calls.tsv")
     gff_out   = _join_outdir(outdir, f"{phase}_PHAS.gff")
-    qc_out    = _join_outdir(outdir, f"{phase}_{method_name}_classification_qc.tsv")
+    evidence_out = _join_outdir(outdir, f"{phase}_{method_name}_classification_evidence.tsv")
  
     # Write all clusters with labels
     all_df.to_csv(all_out, sep="\t", index=False)
 
-    qc_df = pd.DataFrame({
+    evidence_df = pd.DataFrame({
         "identifier": features["identifier"],
         "alib": alib_ids,
         "cID": features.get("cID", _fallback_text_series(nrows)),
-        "pre_qc_label": features.get("pre_qc_label", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
+        "initial_classifier_label": features.get("initial_classifier_label", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
         "report_label": features.get("report_label", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
         "final_class": features.get("final_class", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
-        "qc_reason": features.get("qc_reason", _fallback_text_series(nrows, "")),
+        "evidence_reason": features.get("evidence_reason", _fallback_text_series(nrows, "")),
         "Peak_Howell_score": features.get("Peak_Howell_score", _fallback_series(nrows)),
         "Howell_exact_support_score": features.get("Howell_exact_support_score", _fallback_series(nrows)),
         "Howell_origin_class": features.get("Howell_origin_class", _fallback_text_series(nrows)),
@@ -1053,7 +1053,7 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         "secondary_peak_ratio": features.get("secondary_peak_ratio", _fallback_series(nrows)),
         "override_note": features.get("override_note", _fallback_text_series(nrows)),
     })
-    qc_df.to_csv(qc_out, sep="\t", index=False)
+    evidence_df.to_csv(evidence_out, sep="\t", index=False)
 
     final_class_series = features.get("final_class", features["label"]).astype(str)
     phas_mask = final_class_series == "PHAS"
@@ -1101,5 +1101,5 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         raise
     _print_final_detection_summary(
         phas_df,
-        wrote_line=f"  - Wrote: {all_out}, {calls_out}, {qc_out}, and {gff_out}",
+        wrote_line=f"  - Wrote: {all_out}, {calls_out}, {evidence_out}, and {gff_out}",
     )

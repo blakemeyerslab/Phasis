@@ -162,27 +162,31 @@ In the filenames below, `{method}` is the classifier used for the run, currently
    Filename: **`{phase}_{method}_all_clusters.tsv`**  
    Use this when you want the full picture, not only the final *PHAS* calls. It includes both *PHAS* and non-*PHAS* clusters together with the features and labels used during classification.
 
-3. **Genome annotation file for detected *PHAS* loci**  
+3. **Classification evidence table**  
+   Filename: **`{phase}_{method}_classification_evidence.tsv`**  
+   This TSV records the evidence interpretation applied after the initial classifier label. It includes `initial_classifier_label`, `report_label`, `final_class`, and `evidence_reason`, together with register-level support metrics used by the Register-Resolved Locus Interpretation Layer. `final_class` can be `PHAS`, `PHAS-like`, or `non-PHAS`; `report_label` remains binary for the main output tables, so `PHAS-like` loci are preserved as an intermediate evidence class without being merged into the high-confidence *PHAS* calls.
+
+4. **Genome annotation file for detected *PHAS* loci**  
    Filename: **`{phase}_PHAS.gff`**  
    This file is intended for downstream genome-based analyses and visualization in genome browsers or other annotation-aware tools.
 
-4. **Classification heatmap**  
+5. **Classification heatmap**  
    Filename: **`{phase}_{method}_PHAS.pdf`**  
    This PDF gives a quick visual overview of how each locus was classified in each library: *PHAS*, non-*PHAS*, or not detected.
 
-5. **Heatmap of *PHAS* abundance**  
+6. **Heatmap of *PHAS* abundance**  
    Filename: **`{method}_{phase}_Abundance_PHAS.pdf`**  
    This PDF focuses only on loci classified as *PHAS* and shows their length-normalized phased-cluster abundance across libraries.
 
-6. **Combined abundance heatmap for *PHAS* and non-*PHAS* signal**  
+7. **Combined abundance heatmap for *PHAS* and non-*PHAS* signal**  
    Filename: **`{method}_{phase}_Abundance_PHAS_and_nonPHAS.pdf`**  
    This PDF helps compare phased and non-phased signal side by side across the same loci and libraries, which can be useful for judging how distinct the *PHAS* pattern is.
 
-7. **Howell score heatmaps**  
+8. **Howell score heatmaps**  
    Filename: **`{method}_{phase}_Howell_scores.pdf`**  
    This PDF contains **two heatmaps**. One shows the Peak Howell score, which summarizes phasing-support signal, and the other shows the Peak Howell score (strict), a more conservative version based on the stricter/classic scoring scheme.
 
-8. **Individual *PHAS* locus diagnostic plots**  
+9. **Individual *PHAS* locus diagnostic plots**  
    Directory: **`{phase}_{method}_PHAS_locus_plots/`**  
    Phasis writes one PNG per final *PHAS* call, named as **`{alib}__{identifier}.png`**. Each plot has two panels for the same locus:
    - the top panel is the **abundance context**. It shows strand-separated read abundance. Diamonds are colored by sRNA length, filled diamonds are uni-mappers, and open diamonds are multi-mappers.
@@ -207,7 +211,7 @@ In the filenames below, `{method}` is the classifier used for the run, currently
    - `Coherent extension` reports how many scored windows extend the same main register and the span covered by that extension.
    - `Secondary phased windows` and `Overlapping alternative windows` report promoted additional phased units. `Paired` means both strands were promoted for that unit; `Unpaired` means only one promoted strand was retained.
 
-9. **Per-locus phased-register phasiRNA table**  
+10. **Per-locus phased-register phasiRNA table**  
    Filename: **`{phase}_{method}_phasiRNAs.tsv`**  
    This TSV contains one row per exported phase-length phasiRNA that supports a final *PHAS* locus in the plotted phased register. It records the observed read position, the expected register position, the support class (`core_exact`, `core_offset`, or `extended_exact`), the abundance, the sequence, the mapper count when available, and the phased-window unit assignment.
 

@@ -2672,7 +2672,7 @@ def _analyze_single_locus(task: dict) -> dict:
             "secondary_peak_ratio": task.get("secondary_peak_ratio"),
             "final_class": task.get("final_class"),
             "report_label": task.get("report_label"),
-            "qc_reason": task.get("qc_reason"),
+            "evidence_reason": task.get("evidence_reason"),
             "Main_opposite_partner_present": main_partner_present,
             "Main_opposite_partner_shift_nt": main_partner_shift_nt,
         },
@@ -3017,7 +3017,7 @@ def write_individual_phas_locus_plots(
                     "secondary_peak_ratio": getattr(row, "secondary_peak_ratio", np.nan),
                     "final_class": getattr(row, "final_class", getattr(row, "label", "non-PHAS")),
                     "report_label": getattr(row, "report_label", getattr(row, "label", "non-PHAS")),
-                    "qc_reason": getattr(row, "qc_reason", ""),
+                    "evidence_reason": getattr(row, "evidence_reason", ""),
                     "cluster_rows": [] if cluster_df is None else cluster_df.to_dict("records"),
                 }
             )

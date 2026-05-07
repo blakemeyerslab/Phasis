@@ -76,15 +76,15 @@ def _base_feature_row(**overrides):
     return row
 
 
-class QCReclassificationTests(unittest.TestCase):
+class EvidenceClassificationTests(unittest.TestCase):
     def test_classifier_non_phas_stays_non_phas(self):
         features = pd.DataFrame([_base_feature_row(label="non-PHAS")])
-        out = classify.apply_qc_reclassification(features, phase=24)
+        out = classify.apply_evidence_classification(features, phase=24)
 
-        self.assertEqual(str(out.loc[0, "pre_qc_label"]), "non-PHAS")
+        self.assertEqual(str(out.loc[0, "initial_classifier_label"]), "non-PHAS")
         self.assertEqual(str(out.loc[0, "final_class"]), "non-PHAS")
         self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
-        self.assertEqual(str(out.loc[0, "qc_reason"]), "classifier_non_phas")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "classifier_non_phas")
         self.assertEqual(str(out.loc[0, "label"]), "non-PHAS")
 
     def test_zero_exact_support_demotes_to_non_phas(self):
@@ -96,11 +96,11 @@ class QCReclassificationTests(unittest.TestCase):
                 )
             ]
         )
-        out = classify.apply_qc_reclassification(features, phase=24)
+        out = classify.apply_evidence_classification(features, phase=24)
 
         self.assertEqual(str(out.loc[0, "final_class"]), "non-PHAS")
         self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
-        self.assertEqual(str(out.loc[0, "qc_reason"]), "insufficient_exact_support")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "insufficient_exact_support")
 
     def test_low_score_crowded_window_context_becomes_phas_like(self):
         features = pd.DataFrame(
@@ -113,11 +113,11 @@ class QCReclassificationTests(unittest.TestCase):
                 )
             ]
         )
-        out = classify.apply_qc_reclassification(features, phase=24)
+        out = classify.apply_evidence_classification(features, phase=24)
 
         self.assertEqual(str(out.loc[0, "final_class"]), "PHAS-like")
         self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
-        self.assertEqual(str(out.loc[0, "qc_reason"]), "low_score_crowded_window_context")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "low_score_crowded_window_context")
 
     def test_strong_multi_peak_coherent_extension_stays_phas(self):
         features = pd.DataFrame(
@@ -130,11 +130,11 @@ class QCReclassificationTests(unittest.TestCase):
                 )
             ]
         )
-        out = classify.apply_qc_reclassification(features, phase=24)
+        out = classify.apply_evidence_classification(features, phase=24)
 
         self.assertEqual(str(out.loc[0, "final_class"]), "PHAS")
         self.assertEqual(str(out.loc[0, "report_label"]), "PHAS")
-        self.assertEqual(str(out.loc[0, "qc_reason"]), "pass")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "pass")
 
     def test_moderate_score_weak_scaffold_context_becomes_phas_like(self):
         features = pd.DataFrame(
@@ -150,11 +150,11 @@ class QCReclassificationTests(unittest.TestCase):
                 )
             ]
         )
-        out = classify.apply_qc_reclassification(features, phase=24)
+        out = classify.apply_evidence_classification(features, phase=24)
 
         self.assertEqual(str(out.loc[0, "final_class"]), "PHAS-like")
         self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
-        self.assertEqual(str(out.loc[0, "qc_reason"]), "weak_scaffold_alternative_context")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "weak_scaffold_alternative_context")
 
     def test_ambiguous_origin_remains_phas_in_v1(self):
         features = pd.DataFrame(
@@ -167,11 +167,11 @@ class QCReclassificationTests(unittest.TestCase):
                 )
             ]
         )
-        out = classify.apply_qc_reclassification(features, phase=24)
+        out = classify.apply_evidence_classification(features, phase=24)
 
         self.assertEqual(str(out.loc[0, "final_class"]), "PHAS")
         self.assertEqual(str(out.loc[0, "report_label"]), "PHAS")
-        self.assertEqual(str(out.loc[0, "qc_reason"]), "pass")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "pass")
 
     def test_manual_override_takes_precedence(self):
         features = pd.DataFrame([_base_feature_row()])
@@ -183,12 +183,12 @@ class QCReclassificationTests(unittest.TestCase):
                         "identifier": "chr1:100..400",
                         "alib": "libA",
                         "final_class": "PHAS-like",
-                        "qc_reason": "manual_curated_complex_locus",
+                        "evidence_reason": "manual_curated_complex_locus",
                         "note": "split later",
                     }
                 ]
             ).to_csv(override_path, sep="\t", index=False)
-            out = classify.apply_qc_reclassification(
+            out = classify.apply_evidence_classification(
                 features,
                 phase=24,
                 overrides_path=override_path,
@@ -196,7 +196,7 @@ class QCReclassificationTests(unittest.TestCase):
 
         self.assertEqual(str(out.loc[0, "final_class"]), "PHAS-like")
         self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
-        self.assertEqual(str(out.loc[0, "qc_reason"]), "manual_curated_complex_locus")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "manual_curated_complex_locus")
         self.assertEqual(str(out.loc[0, "override_note"]), "split later")
 
     def test_duplicate_override_keys_fail_fast(self):
@@ -210,19 +210,19 @@ class QCReclassificationTests(unittest.TestCase):
                 ]
             ).to_csv(override_path, sep="\t", index=False)
             with self.assertRaises(ValueError):
-                classify.apply_qc_reclassification(
+                classify.apply_evidence_classification(
                     features,
                     phase=24,
                     overrides_path=override_path,
                 )
 
 
-class QCOutputTests(unittest.TestCase):
-    def test_finalize_writes_binary_main_tables_and_multiclass_qc_table(self):
+class EvidenceOutputTests(unittest.TestCase):
+    def test_finalize_writes_binary_main_tables_and_multiclass_evidence_table(self):
         features = pd.DataFrame(
             [
-                classify.apply_qc_reclassification(pd.DataFrame([_base_feature_row()]), phase=24).iloc[0].to_dict(),
-                classify.apply_qc_reclassification(
+                classify.apply_evidence_classification(pd.DataFrame([_base_feature_row()]), phase=24).iloc[0].to_dict(),
+                classify.apply_evidence_classification(
                     pd.DataFrame(
                         [
                             _base_feature_row(
@@ -238,7 +238,7 @@ class QCOutputTests(unittest.TestCase):
                     ),
                     phase=24,
                 ).iloc[0].to_dict(),
-                classify.apply_qc_reclassification(
+                classify.apply_evidence_classification(
                     pd.DataFrame(
                         [
                             _base_feature_row(
@@ -270,18 +270,18 @@ class QCOutputTests(unittest.TestCase):
 
             all_df = pd.read_csv(os.path.join(outdir, "24_KNN_all_clusters.tsv"), sep="\t")
             calls_df = pd.read_csv(os.path.join(outdir, "24_KNN_calls.tsv"), sep="\t")
-            qc_df = pd.read_csv(os.path.join(outdir, "24_KNN_classification_qc.tsv"), sep="\t")
+            evidence_df = pd.read_csv(os.path.join(outdir, "24_KNN_classification_evidence.tsv"), sep="\t")
 
             self.assertEqual(sorted(all_df["label"].unique().tolist()), ["PHAS", "non-PHAS"])
             self.assertEqual(calls_df["identifier"].tolist(), ["chr1:100..400"])
-            self.assertEqual(sorted(qc_df["final_class"].tolist()), ["PHAS", "PHAS-like", "non-PHAS"])
-            row = qc_df.loc[qc_df["identifier"] == "chr2:500..900"].iloc[0]
+            self.assertEqual(sorted(evidence_df["final_class"].tolist()), ["PHAS", "PHAS-like", "non-PHAS"])
+            row = evidence_df.loc[evidence_df["identifier"] == "chr2:500..900"].iloc[0]
             self.assertEqual(str(row["report_label"]), "non-PHAS")
             self.assertEqual(str(row["final_class"]), "PHAS-like")
-            self.assertEqual(str(row["qc_reason"]), "low_score_crowded_window_context")
+            self.assertEqual(str(row["evidence_reason"]), "low_score_crowded_window_context")
             self.assertEqual(int(row["Howell_crowding_window_count"]), 7)
-            self.assertIn("Howell_exact_relaxed_ratio", qc_df.columns)
-            self.assertIn("Howell_strict_relaxed_ratio", qc_df.columns)
+            self.assertIn("Howell_exact_relaxed_ratio", evidence_df.columns)
+            self.assertIn("Howell_strict_relaxed_ratio", evidence_df.columns)
 
 
 if __name__ == "__main__":

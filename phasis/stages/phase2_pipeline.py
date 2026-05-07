@@ -182,7 +182,7 @@ def run_phase2_pipeline(
             max_complexity=float(cfg.max_complexity),
             n_clusters=int(getattr(cfg, "n_clusters", 2) or 2),
         )
-        labeled = st_classify.apply_qc_reclassification(
+        labeled = st_classify.apply_evidence_classification(
             labeled,
             phase=cfg.phase,
             legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
@@ -208,7 +208,7 @@ def run_phase2_pipeline(
             min_Howell_score=float(cfg.min_Howell_score),
             max_complexity=float(cfg.max_complexity),
         )
-        labeled = st_classify.apply_qc_reclassification(
+        labeled = st_classify.apply_evidence_classification(
             labeled,
             phase=cfg.phase,
             legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
