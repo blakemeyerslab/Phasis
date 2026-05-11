@@ -36,23 +36,27 @@ def fastq_to_count_table(fastq_file):
             total = None
 
         fq.seek(0)
-        reader = tqdm(range(total), desc="Processing reads") if total else None
-        while True:
-            header = fq.readline().strip()
-            if not header:
-                break
-            seq = fq.readline().strip()
-            fq.readline()  # plus line
-            fq.readline()  # quality line
+        reader = tqdm(total=total, desc="Processing reads") if total else None
+        try:
+            while True:
+                header = fq.readline().strip()
+                if not header:
+                    break
+                seq = fq.readline().strip()
+                fq.readline()  # plus line
+                fq.readline()  # quality line
 
-            processed_sequence = chop_sequence(seq)
-            if 18 <= len(processed_sequence) <= 35 and 'N' not in processed_sequence:
-                seq_counter[processed_sequence] += 1
-            else:
-                removed_sequences += 1
+                processed_sequence = chop_sequence(seq)
+                if 18 <= len(processed_sequence) <= 35 and 'N' not in processed_sequence:
+                    seq_counter[processed_sequence] += 1
+                else:
+                    removed_sequences += 1
 
+                if reader:
+                    reader.update(1)
+        finally:
             if reader:
-                next(reader, None)
+                reader.close()
 
     with open(output_file, "w") as out:
         for seq, count in sorted(seq_counter.items(), key=lambda x: x[1], reverse=True):
