@@ -1,7 +1,7 @@
 # Phasis — Phased sRNA Cluster Discovery and Annotation
 
-**Version:** v2.7  
-**Updated:** 2026-04-13
+**Version:** v2.8  
+**Updated:** 2026-05-13
 
 Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libraries. It supports:
 
@@ -31,7 +31,6 @@ Phasis is currently documented against this setup:
   - **scikit-learn** `1.3.0`
   - **Matplotlib**
   - **Seaborn**
-  - **Joblib**
   - **tqdm**
 
 This NumPy / scikit-learn pairing is intentional. Phasis currently targets:
@@ -109,10 +108,10 @@ wget "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSM3466699&format=file&file
 wget https://download.maizegdb.org/B73_RefGen_v2/B73_RefGen_v2.fa.gz
 
 # Detect 21-PHAS
-phasis -mindepth 1 -phase 21 -libformat T -classifier KNN -reference B73_RefGen_v2.fa.gz -cores 12 -maxhits 25 -libs sTR_dcl5_1_2.0.tag.gz W23_2.0_2.tag.gz sTP_dcl5_1_2.0.tag.gz W23_2.0_1.tag.gz
+phasis -mindepth 1 -phase 21 -libformat T -reference B73_RefGen_v2.fa.gz -cores 12 -maxhits 25 -libs sTR_dcl5_1_2.0.tag.gz W23_2.0_2.tag.gz sTP_dcl5_1_2.0.tag.gz W23_2.0_1.tag.gz
 
 # Detect 24-PHAS (same run directory allows reuse of the HISAT2 index)
-phasis -mindepth 1 -phase 24 -libformat T -classifier KNN -reference B73_RefGen_v2.fa.gz -cores 12 -maxhits 25 -libs sTR_dcl5_1_2.0.tag.gz W23_2.0_2.tag.gz sTP_dcl5_1_2.0.tag.gz W23_2.0_1.tag.gz
+phasis -mindepth 1 -phase 24 -libformat T -reference B73_RefGen_v2.fa.gz -cores 12 -maxhits 25 -libs sTR_dcl5_1_2.0.tag.gz W23_2.0_2.tag.gz sTP_dcl5_1_2.0.tag.gz W23_2.0_1.tag.gz
 ```
 
 ## How Phasis writes files (important)
@@ -152,18 +151,18 @@ You can keep the same run directory and let Phasis reuse `index/` and other inte
 ## Outputs
 
 For each phase (e.g., `21`, `24`), Phasis writes the main outputs into `--outdir` (default: `{phase}_results`).
-In the filenames below, `{method}` is the classifier used for the run, currently `KNN` or `GMM`.
+Phasis 2.8 uses one active classifier path, so canonical output names no longer include a classifier/model token. For compatibility with older scripts, Phasis may also write legacy alias files/directories such as `{phase}_GMM_calls.tsv`, and when an old command explicitly passes `-classifier KNN`, matching `{phase}_KNN_*` aliases are also created.
 
 1. **Main table of detected *PHAS* loci**  
-   Filename: **`{phase}_{method}_calls.tsv`**  
+   Filename: **`{phase}_calls.tsv`**  
    This is the most direct summary of the final *PHAS* calls. It lists each detected locus, where it is in the genome, which library it came from, its phasing score, and the Peak Howell score values.
 
 2. **Full table of all evaluated clusters**  
-   Filename: **`{phase}_{method}_all_clusters.tsv`**  
+   Filename: **`{phase}_all_clusters.tsv`**  
    Use this when you want the full picture, not only the final *PHAS* calls. It includes both *PHAS* and non-*PHAS* clusters together with the features and labels used during classification.
 
 3. **Classification evidence table**  
-   Filename: **`{phase}_{method}_classification_evidence.tsv`**  
+   Filename: **`{phase}_classification_evidence.tsv`**  
    This TSV records the evidence interpretation applied after the initial classifier label. It includes `initial_classifier_label`, `report_label`, `final_class`, and `evidence_reason`, together with register-level support metrics used by the Register-Resolved Locus Interpretation Layer. `final_class` can be `PHAS`, `PHAS-like`, or `non-PHAS`; `report_label` remains binary for the main output tables, so `PHAS-like` loci are preserved as an intermediate evidence class without being merged into the high-confidence *PHAS* calls.
 
 4. **Genome annotation file for detected *PHAS* loci**  
@@ -171,23 +170,23 @@ In the filenames below, `{method}` is the classifier used for the run, currently
    This file is intended for downstream genome-based analyses and visualization in genome browsers or other annotation-aware tools.
 
 5. **Classification heatmap**  
-   Filename: **`{phase}_{method}_PHAS.pdf`**  
+   Filename: **`{phase}_PHAS.pdf`**  
    This PDF gives a quick visual overview of how each locus was classified in each library: *PHAS*, non-*PHAS*, or not detected.
 
 6. **Heatmap of *PHAS* abundance**  
-   Filename: **`{method}_{phase}_Abundance_PHAS.pdf`**  
+   Filename: **`{phase}_Abundance_PHAS.pdf`**  
    This PDF focuses only on loci classified as *PHAS* and shows their length-normalized phased-cluster abundance across libraries.
 
 7. **Combined abundance heatmap for *PHAS* and non-*PHAS* signal**  
-   Filename: **`{method}_{phase}_Abundance_PHAS_and_nonPHAS.pdf`**  
+   Filename: **`{phase}_Abundance_PHAS_and_nonPHAS.pdf`**  
    This PDF helps compare phased and non-phased signal side by side across the same loci and libraries, which can be useful for judging how distinct the *PHAS* pattern is.
 
 8. **Howell score heatmaps**  
-   Filename: **`{method}_{phase}_Howell_scores.pdf`**  
+   Filename: **`{phase}_Howell_scores.pdf`**  
    This PDF contains **two heatmaps**. One shows the Peak Howell score, which summarizes phasing-support signal, and the other shows the Peak Howell score (strict), a more conservative version based on the stricter/classic scoring scheme.
 
 9. **Individual *PHAS* locus diagnostic plots**  
-   Directory: **`{phase}_{method}_PHAS_locus_plots/`**  
+   Directory: **`{phase}_PHAS_locus_plots/`**  
    Phasis writes one PNG per final *PHAS* call, named as **`{alib}__{identifier}.png`**. Each plot has two panels for the same locus:
    - the top panel is the **abundance context**. It shows strand-separated read abundance. Diamonds are colored by sRNA length, filled diamonds are uni-mappers, and open diamonds are multi-mappers.
    - the bottom panel is the **score context**. It shows the scored 10-cycle phasing windows anchored at mapped phase-length sRNAs.
@@ -212,7 +211,7 @@ In the filenames below, `{method}` is the classifier used for the run, currently
    - `Secondary phased windows` and `Overlapping alternative windows` report promoted additional phased units. `Paired` means both strands were promoted for that unit; `Unpaired` means only one promoted strand was retained.
 
 10. **Per-locus phased-register phasiRNA table**  
-   Filename: **`{phase}_{method}_phasiRNAs.tsv`**  
+   Filename: **`{phase}_phasiRNAs.tsv`**  
    This TSV contains one row per exported phase-length phasiRNA that supports a final *PHAS* locus in the plotted phased register. It records the observed read position, the expected register position, the support class (`core_exact`, `core_offset`, or `extended_exact`), the abundance, the sequence, the mapper count when available, and the phased-window unit assignment.
 
    Small synthetic 24-nt example:
@@ -242,11 +241,12 @@ In the filenames below, `{method}` is the classifier used for the run, currently
 - `-libs`: input libraries to process; accepted formats depend on `-libformat` and can be plain text or `.gz`
 - `-reference`: genome or transcriptome reference FASTA; can be plain text or `.gz`
 - `-maxhits` (default: 25): `-k` passed to hisat2
-- `-runtype` (default: G): `G` genome | `T` transcriptome | `S` scaffolded genome
+- `--reference_id_mode` (default: derived from `-runtype`): how Phasis writes reference IDs in the indexed `.clean.fa`; use `numeric` for compact numeric IDs or `preserve` to keep FASTA IDs
+- `-runtype` (default: G): deprecated compatibility alias for reference ID handling; `G` maps to `numeric`, while `T` and `S` map to `preserve`
 - `-mindepth` (default: 2): minimum depth for p-value computation
 - `-uniqueRatioCut` (default: 0.2): filter for uniquely mapped reads
 - `-max_complexity` (default: 0.3): maximum complexity filter
-- `-mismat` (default: 0): mismatches allowed in mapping
+- `-mismat` (default: 0): post-alignment mismatch filter applied while parsing alignments
 - `-libformat` (default: F): `F` FASTA | `T` tag-count | `Q` FASTQ
 - `-phase` (default: 21): phasing length (21 or 24 common)
 - `-clustbuffer` (default: 300): merging distance between clusters
@@ -255,9 +255,9 @@ In the filenames below, `{method}` is the classifier used for the run, currently
 - `-cores` (default: 0): 0 uses most free cores; `>0` sets exact core count
 - `-norm`: enable CP10M normalization (use `-norm_factor` to change factor; default `1e7`)
 - `-norm_factor` (default: `1e7`): normalization factor used when `-norm` is enabled
-- `-classifier` (default: KNN): `KNN` or `GMM`
+- `-classifier`: deprecated compatibility option. Phasis 2.8 always uses GMM classification; old scripts may still pass `KNN` or `GMM`, but the value is ignored after compatibility aliases are recorded.
 - `-steps` (default: both): `both` | `cfind` | `class`
-- `-class_cluster_file`: cluster file(s) to classify when running with `-steps class`
+- `-class_cluster_file` / `-class_cluster_files`: optional cluster file(s) to classify with `-steps class`; inferred from `-libs` when omitted
 - `-min_Howell_score` (default: 12.5): minimum Howell score used during classification/output filtering
 - `--concat_libs`: concatenate all input libraries into one virtual library before downstream analysis
 - `--outdir` (default: `{phase}_results`): directory for final outputs; supports `{phase}` in the name
@@ -274,22 +274,25 @@ This approach is useful when you want to be permissive during clustering and the
 
 ### Step 1 — cluster detection
 ```bash
-phasis -mindepth 1 -phase 24 -libformat T -classifier KNN \
+phasis -mindepth 1 -phase 24 -libformat T \
   -libs *.tag -reference genome.fa -cores 0 -maxhits 2000 \
   -steps cfind -uniqueRatioCut 0.05
 ```
 
 ### Step 2 — classification
 ```bash
-phasis -mindepth 1 -phase 24 -libformat T -classifier KNN \
+phasis -mindepth 1 -phase 24 -libformat T \
   -libs *.tag -reference genome.fa -cores 0 -maxhits 2000 \
-  -steps class -class_cluster_file *24-PHAS.candidate.clusters \
+  -steps class \
   -uniqueRatioCut 0.05
 ```
 
 Notes:
 - Setting `uniqueRatioCut` too low (e.g., 0.0) can dramatically increase runtime and memory in TE-rich genomes.
 - Keeping the **same run directory** between steps lets Phasis reuse intermediates safely.
+- In `-steps class`, Phasis infers the expected `*.candidate.clusters` files from `-libs` and `-phase` when `-class_cluster_file` is omitted.
+- Advanced/manual use: pass `-class_cluster_file` explicitly to classify a chosen candidate-cluster set, including cross-phase inspection such as evaluating 21-nt candidate clusters under 24-nt settings.
+- Phasis keeps an indexed `.clean.fa` reference representation in the run directory so reference IDs and cache reuse stay stable across stages.
 
 ---
 

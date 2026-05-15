@@ -42,12 +42,71 @@ def _parse_plot_stub(stub: str) -> tuple[str, str]:
 DEFAULT_PANEL = [_parse_plot_stub(item) for item in DEFAULT_PANEL_PLOTS]
 
 
+def _first_existing(result_dir: Path, names: list[str]) -> Path:
+    for name in names:
+        path = result_dir / name
+        if path.exists():
+            return path
+    expected = "\n  - ".join(names)
+    raise FileNotFoundError(f"Missing expected result table. Checked:\n  - {expected}")
+
+
+def _first_existing_optional(result_dir: Path, names: list[str]) -> Path | None:
+    for name in names:
+        path = result_dir / name
+        if path.exists():
+            return path
+    return None
+
+
+def _read_optional_tsv(path: Path | None) -> pd.DataFrame:
+    if path is None or not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path, sep="\t")
+
+
 def _load_result_tables(result_dir: Path, phase: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    evidence_path = result_dir / f"{phase}_KNN_classification_evidence.tsv"
+    evidence_path = _first_existing(
+        result_dir,
+        [
+            f"{phase}_classification_evidence.tsv",
+            f"{phase}_GMM_classification_evidence.tsv",
+            f"{phase}_KNN_classification_evidence.tsv",
+        ],
+    )
     evidence = pd.read_csv(evidence_path, sep="\t")
-    all_clusters = pd.read_csv(result_dir / f"{phase}_KNN_all_clusters.tsv", sep="\t")
-    phas = pd.read_csv(result_dir / f"{phase}_KNN_phasiRNAs.tsv", sep="\t")
-    phas_like = pd.read_csv(result_dir / f"{phase}_KNN_PHAS_like_phasiRNAs.tsv", sep="\t")
+    all_clusters = pd.read_csv(
+        _first_existing(
+            result_dir,
+            [
+                f"{phase}_all_clusters.tsv",
+                f"{phase}_GMM_all_clusters.tsv",
+                f"{phase}_KNN_all_clusters.tsv",
+            ],
+        ),
+        sep="\t",
+    )
+    phas = pd.read_csv(
+        _first_existing(
+            result_dir,
+            [
+                f"{phase}_phasiRNAs.tsv",
+                f"{phase}_GMM_phasiRNAs.tsv",
+                f"{phase}_KNN_phasiRNAs.tsv",
+            ],
+        ),
+        sep="\t",
+    )
+    phas_like = _read_optional_tsv(
+        _first_existing_optional(
+            result_dir,
+            [
+                f"{phase}_PHAS_like_phasiRNAs.tsv",
+                f"{phase}_GMM_PHAS_like_phasiRNAs.tsv",
+                f"{phase}_KNN_PHAS_like_phasiRNAs.tsv",
+            ],
+        )
+    )
     exports = pd.concat([phas, phas_like], ignore_index=True)
     return evidence, all_clusters, exports
 

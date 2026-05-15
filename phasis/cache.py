@@ -889,6 +889,7 @@ def write_mem_basic(
     clustbuffer,
     maxhits,
     mismat,
+    reference_id_mode=None,
     timestamp: str | None = None,
 ) -> None:
     """
@@ -913,6 +914,7 @@ def write_mem_basic(
         "clustbuffer": "" if clustbuffer is None else str(clustbuffer),
         "maxhits": "" if maxhits is None else str(maxhits),
         "mismat": "" if mismat is None else str(mismat),
+        "reference_id_mode": "" if reference_id_mode is None else str(reference_id_mode),
     }
 
     with open(mem_file, "w") as fh_out:

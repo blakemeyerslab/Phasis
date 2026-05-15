@@ -59,7 +59,7 @@ MAIN_PARTNER_TRACE_COLS = [
 ]
 
 
-# ---- legacy schema (KNN-compatible) ---------------------------------------
+# ---- legacy schema (classifier-compatible) --------------------------------
 FEATURE_COLS = ['identifier',
  'cID',
  'alib',
@@ -198,7 +198,7 @@ def ensure_win_score_lookup_ready() -> None:
 def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None = None,outdir: str | None = None,concat_libs: bool | None = None,memFile: str | None = None,outfname: str | None = None,) -> pd.DataFrame:
     """
     Assemble per-cluster feature set (parallel), write TSV, and memoize via md5.
-    Uses legacy column names compatible with downstream KNN.
+    Uses legacy column names compatible with downstream classification.
     Expects process_chromosome_features() to return rows in FEATURE_COLS order.
     """
     print("### Step: assemble per-cluster features ###")

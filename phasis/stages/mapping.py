@@ -16,6 +16,7 @@ maxhits = None
 clustbuffer = None
 phase = None
 runtype = None
+reference_id_mode = None
 outdir = None
 memFile = default_memfile_path()
 
@@ -270,7 +271,8 @@ def _mapping_input_signature(fas_path, genoIndex):
         params={
             "stage": "mapping",
             "maxhits": maxhits,
-            "runtype": runtype,
+            "reference_id_mode": getattr(rt, "reference_id_mode", None)
+            or ("numeric" if str(runtype).upper() == "G" else "preserve"),
         },
         extra=[
             os.path.abspath(os.path.expanduser(str(genoIndex))),
@@ -383,13 +385,17 @@ def sync_from_runtime() -> None:
     Populate mapping-stage globals from phasis.runtime.
     Keep this minimal and spawn-safe.
     """
-    global mismat, maxhits, clustbuffer, phase, runtype, outdir, memFile
+    global mismat, maxhits, clustbuffer, phase, runtype, reference_id_mode, outdir, memFile
 
     mismat = rt.mismat
     maxhits = rt.maxhits
     clustbuffer = rt.clustbuffer
     phase = rt.phase
     runtype = rt.runtype
+    reference_id_mode = getattr(rt, "reference_id_mode", None)
+    if not reference_id_mode:
+        reference_id_mode = "numeric" if str(runtype).upper() == "G" else "preserve"
+        rt.reference_id_mode = reference_id_mode
     outdir = rt.outdir
 
     if outdir:
@@ -412,7 +418,7 @@ def mapper(aninput):
     Map one FASTA with HISAT2, then sort and convert to a BAM that excludes
     unmapped reads. The final BAM preserves the sorted order.
     """
-    alib, genoIndex, nspread, maxhits_local, runtype_local = aninput
+    alib, genoIndex, nspread, maxhits_local, _reference_id_mode_local = aninput
 
     asam_temp = _temp_sam_for_fas(alib)
     abam_sorted = _sorted_bam_temp_for_fas(alib)
@@ -420,54 +426,27 @@ def mapper(aninput):
     asum = _summary_output_for_fas(alib)
     nspread = str(nspread)
 
-    if runtype_local == "G" or runtype_local == "S":
-        retcode = subprocess.call(
-            [
-                "hisat2",
-                "--no-softclip",
-                "--no-spliced-alignment",
-                "-k",
-                str(maxhits_local),
-                "-p",
-                nspread,
-                "-x",
-                genoIndex,
-                "-f",
-                alib,
-                "-S",
-                asam_temp,
-                "--summary-file",
-                asum,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    elif runtype_local == "T":
-        retcode = subprocess.call(
-            [
-                "hisat2",
-                "--no-softclip",
-                "--no-spliced-alignment",
-                "-k",
-                str(maxhits_local),
-                "-p",
-                nspread,
-                "-x",
-                genoIndex,
-                "-f",
-                alib,
-                "-S",
-                asam_temp,
-                "--summary-file",
-                asum,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    else:
-        print("Please input the correct setting for 'runtype'")
-        print("Script will exit for now\n")
-        sys.exit()
+    retcode = subprocess.call(
+        [
+            "hisat2",
+            "--no-softclip",
+            "--no-spliced-alignment",
+            "-k",
+            str(maxhits_local),
+            "-p",
+            nspread,
+            "-x",
+            genoIndex,
+            "-f",
+            alib,
+            "-S",
+            asam_temp,
+            "--summary-file",
+            asum,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
     if retcode != 0:
         print(f"Error: HISAT2 mapping of '{alib}' to reference index failed.")
@@ -544,7 +523,7 @@ def mapprocess(
       - Final mapping artifacts are *.bam, not *.sam.
       - BAM excludes unmapped reads and preserves sorted order.
     """
-    global maxhits, runtype
+    global maxhits, reference_id_mode
 
     sync_from_runtime()
 
@@ -659,7 +638,10 @@ def mapprocess(
                 materialized_inputs.append((resolved, bam_path, input_sig))
 
             nproc, nspread = optimize(ncores_local, len(materialized_inputs))
-            rawinputs = [(alib, genoIndex, nspread, maxhits, runtype) for alib, _, _ in materialized_inputs]
+            rawinputs = [
+                (alib, genoIndex, nspread, maxhits, reference_id_mode)
+                for alib, _, _ in materialized_inputs
+            ]
             PPBalance(
                 mapper,
                 rawinputs,

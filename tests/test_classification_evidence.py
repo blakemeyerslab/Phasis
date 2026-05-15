@@ -77,6 +77,36 @@ def _base_feature_row(**overrides):
 
 
 class EvidenceClassificationTests(unittest.TestCase):
+    def test_gmm_classifier_retries_threadpoolctl_initialization_failure(self):
+        calls = []
+
+        class FakeGaussianMixture:
+            def __init__(self, *args, **kwargs):
+                calls.append(kwargs)
+
+            def fit_predict(self, X):
+                if len(calls) == 1:
+                    raise AttributeError("'NoneType' object has no attribute 'split'")
+                return np.array([0, 1])
+
+        features = pd.DataFrame(
+            [
+                _base_feature_row(phasis_score=10.0, Peak_Howell_score=20.0),
+                _base_feature_row(phasis_score=100.0, Peak_Howell_score=20.0),
+            ]
+        )
+        with mock.patch.object(classify, "GaussianMixture", FakeGaussianMixture):
+            with self.assertWarnsRegex(RuntimeWarning, "retrying with deterministic"):
+                out = classify.gmm_classify(
+                    features,
+                    phasisScoreCutoff=0.0,
+                    min_Howell_score=0.0,
+                    max_complexity=1.0,
+                )
+
+        self.assertEqual(calls[1]["init_params"], "random_from_data")
+        self.assertEqual(list(out["label"]), ["non-PHAS", "PHAS"])
+
     def test_classifier_non_phas_stays_non_phas(self):
         features = pd.DataFrame([_base_feature_row(label="non-PHAS")])
         out = classify.apply_evidence_classification(features, phase=24)

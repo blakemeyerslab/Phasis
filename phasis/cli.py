@@ -34,7 +34,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-maxhits", default=25, type=int,
                         help="Number of genome/transcriptome hits passed as -k to hisat2 [default 25]")
     parser.add_argument("-runtype", default="G", type=str,
-                        help="G: genome | T: transcriptome | S: scaffolded genome [default G]")
+                        help="Deprecated compatibility alias for reference ID mode: G=numeric, T/S=preserve [default G]")
+    parser.add_argument(
+        "--reference_id_mode",
+        choices=("numeric", "preserve"),
+        default=None,
+        help="Reference FASTA ID handling for the indexed .clean.fa: numeric or preserve [default derived from -runtype]",
+    )
     parser.add_argument("-mindepth", default=2, type=int,
                         help="Minimum depth for p-value computation [default 2]")
     parser.add_argument("-uniqueRatioCut", default=0.2, type=float,
@@ -42,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-max_complexity", default=0.3, type=float,
                         help="Max complexity filter [default 0.3]")
     parser.add_argument("-mismat", default=0, type=int,
-                        help="Mismatches allowed for mapping [default 0]")
+                        help="Post-alignment mismatch filter applied while parsing alignments [default 0]")
     parser.add_argument("-libformat", default="F", type=str,
                         help="Library format: FASTA (F), tag-count (T), or FASTQ (Q) [default F]")
     parser.add_argument("-phase", default=21, type=int,
@@ -59,8 +65,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Enable normalization (CP10M) [default False]")
     parser.add_argument("-norm_factor", type=float, default=1e7,
                         help="Normalization factor (default 1e7)")
-    parser.add_argument("-classifier", default="KNN", type=str,
-                        help="Classifier: KNN or GMM [default KNN]")
+    parser.add_argument(
+        "-classifier",
+        default="GMM",
+        type=str,
+        help=(
+            "Deprecated compatibility option. Phasis now always uses GMM; "
+            "KNN is accepted for older scripts but ignored [default GMM]"
+        ),
+    )
     cleanup_group = parser.add_mutually_exclusive_group()
     cleanup_group.add_argument(
         "-cleanup",
@@ -75,8 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-steps", default="both", type=str,
                         help="both | cfind | class [default both]")
-    parser.add_argument("-class_cluster_file", nargs="*",
-                        help="Cluster file(s) for -steps class")
+    parser.add_argument(
+        "-class_cluster_file",
+        "-class_cluster_files",
+        nargs="*",
+        dest="class_cluster_file",
+        help="Optional cluster file(s) for -steps class; inferred from -libs when omitted",
+    )
     parser.add_argument("-min_Howell_score", type=float, default=12.5,
                         help="Minimum Howell score [default 12.5]")
     parser.add_argument("--concat_libs", dest="concat_libs", action="store_true",
@@ -134,13 +152,22 @@ def _normalize_outdir(outdir: str, phase: int) -> str:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
-    args.classifier = str(args.classifier).upper()
+    requested_classifier = str(args.classifier or "GMM").upper()
+    args.requested_classifier = requested_classifier
+    args.classifier_aliases = ["GMM"]
+    if requested_classifier == "KNN":
+        print(
+            "WARNING: -classifier KNN is deprecated and ignored; "
+            "Phasis now uses GMM classification."
+        )
+        args.classifier_aliases.append("KNN")
+    args.classifier = "GMM"
     args.libformat = str(args.libformat).upper()
     args.runtype = str(args.runtype).upper()
     args.steps = str(args.steps).lower()
 
-    if args.classifier not in ("KNN", "GMM"):
-        print("\nERROR: Wrong classifier option (use KNN or GMM)\n")
+    if requested_classifier not in ("KNN", "GMM"):
+        print("\nERROR: Wrong classifier option (legacy accepted values: KNN or GMM)\n")
         raise SystemExit(2)
 
     if args.libformat not in ("F", "T", "Q"):
@@ -151,9 +178,24 @@ def _validate_args(args: argparse.Namespace) -> None:
         print("\nERROR: Wrong runtype option (use G, T, or S)\n")
         raise SystemExit(2)
 
+    if args.reference_id_mode:
+        args.reference_id_mode = str(args.reference_id_mode).strip().lower()
+
     if args.steps not in ("both", "cfind", "class"):
         print("ERROR: Invalid value for -steps. Use: both, cfind, class\n")
         raise SystemExit(2)
+
+    if args.class_cluster_file and args.steps != "class":
+        print(
+            "[WARN] -class_cluster_file/-class_cluster_files is only used with "
+            "-steps class; supplied cluster files will be ignored for this run."
+        )
+
+
+def _reference_id_mode_from_args(args: argparse.Namespace) -> str:
+    if args.reference_id_mode:
+        return args.reference_id_mode
+    return "numeric" if args.runtype == "G" else "preserve"
 
 
 def _cleanup_requested(args: argparse.Namespace) -> bool:
@@ -243,6 +285,7 @@ def configure_runtime(args: argparse.Namespace) -> None:
     rt.norm_factor = args.norm_factor
     rt.maxhits = args.maxhits
     rt.runtype = args.runtype
+    rt.reference_id_mode = _reference_id_mode_from_args(args)
     rt.mindepth = args.mindepth
     rt.uniqueRatioCut = args.uniqueRatioCut
     rt.max_complexity = args.max_complexity
@@ -256,6 +299,7 @@ def configure_runtime(args: argparse.Namespace) -> None:
     rt.sliding = sliding
     rt.cores = args.cores
     rt.classifier = args.classifier
+    rt.classifier_aliases = args.classifier_aliases
     rt.steps = args.steps
     rt.class_cluster_file = args.class_cluster_file
     rt.min_Howell_score = args.min_Howell_score

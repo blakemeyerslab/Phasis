@@ -18,6 +18,7 @@ outdir = None
 memFile = default_memfile_path()
 ncores = None
 runtype = None
+reference_id_mode = None
 mindepth = None
 clustbuffer = None
 maxhits = None
@@ -30,12 +31,16 @@ def sync_from_runtime() -> None:
     Keep minimal and spawn-safe.
     """
     global reference, outdir, memFile, ncores
-    global runtype, mindepth, clustbuffer, maxhits, mismat
+    global runtype, reference_id_mode, mindepth, clustbuffer, maxhits, mismat
 
     reference = rt.reference
     outdir = rt.outdir
     ncores = rt.cores
     runtype = rt.runtype
+    reference_id_mode = getattr(rt, "reference_id_mode", None)
+    if not reference_id_mode:
+        reference_id_mode = "numeric" if str(runtype).upper() == "G" else "preserve"
+        rt.reference_id_mode = reference_id_mode
     mindepth = rt.mindepth
     clustbuffer = rt.clustbuffer
     maxhits = rt.maxhits
@@ -109,12 +114,12 @@ def _archive_file_to_gz(path):
 def refClean(filename):
     """
     Cleans FASTA file - multi-line fasta to single line, header clean, empty lines removal.
-    For runtype == 'G', forces numeric headers:
+    In reference_id_mode == 'numeric', forces numeric headers:
       - Chr10/chr01/10 -> 10/1/10
       - non-numeric contigs (Mt, Cp, UNMAPPED, scaffolds, etc.) -> max_numeric+1, +2, ...
     Writes a mapping file: <basename>.chrom_id_map.tsv  (old_id, clean_id)
     """
-    global runtype
+    global reference_id_mode
 
     sync_from_runtime()
 
@@ -140,7 +145,7 @@ def refClean(filename):
             orig = line[1:].split()[0].strip()
             orig_order.append(orig)
 
-            if runtype == "G":
+            if reference_id_mode == "numeric":
                 match = chr_re.match(orig)
                 if match:
                     val = int(match.group(1))
@@ -158,7 +163,7 @@ def refClean(filename):
     mapping = {}
     used = set()
 
-    if runtype == "G":
+    if reference_id_mode == "numeric":
         for orig in orig_order:
             val = numeric_candidate.get(orig, None)
             if isinstance(val, int):
@@ -238,7 +243,7 @@ def indexBuilder(reference, ncores):
     """
     Generic index building module.
     """
-    global memFile, mindepth, clustbuffer, maxhits, mismat
+    global memFile, mindepth, clustbuffer, maxhits, mismat, reference_id_mode
 
     sync_from_runtime()
 
@@ -286,6 +291,7 @@ def indexBuilder(reference, ncores):
         clustbuffer=clustbuffer,
         maxhits=maxhits,
         mismat=mismat,
+        reference_id_mode=reference_id_mode,
     )
     _archive_file_to_gz(fastaclean)
     print("Index prepared:%s\n" % (genoIndex))
@@ -296,7 +302,7 @@ def getindex(fh_run):
     """
     Stage version of legacy.getindex(fh_run), preserving behavior/prints.
     """
-    global reference, memFile, ncores
+    global reference, memFile, ncores, reference_id_mode
 
     sync_from_runtime()
 
@@ -323,17 +329,29 @@ def getindex(fh_run):
                 indexflag = False
                 print("Existing index path missing from memory file - It will be recreated")
             else:
-                indexIntegrity, indexExt = index_integrity.indexIntegrityCheck(index)
-                _ = indexExt
-
-                if indexIntegrity:
-                    print("Index status                     : Re-use")
-                    genoIndex = index
-                    indexflag = True
-                    fh_run.write("Indexing Time: 0s\n")
-                else:
+                cfg = cache.MemCache.load(memFile).cfg
+                previous_ref_mode = ""
+                if cfg.has_section("ADVANCED"):
+                    previous_ref_mode = (cfg["ADVANCED"].get("reference_id_mode") or "").strip()
+                if previous_ref_mode and previous_ref_mode != str(reference_id_mode):
                     print("Index status                     : Re-make")
                     indexflag = False
+                    print(
+                        "Existing index was built with reference_id_mode=%s; "
+                        "current mode is %s." % (previous_ref_mode, reference_id_mode)
+                    )
+                else:
+                    indexIntegrity, indexExt = index_integrity.indexIntegrityCheck(index)
+                    _ = indexExt
+
+                    if indexIntegrity:
+                        print("Index status                     : Re-use")
+                        genoIndex = index
+                        indexflag = True
+                        fh_run.write("Indexing Time: 0s\n")
+                    else:
+                        print("Index status                     : Re-make")
+                        indexflag = False
 
     if indexflag is False:
         tstart = time.time()

@@ -13,7 +13,6 @@ PY_DEPS: List[str] = [
     "sklearn",      # scikit-learn
     "matplotlib",
     "seaborn",
-    "joblib",
     "tqdm",
 ]
 
@@ -60,4 +59,3 @@ def require_dependencies() -> None:
 
     print("Fix the missing items and re-run. Exiting.\n")
     raise SystemExit(2)
-

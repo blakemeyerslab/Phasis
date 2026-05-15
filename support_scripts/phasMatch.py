@@ -314,7 +314,7 @@ def write_summary_txt(summary_path, phasis_path, reference_path, flank, metrics,
 
 def build_argparser():
     ap = argparse.ArgumentParser(
-        description="Match Phasis {phas}_{model}_cals.tsv to reference (BED or GFF/GTF). Reports both ID-centric and Reference-centric metrics.",
+        description="Match Phasis calls.tsv to reference (BED or GFF/GTF). Reports both ID-centric and Reference-centric metrics.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     ap.add_argument("phasis_cals", help="Phasis cals.tsv (needs: identifier, achr, start, end, alib).")
