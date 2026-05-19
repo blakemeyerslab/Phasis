@@ -134,6 +134,7 @@ SECONDARY_CATEGORY_COLOR_SERIES = {
 }
 ORIGIN_CLASS_LABELS = {
     "insufficient_exact_support": "Insufficient exact support",
+    "weak_exact_support": "Weak exact support",
     "unique_origin": "Unique origin",
     "coherent_extension": "Coherent extension",
     "ambiguous_origin": "Ambiguous origin",

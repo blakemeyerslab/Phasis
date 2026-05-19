@@ -33,10 +33,12 @@ PHAS_LIKE = "PHAS-like"
 EVIDENCE_REASON_PASS = "pass"
 EVIDENCE_REASON_CLASSIFIER_NON_PHAS = "classifier_non_phas"
 EVIDENCE_REASON_INSUFFICIENT_EXACT_SUPPORT = "insufficient_exact_support"
+EVIDENCE_REASON_WEAK_EXACT_SUPPORT = "weak_exact_support"
 EVIDENCE_REASON_LOW_SCORE_CROWDED = "low_score_crowded_window_context"
 EVIDENCE_REASON_WEAK_SCAFFOLD_CONTEXT = "weak_scaffold_alternative_context"
 EVIDENCE_REASON_LEGACY = "legacy_classification"
 EVIDENCE_REASON_MANUAL_OVERRIDE = "manual_override"
+PHAS_LIKE_MIN_EXACT_SUPPORT_SCORE = 5.0
 PHAS_LIKE_MIN_RELAXED_SCORE = 12.5
 PHAS_LIKE_MAX_RELAXED_SCORE = 20.0
 PHAS_LIKE_MIN_CROWDING_WINDOWS = 5
@@ -169,8 +171,10 @@ def _automatic_evidence_classification(row) -> tuple[str, str]:
 
     exact_support = _safe_float(row.get("Howell_exact_support_score"))
     origin_class = str(row.get("Howell_origin_class", "") or "").strip()
-    if (not np.isnan(exact_support) and exact_support <= 0.0) or origin_class == EVIDENCE_REASON_INSUFFICIENT_EXACT_SUPPORT:
+    if np.isnan(exact_support) or exact_support <= 0.0 or origin_class == EVIDENCE_REASON_INSUFFICIENT_EXACT_SUPPORT:
         return NON_PHAS, EVIDENCE_REASON_INSUFFICIENT_EXACT_SUPPORT
+    if exact_support < PHAS_LIKE_MIN_EXACT_SUPPORT_SCORE:
+        return PHAS_LIKE, EVIDENCE_REASON_WEAK_EXACT_SUPPORT
 
     relaxed_peak_score = _safe_float(row.get("Peak_Howell_score"))
     crowding_window_count = _safe_int(row.get("Howell_crowding_window_count"), default=0)

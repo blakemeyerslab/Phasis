@@ -132,6 +132,58 @@ class EvidenceClassificationTests(unittest.TestCase):
         self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
         self.assertEqual(str(out.loc[0, "evidence_reason"]), "insufficient_exact_support")
 
+    def test_missing_exact_support_demotes_to_non_phas(self):
+        features = pd.DataFrame([_base_feature_row(Howell_exact_support_score=np.nan)])
+        out = classify.apply_evidence_classification(features, phase=24)
+
+        self.assertEqual(str(out.loc[0, "final_class"]), "non-PHAS")
+        self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "insufficient_exact_support")
+
+    def test_low_positive_exact_support_becomes_phas_like(self):
+        features = pd.DataFrame(
+            [
+                _base_feature_row(Howell_exact_support_score=0.16),
+                _base_feature_row(Howell_exact_support_score=4.99),
+            ]
+        )
+        out = classify.apply_evidence_classification(features, phase=24)
+
+        self.assertEqual(out["final_class"].tolist(), ["PHAS-like", "PHAS-like"])
+        self.assertEqual(out["report_label"].tolist(), ["non-PHAS", "non-PHAS"])
+        self.assertEqual(out["evidence_reason"].tolist(), ["weak_exact_support", "weak_exact_support"])
+
+    def test_exact_support_threshold_boundary_stays_phas_eligible(self):
+        features = pd.DataFrame(
+            [
+                _base_feature_row(Howell_exact_support_score=5.0),
+                _base_feature_row(Howell_exact_support_score=18.0),
+            ]
+        )
+        out = classify.apply_evidence_classification(features, phase=24)
+
+        self.assertEqual(out["final_class"].tolist(), ["PHAS", "PHAS"])
+        self.assertEqual(out["report_label"].tolist(), ["PHAS", "PHAS"])
+        self.assertEqual(out["evidence_reason"].tolist(), ["pass", "pass"])
+
+    def test_coffee_like_low_exact_support_becomes_phas_like(self):
+        features = pd.DataFrame(
+            [
+                _base_feature_row(
+                    Peak_Howell_score=14.8000847587,
+                    Howell_exact_support_score=0.159482006,
+                    Howell_origin_class="coherent_extension",
+                    Howell_extension_window_count=104,
+                    Howell_extension_span_nt=314,
+                )
+            ]
+        )
+        out = classify.apply_evidence_classification(features, phase=21)
+
+        self.assertEqual(str(out.loc[0, "final_class"]), "PHAS-like")
+        self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "weak_exact_support")
+
     def test_low_score_crowded_window_context_becomes_phas_like(self):
         features = pd.DataFrame(
             [
@@ -166,7 +218,7 @@ class EvidenceClassificationTests(unittest.TestCase):
         self.assertEqual(str(out.loc[0, "report_label"]), "PHAS")
         self.assertEqual(str(out.loc[0, "evidence_reason"]), "pass")
 
-    def test_moderate_score_weak_scaffold_context_becomes_phas_like(self):
+    def test_weak_exact_support_precedes_weak_scaffold_context(self):
         features = pd.DataFrame(
             [
                 _base_feature_row(
@@ -184,7 +236,7 @@ class EvidenceClassificationTests(unittest.TestCase):
 
         self.assertEqual(str(out.loc[0, "final_class"]), "PHAS-like")
         self.assertEqual(str(out.loc[0, "report_label"]), "non-PHAS")
-        self.assertEqual(str(out.loc[0, "evidence_reason"]), "weak_scaffold_alternative_context")
+        self.assertEqual(str(out.loc[0, "evidence_reason"]), "weak_exact_support")
 
     def test_ambiguous_origin_remains_phas_in_v1(self):
         features = pd.DataFrame(

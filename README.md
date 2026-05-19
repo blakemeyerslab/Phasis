@@ -163,7 +163,7 @@ Phasis 2.8 uses one active classifier path, so canonical output names no longer 
 
 3. **Classification evidence table**  
    Filename: **`{phase}_classification_evidence.tsv`**  
-   This TSV records the evidence interpretation applied after the initial classifier label. It includes `initial_classifier_label`, `report_label`, `final_class`, and `evidence_reason`, together with register-level support metrics used by the Register-Resolved Locus Interpretation Layer. `final_class` can be `PHAS`, `PHAS-like`, or `non-PHAS`; `report_label` remains binary for the main output tables, so `PHAS-like` loci are preserved as an intermediate evidence class without being merged into the high-confidence *PHAS* calls.
+   This TSV records the evidence interpretation applied after the initial classifier label. It includes `initial_classifier_label`, `report_label`, `final_class`, and `evidence_reason`, together with register-level support metrics used by the Register-Resolved Locus Interpretation Layer. `final_class` can be `PHAS`, `PHAS-like`, or `non-PHAS`; `report_label` remains binary for the main output tables, so `PHAS-like` loci are preserved as an intermediate evidence class without being merged into the high-confidence *PHAS* calls. Relaxed Howell support can nominate a candidate phased structure, but high-confidence *PHAS* calls require exact-only support of at least 5.0; loci with positive but lower exact-only support are retained as *PHAS*-like.
 
 4. **Genome annotation file for detected *PHAS* loci**  
    Filename: **`{phase}_PHAS.gff`**  
@@ -206,6 +206,7 @@ Phasis 2.8 uses one active classifier path, so canonical output names no longer 
    The right sidebar is a compact interpretation guide:
    - `Exact-only support` is the stricter support score for reads exactly on the phased register.
    - `Relaxed peak` is the best relaxed score, allowing the broader context used to find candidate phased structure.
+   - candidates with positive exact-only support below 5.0 are reported as *PHAS*-like rather than high-confidence *PHAS*, even when the relaxed peak is visible.
    - `Main opposite-strand partner` reports whether a canonical opposite-strand partner was accepted for the main unit.
    - `Coherent extension` reports how many scored windows extend the same main register and the span covered by that extension.
    - `Secondary phased windows` and `Overlapping alternative windows` report promoted additional phased units. `Paired` means both strands were promoted for that unit; `Unpaired` means only one promoted strand was retained.
