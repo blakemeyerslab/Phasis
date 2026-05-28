@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from multiprocessing import cpu_count
 from typing import Any
 
@@ -46,8 +47,59 @@ def _join_outdir(dirpath: str | None, name: str) -> str:
     return dirpath + name if dirpath.endswith("/") else dirpath + "/" + name
 
 
+def _classifier_output_aliases(method_name: str | None = None) -> list[str]:
+    aliases = []
+    runtime_aliases = getattr(rt, "classifier_aliases", None) or []
+    for alias in runtime_aliases:
+        text = str(alias or "").strip().upper()
+        if text and text not in aliases:
+            aliases.append(text)
+    text = str(method_name or "").strip().upper()
+    if text and text not in aliases:
+        aliases.append(text)
+    return aliases
+
+
+def _copy_file_alias(primary_path: str, alias_path: str) -> None:
+    if not primary_path or not alias_path or os.path.abspath(primary_path) == os.path.abspath(alias_path):
+        return
+    if not os.path.exists(primary_path):
+        return
+    parent = os.path.dirname(alias_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.path.lexists(alias_path):
+        if os.path.isdir(alias_path) and not os.path.islink(alias_path):
+            shutil.rmtree(alias_path)
+        else:
+            os.unlink(alias_path)
+    shutil.copy2(primary_path, alias_path)
+
+
+def _copy_file_aliases(primary_path: str, alias_paths: list[str]) -> None:
+    for alias_path in alias_paths:
+        _copy_file_alias(primary_path, alias_path)
+
+
+def _savefig_with_aliases(fig, primary_path: str, alias_paths: list[str], **kwargs) -> None:
+    fig.savefig(primary_path, **kwargs)
+    _copy_file_aliases(primary_path, alias_paths)
+
+
 def _fallback_series(nrows: int) -> pd.Series:
     return pd.Series([np.nan] * int(nrows))
+
+
+def _fallback_text_series(nrows: int, value: str = "") -> pd.Series:
+    return pd.Series([value] * int(nrows), dtype="object")
+
+
+def _format_phas_plot_text(text_value: str) -> str:
+    text_local = str(text_value or "")
+    text_local = text_local.replace("non-PHAS", "__NON_PHAS__")
+    text_local = text_local.replace("PHAS", r"$\it{PHAS}$")
+    text_local = text_local.replace("__NON_PHAS__", r"non-$\it{PHAS}$")
+    return text_local
 
 
 def _set_colorbar_ticks_and_labels(cbar, ticks, labels) -> None:
@@ -140,6 +192,7 @@ def _format_runtime_parameter_lines() -> list[str]:
             f"phase={getattr(rt, 'phase', 'NA')}, "
             f"classifier={getattr(rt, 'classifier', 'NA')}, "
             f"concat_libs={getattr(rt, 'concat_libs', 'NA')}, "
+            f"reference_id_mode={getattr(rt, 'reference_id_mode', 'NA')}, "
             f"outdir={getattr(rt, 'outdir', 'NA')}"
         ),
         (
@@ -275,11 +328,11 @@ def _filter_plot_df(phasis_result_df):
     return df
 
 
-def _empty_plot_placeholder(outfile, message):
+def _empty_plot_placeholder(outfile, message, alias_paths: list[str] | None = None):
     f, ax = plt.subplots(figsize=(6, 2))
     ax.axis("off")
-    ax.text(0.01, 0.5, message, fontsize=12)
-    f.savefig(outfile, dpi=300)
+    ax.text(0.01, 0.5, _format_phas_plot_text(message), fontsize=12)
+    _savefig_with_aliases(f, outfile, alias_paths or [], dpi=300)
     plt.close(f)
     return None
 
@@ -461,11 +514,15 @@ def plot_howell_score_heat_maps(phasis_result_df, plot_type):
 
     global outdir, phase
 
-    outfile = _join_outdir(outdir, f"{plot_type}_{phase}_Howell_scores.pdf")
+    outfile = _join_outdir(outdir, f"{phase}_Howell_scores.pdf")
+    alias_paths = [
+        _join_outdir(outdir, f"{alias}_{phase}_Howell_scores.pdf")
+        for alias in _classifier_output_aliases(plot_type)
+    ]
     df = _filter_plot_df(phasis_result_df)
 
     if df.empty:
-        return _empty_plot_placeholder(outfile, f"No {phase}-PHAS loci detected.")
+        return _empty_plot_placeholder(outfile, f"No {phase}-PHAS loci detected.", alias_paths)
 
     data_howell, phas_mask, chrom_data, unique_chromosomes = _build_score_heatmap_data(df, "Peak_Howell_score")
     data_howell_strict, phas_mask_strict, _, _ = _build_score_heatmap_data(df, "Peak_Howell_score_strict")
@@ -500,7 +557,7 @@ def plot_howell_score_heat_maps(phasis_result_df, plot_type):
 
     _add_score_colorbar(fig, axes[0], purple_cmap, norm_howell, max_howell, "Peak Howell score", side="left")
     _add_score_colorbar(fig, axes[1], teal_cmap, norm_howell_strict, max_howell_strict, "Peak Howell score (strict)", side="left")
-    fig.savefig(outfile, dpi=300)
+    _savefig_with_aliases(fig, outfile, alias_paths, dpi=300)
     plt.close(fig)
     return None
 
@@ -522,8 +579,13 @@ def plot_report_heat_map(phasis_result_df, plot_type):
             # Nothing to plot; write a small placeholder PDF to avoid errors
             f, ax = plt.subplots(figsize=(6, 2))
             ax.axis("off")
-            ax.text(0.01, 0.5, "No 24-PHAS loci detected.", fontsize=12)
-            f.savefig(_join_outdir(outdir, f"{phase}_{plot_type}_PHAS.pdf"), dpi=300)
+            ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
+            primary_path = _join_outdir(outdir, f"{phase}_PHAS.pdf")
+            alias_paths = [
+                _join_outdir(outdir, f"{phase}_{alias}_PHAS.pdf")
+                for alias in _classifier_output_aliases(plot_type)
+            ]
+            _savefig_with_aliases(f, primary_path, alias_paths, dpi=300)
             plt.close(f)
             return
 
@@ -635,7 +697,12 @@ def plot_report_heat_map(phasis_result_df, plot_type):
     plt.subplots_adjust(left=0.2, right=0.9, top=0.9, bottom=0.1)
 
     fig = heat.get_figure()
-    fig.savefig(_join_outdir(outdir, f"{phase}_{plot_type}_PHAS.pdf"), dpi=300)
+    primary_path = _join_outdir(outdir, f"{phase}_PHAS.pdf")
+    alias_paths = [
+        _join_outdir(outdir, f"{phase}_{alias}_PHAS.pdf")
+        for alias in _classifier_output_aliases(plot_type)
+    ]
+    _savefig_with_aliases(fig, primary_path, alias_paths, dpi=300)
     plt.close(fig)
     return
 
@@ -656,8 +723,13 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
         if df.empty:
             f, ax = plt.subplots(figsize=(6, 2))
             ax.axis("off")
-            ax.text(0.01, 0.5, "No 24-PHAS loci detected.", fontsize=12)
-            f.savefig(_join_outdir(outdir, f"{plot_type}_{phase}_Abundance_PHAS.pdf"), dpi=300)
+            ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
+            primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS.pdf")
+            alias_paths = [
+                _join_outdir(outdir, f"{alias}_{phase}_Abundance_PHAS.pdf")
+                for alias in _classifier_output_aliases(plot_type)
+            ]
+            _savefig_with_aliases(f, primary_path, alias_paths, dpi=300)
             plt.close(f)
             return None
 
@@ -749,7 +821,12 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
     plt.subplots_adjust(left=0.2, right=0.9, top=0.9, bottom=0.1)
 
     fig = heat.get_figure()
-    fig.savefig(_join_outdir(outdir, f"{plot_type}_{phase}_Abundance_PHAS.pdf"), dpi=300)
+    primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS.pdf")
+    alias_paths = [
+        _join_outdir(outdir, f"{alias}_{phase}_Abundance_PHAS.pdf")
+        for alias in _classifier_output_aliases(plot_type)
+    ]
+    _savefig_with_aliases(fig, primary_path, alias_paths, dpi=300)
     plt.close(fig)
     return None
 
@@ -770,8 +847,13 @@ def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
         if df.empty:
             f, ax = plt.subplots(figsize=(6, 2))
             ax.axis("off")
-            ax.text(0.01, 0.5, "No 24-PHAS loci detected.", fontsize=12)
-            f.savefig(_join_outdir(outdir, f"{plot_type}_{phase}_Abundance_PHAS_and_nonPHAS.pdf"), dpi=300)
+            ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
+            primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS_and_nonPHAS.pdf")
+            alias_paths = [
+                _join_outdir(outdir, f"{alias}_{phase}_Abundance_PHAS_and_nonPHAS.pdf")
+                for alias in _classifier_output_aliases(plot_type)
+            ]
+            _savefig_with_aliases(f, primary_path, alias_paths, dpi=300)
             plt.close(f)
             return None
 
@@ -872,7 +954,12 @@ def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
     plt.subplots_adjust(left=0.2, right=0.9, top=0.9, bottom=0.1)
 
     fig = ax.get_figure()
-    fig.savefig(_join_outdir(outdir, f"{plot_type}_{phase}_Abundance_PHAS_and_nonPHAS.pdf"), dpi=300)
+    primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS_and_nonPHAS.pdf")
+    alias_paths = [
+        _join_outdir(outdir, f"{alias}_{phase}_Abundance_PHAS_and_nonPHAS.pdf")
+        for alias in _classifier_output_aliases(plot_type)
+    ]
+    _savefig_with_aliases(fig, primary_path, alias_paths, dpi=300)
     plt.close(fig)
     return None
 
@@ -975,6 +1062,26 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         'c_window_start': features.get('c_window_start', _fallback_series(nrows)),
         'c_window_end': features.get('c_window_end', _fallback_series(nrows)),
         'Peak_Howell_score': features.get('Peak_Howell_score', _fallback_series(nrows)),
+        'Howell_exact_support_score': features.get('Howell_exact_support_score', _fallback_series(nrows)),
+        'Howell_ambiguity_count': features.get('Howell_ambiguity_count', _fallback_series(nrows)),
+        'Howell_alt_register_count': features.get('Howell_alt_register_count', _fallback_series(nrows)),
+        'Howell_overlap_margin': features.get('Howell_overlap_margin', _fallback_series(nrows)),
+        'Howell_extension_window_count': features.get('Howell_extension_window_count', _fallback_series(nrows)),
+        'Howell_extension_span_nt': features.get('Howell_extension_span_nt', _fallback_series(nrows)),
+        'Howell_origin_window_count': features.get('Howell_origin_window_count', _fallback_series(nrows)),
+        'Howell_origin_frame_count': features.get('Howell_origin_frame_count', _fallback_series(nrows)),
+        'Howell_origin_margin': features.get('Howell_origin_margin', _fallback_series(nrows)),
+        'Howell_origin_class': features.get('Howell_origin_class', pd.Series([np.nan] * int(nrows))),
+        'Howell_additional_peak_count': features.get('Howell_additional_peak_count', _fallback_series(nrows)),
+        'Howell_additional_peak_best_score': features.get('Howell_additional_peak_best_score', _fallback_series(nrows)),
+        'Howell_overlapping_alt_count': features.get('Howell_overlapping_alt_count', _fallback_series(nrows)),
+        'Howell_overlapping_alt_best_score': features.get('Howell_overlapping_alt_best_score', _fallback_series(nrows)),
+        'Howell_overlapping_alt_best_shift_nt': features.get('Howell_overlapping_alt_best_shift_nt', _fallback_series(nrows)),
+        'Howell_crowding_window_count': features.get('Howell_crowding_window_count', _fallback_series(nrows)),
+        'Howell_crowding_best_score': features.get('Howell_crowding_best_score', _fallback_series(nrows)),
+        'Howell_crowding_score_gap': features.get('Howell_crowding_score_gap', _fallback_series(nrows)),
+        'Howell_exact_relaxed_ratio': features.get('Howell_exact_relaxed_ratio', _fallback_series(nrows)),
+        'Howell_strict_relaxed_ratio': features.get('Howell_strict_relaxed_ratio', _fallback_series(nrows)),
         # strict (classic) Howell
         'w_Howell_score_strict': features.get('w_Howell_score_strict', _fallback_series(nrows)),
         'w_window_start_strict': features.get('w_window_start_strict', _fallback_series(nrows)),
@@ -986,15 +1093,61 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
     })
 
     # Standardized filenames
-    all_out   = _join_outdir(outdir, f"{phase}_{method_name}_all_clusters.tsv")
-    calls_out = _join_outdir(outdir, f"{phase}_{method_name}_calls.tsv")
+    all_out   = _join_outdir(outdir, f"{phase}_all_clusters.tsv")
+    calls_out = _join_outdir(outdir, f"{phase}_calls.tsv")
     gff_out   = _join_outdir(outdir, f"{phase}_PHAS.gff")
+    evidence_out = _join_outdir(outdir, f"{phase}_classification_evidence.tsv")
+    classifier_aliases = _classifier_output_aliases(method_name)
+    all_alias_paths = [
+        _join_outdir(outdir, f"{phase}_{alias}_all_clusters.tsv")
+        for alias in classifier_aliases
+    ]
+    calls_alias_paths = [
+        _join_outdir(outdir, f"{phase}_{alias}_calls.tsv")
+        for alias in classifier_aliases
+    ]
+    evidence_alias_paths = [
+        _join_outdir(outdir, f"{phase}_{alias}_classification_evidence.tsv")
+        for alias in classifier_aliases
+    ]
  
     # Write all clusters with labels
     all_df.to_csv(all_out, sep="\t", index=False)
+    _copy_file_aliases(all_out, all_alias_paths)
 
-    # Keep only PHAS
-    phas_df = all_df[all_df['label'] == 'PHAS'].copy()
+    evidence_df = pd.DataFrame({
+        "identifier": features["identifier"],
+        "alib": alib_ids,
+        "cID": features.get("cID", _fallback_text_series(nrows)),
+        "initial_classifier_label": features.get("initial_classifier_label", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
+        "report_label": features.get("report_label", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
+        "final_class": features.get("final_class", features.get("label", _fallback_text_series(nrows, "non-PHAS"))),
+        "evidence_reason": features.get("evidence_reason", _fallback_text_series(nrows, "")),
+        "Peak_Howell_score": features.get("Peak_Howell_score", _fallback_series(nrows)),
+        "Howell_exact_support_score": features.get("Howell_exact_support_score", _fallback_series(nrows)),
+        "Howell_origin_class": features.get("Howell_origin_class", _fallback_text_series(nrows)),
+        "Howell_origin_window_count": features.get("Howell_origin_window_count", _fallback_series(nrows)),
+        "Howell_origin_frame_count": features.get("Howell_origin_frame_count", _fallback_series(nrows)),
+        "Howell_alt_register_count": features.get("Howell_alt_register_count", _fallback_series(nrows)),
+        "Howell_additional_peak_count": features.get("Howell_additional_peak_count", _fallback_series(nrows)),
+        "Howell_additional_peak_best_score": features.get("Howell_additional_peak_best_score", _fallback_series(nrows)),
+        "Howell_overlapping_alt_count": features.get("Howell_overlapping_alt_count", _fallback_series(nrows)),
+        "Howell_overlapping_alt_best_score": features.get("Howell_overlapping_alt_best_score", _fallback_series(nrows)),
+        "Howell_overlapping_alt_best_shift_nt": features.get("Howell_overlapping_alt_best_shift_nt", _fallback_series(nrows)),
+        "Howell_crowding_window_count": features.get("Howell_crowding_window_count", _fallback_series(nrows)),
+        "Howell_crowding_best_score": features.get("Howell_crowding_best_score", _fallback_series(nrows)),
+        "Howell_crowding_score_gap": features.get("Howell_crowding_score_gap", _fallback_series(nrows)),
+        "Howell_exact_relaxed_ratio": features.get("Howell_exact_relaxed_ratio", _fallback_series(nrows)),
+        "Howell_strict_relaxed_ratio": features.get("Howell_strict_relaxed_ratio", _fallback_series(nrows)),
+        "secondary_peak_ratio": features.get("secondary_peak_ratio", _fallback_series(nrows)),
+        "override_note": features.get("override_note", _fallback_text_series(nrows)),
+    })
+    evidence_df.to_csv(evidence_out, sep="\t", index=False)
+    _copy_file_aliases(evidence_out, evidence_alias_paths)
+
+    final_class_series = features.get("final_class", features["label"]).astype(str)
+    phas_mask = final_class_series == "PHAS"
+    phas_df = all_df.loc[phas_mask].copy()
 
     # Write GFF
     write_gff(phas_df,gff_out)
@@ -1002,7 +1155,16 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
     # ---- Compact calls table (same as before + Peak_Howell_score_strict) ----
     calls_cols = [
         'identifier', 'phasis_score', 'achr', 'start', 'end', 'alib',
-        'Peak_Howell_score', 'Peak_Howell_score_strict'
+        'Peak_Howell_score', 'Peak_Howell_score_strict',
+        'Howell_exact_support_score',
+        'Howell_ambiguity_count', 'Howell_alt_register_count', 'Howell_overlap_margin',
+        'Howell_extension_window_count', 'Howell_extension_span_nt',
+        'Howell_origin_window_count', 'Howell_origin_frame_count',
+        'Howell_origin_margin', 'Howell_origin_class',
+        'Howell_additional_peak_count', 'Howell_additional_peak_best_score',
+        'Howell_overlapping_alt_count', 'Howell_overlapping_alt_best_score',
+        'Howell_overlapping_alt_best_shift_nt',
+        'Howell_exact_relaxed_ratio', 'Howell_strict_relaxed_ratio',
     ]
     # Ensure missing columns are created as NaN so write doesn't fail
     for col in calls_cols:
@@ -1010,6 +1172,7 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
             phas_df[col] = np.nan
     compact_calls = phas_df[calls_cols].copy()
     compact_calls.to_csv(calls_out, sep="\t", index=False)
+    _copy_file_aliases(calls_out, calls_alias_paths)
 
     # --- Run the 4 plots in parallel (each on a core) ---
     plot_jobs = [
@@ -1029,5 +1192,5 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         raise
     _print_final_detection_summary(
         phas_df,
-        wrote_line=f"  - Wrote: {all_out}, {calls_out}, and {gff_out}",
+        wrote_line=f"  - Wrote: {all_out}, {calls_out}, {evidence_out}, and {gff_out}",
     )

@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
+from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 WINDOWS_COLUMNS: List[str] = [
@@ -122,7 +122,7 @@ def select_scoring_windows(
         minClusterLength if minClusterLength is not None else getattr(rt, "minClusterLength", 0) or 0
     )
     memFile_local = memFile if memFile is not None else getattr(rt, "memFile", None)
-    memFile_local = memFile_local or MEM_FILE_DEFAULT
+    memFile_local = memFile_local or default_memfile_path()
     cache = MemCache.load(memFile_local)
 
     if wl <= 0 or sl <= 0:

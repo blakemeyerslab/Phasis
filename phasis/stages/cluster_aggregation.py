@@ -20,7 +20,7 @@ from typing import List, Sequence, Tuple
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
+from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 
@@ -168,7 +168,7 @@ def aggregate_and_write_processed_clusters(
     paths = sorted(paths, key=os.path.basename)
 
     outfname = phase2_basename("processed_clusters.tab")
-    mem_path = memFile or getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
+    mem_path = memFile or getattr(rt, "memFile", None) or default_memfile_path()
 
     cache = MemCache.load(str(mem_path))
     input_sig = stage_signature(

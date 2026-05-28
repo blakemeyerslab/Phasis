@@ -13,7 +13,7 @@ Orchestrator for Phase II ("class") that sequences already-extracted stages:
 5) window_selection      -> {phase}_clusters_windows_to_score.tsv (resume-safe)
 6) window_scoring        -> {phase}_clusters_scored.tsv + score lookup
 7) feature_assembly      -> features table (stage-owned naming)
-8) classify              -> KNN/GMM calls + downstream outputs (stage-owned)
+8) classify              -> GMM calls + downstream outputs (stage-owned)
 
 Design constraints:
 - spawn-safe (top-level functions only)
@@ -42,6 +42,70 @@ from phasis.stages import feature_assembly as st_feat
 from phasis.stages import classify as st_classify
 from phasis.stages import locus_plots as st_locus_plots
 from phasis.stages import output as st_output
+from phasis.stages import library_processing as st_library_processing
+
+
+def _coerce_path_list(paths: Union[Sequence[str], str, None]) -> list[str]:
+    if paths is None:
+        return []
+    if isinstance(paths, (str, bytes, os.PathLike)):
+        value = os.fspath(paths)
+        return [value] if value else []
+    return [os.fspath(path) for path in paths if path]
+
+
+def _cluster_basename_for_library(lib_path: str) -> str:
+    logical_fas = st_library_processing._fas_output_for_input(lib_path)
+    return os.path.basename(str(logical_fas)).rsplit(".", 1)[0]
+
+
+def infer_class_cluster_files(cfg: Phase2Config) -> list[str]:
+    """
+    Resolve class-mode candidate cluster inputs.
+
+    Explicit -class_cluster_file(s) are passed through as manual inputs, including
+    intentional cross-phase files. When omitted, infer the same candidate file
+    names Phase I would have emitted from the current -libs and -phase.
+    """
+    explicit_files = _coerce_path_list(cfg.class_cluster_file)
+    if explicit_files:
+        missing = [path for path in explicit_files if not os.path.isfile(path)]
+        if missing:
+            expected = "\n  - ".join(missing)
+            raise FileNotFoundError(
+                "Explicit -class_cluster_file path(s) were not found:\n"
+                f"  - {expected}"
+            )
+        return explicit_files
+
+    libs = _coerce_path_list(cfg.libs)
+    if cfg.concat_libs:
+        expected_names = [f"ALL_LIBS.{cfg.phase}-PHAS.candidate.clusters"]
+    else:
+        expected_names = [
+            f"{_cluster_basename_for_library(lib)}.{cfg.phase}-PHAS.candidate.clusters"
+            for lib in libs
+        ]
+
+    run_dir = os.path.abspath(os.path.expanduser(str(getattr(rt, "run_dir", None) or os.getcwd())))
+    resolved = [os.path.join(run_dir, name) for name in expected_names]
+    missing = [path for path in resolved if not os.path.isfile(path)]
+    if missing:
+        expected = "\n  - ".join(resolved)
+        raise FileNotFoundError(
+            "No -class_cluster_file values were supplied, and Phasis could not "
+            "infer all class-mode candidate cluster files from -libs.\n"
+            "Expected:\n"
+            f"  - {expected}\n"
+            "Run -steps cfind first in the same run directory, or pass files "
+            "manually with -class_cluster_file."
+        )
+
+    print(
+        "[INFO] Inferred class-mode candidate cluster files: "
+        + ", ".join(resolved)
+    )
+    return resolved
 
 
 def _normalize_cluster_df(df: pd.DataFrame, is_concat: bool) -> pd.DataFrame:
@@ -87,9 +151,9 @@ def run_phase2_pipeline(
     if cfg is None:
         cfg = Phase2Config.from_runtime()
 
-    # If running 'class' only, take precomputed cluster files
+    # If running 'class' only, take explicit cluster files or infer them from -libs.
     if cfg.steps == "class":
-        clusterFilePaths = cfg.class_cluster_file
+        clusterFilePaths = infer_class_cluster_files(cfg)
 
     # 1) Aggregate (writes processed_clusters.tab; returns dataframe)
     agg_df = st_cluster_aggregation.aggregate_and_write_processed_clusters(
@@ -173,47 +237,32 @@ def run_phase2_pipeline(
         memFile=cfg.memFile,
     )
 
-    # 8) Classify (stage returns labeled DF), then finalize outputs (output stage)
-    if cfg.classifier == "GMM":
-        labeled = st_classify.gmm_classify(
-            features,
-            phasisScoreCutoff=float(cfg.phasisScoreCutoff),
-            min_Howell_score=float(cfg.min_Howell_score),
-            max_complexity=float(cfg.max_complexity),
-            n_clusters=int(getattr(cfg, "n_clusters", 2) or 2),
-        )
-        st_locus_plots.write_individual_phas_locus_plots(
-            "GMM",
-            labeled,
-            clusters_data,
-            job_outdir=cfg.outdir,
-            job_phase=cfg.phase,
-        )
-        st_output.finalize_and_write_results(
-            "GMM",
-            labeled,
-            job_outdir=cfg.outdir,
-            job_phase=cfg.phase,
-        )
-    elif cfg.classifier == "KNN":
-        labeled = st_classify.knn_classify(
-            features,
-            phasisScoreCutoff=float(cfg.phasisScoreCutoff),
-            min_Howell_score=float(cfg.min_Howell_score),
-            max_complexity=float(cfg.max_complexity),
-        )
-        st_locus_plots.write_individual_phas_locus_plots(
-            "KNN",
-            labeled,
-            clusters_data,
-            job_outdir=cfg.outdir,
-            job_phase=cfg.phase,
-        )
-        st_output.finalize_and_write_results(
-            "KNN",
-            labeled,
-            job_outdir=cfg.outdir,
-            job_phase=cfg.phase,
-        )
-    else:
-        raise ValueError(f"Unknown classifier: {cfg.classifier!r}")
+    # 8) Classify (stage returns labeled DF), then finalize outputs (output stage).
+    # Phasis 2.8 keeps -classifier as a deprecated CLI compatibility flag, but
+    # GMM is the only active classifier.
+    labeled = st_classify.gmm_classify(
+        features,
+        phasisScoreCutoff=float(cfg.phasisScoreCutoff),
+        min_Howell_score=float(cfg.min_Howell_score),
+        max_complexity=float(cfg.max_complexity),
+        n_clusters=int(getattr(cfg, "n_clusters", 2) or 2),
+    )
+    labeled = st_classify.apply_evidence_classification(
+        labeled,
+        phase=cfg.phase,
+        legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
+        overrides_path=getattr(cfg, "classification_overrides", None),
+    )
+    st_locus_plots.write_individual_phas_locus_plots(
+        "GMM",
+        labeled,
+        clusters_data,
+        job_outdir=cfg.outdir,
+        job_phase=cfg.phase,
+    )
+    st_output.finalize_and_write_results(
+        "GMM",
+        labeled,
+        job_outdir=cfg.outdir,
+        job_phase=cfg.phase,
+    )

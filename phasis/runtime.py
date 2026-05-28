@@ -21,6 +21,11 @@ cluster_scoring_max_worker_cap = None
 plot_staging = None
 plot_staging_mode = None
 plot_staging_root = None
+legacy_classification = None
+classification_overrides = None
+locus_plot_mode = None
+reference_id_mode = None
+classifier_aliases = None
 
 # (keep your existing globals below; I’m not repeating them all)
 
@@ -28,13 +33,14 @@ RUNTIME_SNAPSHOT_NAME = ".phasis.runtime.json"
 
 # Only persist lightweight config values (do NOT persist huge dicts like mergedClusterDict)
 _RUNTIME_KEYS = [
-    "libs","reference","norm","norm_factor","maxhits","runtype","mindepth","uniqueRatioCut","mismat",
+    "libs","reference","norm","norm_factor","maxhits","runtype","reference_id_mode","mindepth","uniqueRatioCut","mismat",
     "libformat","phase","phase2","phaseLen","clustbuffer","phasisScoreCutoff","minClusterLength","window_len","sliding",
-    "cores","classifier","steps","class_cluster_file","max_complexity","min_Howell_score","concat_libs",
+    "cores","classifier","classifier_aliases","steps","class_cluster_file","max_complexity","min_Howell_score","concat_libs",
     "outdir","run_dir","memFile","clusters_scored_tsv","cleanup","cleanup_all",
     "cluster_build_initial_worker_cap","cluster_build_max_worker_cap",
     "cluster_scoring_initial_worker_cap","cluster_scoring_max_worker_cap",
     "plot_staging","plot_staging_mode","plot_staging_root",
+    "legacy_classification","classification_overrides","locus_plot_mode",
 ]
 
 def _snapshot_path(run_dir_override: str | None = None) -> str:

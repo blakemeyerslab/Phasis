@@ -19,10 +19,10 @@ from scipy.stats import combine_pvalues, hypergeom, mannwhitneyu
 
 import phasis.runtime as rt
 from phasis.cache import (
-    MEM_FILE_DEFAULT,
     MemCache,
     assemble_candidate_from_chunks,
     compute_cache_signature_from_file_manifest,
+    default_memfile_path,
     getmd5,
     md5_file_worker,
     sanitize_mem_md5s,
@@ -309,6 +309,75 @@ def load_filtered_nestdict_source(job):
     return idx, subset, None
 
 
+def _nestdict_pickle_sources(sources):
+    """
+    Return ordered pickle paths when every nestdict source is path-like.
+
+    Dict objects are still supported by the legacy global-loader path.  The
+    batched path is intentionally limited to parser pickle files so it can load
+    and release one library at a time without changing the public parser format.
+    """
+    if sources is None:
+        return None
+    if isinstance(sources, str):
+        iterable = [sources]
+    else:
+        try:
+            iterable = list(sources)
+        except TypeError:
+            return None
+
+    ordered = []
+    seen = set()
+    for src in iterable:
+        if not isinstance(src, str):
+            return None
+        path = os.path.realpath(src)
+        if path not in seen:
+            ordered.append(path)
+            seen.add(path)
+    return ordered
+
+
+def _load_nestdict_source_direct(src):
+    try:
+        with open(src, "rb") as fh:
+            loaded = pickle.load(fh)
+    except Exception as e:
+        print(f"[WARN] Could not load dict file '{src}': {e}")
+        return None
+
+    if not isinstance(loaded, dict):
+        print(f"[WARN] Dict file '{src}' did not contain a dict; got {type(loaded)}")
+        return None
+
+    return loaded
+
+
+def _nestdict_source_label(src):
+    base = os.path.basename(str(src))
+    return base[:-5] if base.endswith(".dict") else _basename_no_ext(base)
+
+
+def _select_inputs_for_nestdict_source(inputs, loaded_nestdict, unresolved_keys):
+    """
+    Pick still-unresolved .lclust inputs present in the loaded library nestdict.
+
+    Parser and cluster keys should normally match exactly.  Canonical matching
+    is kept for compatibility with historical path-like keys.
+    """
+    selected = []
+    for akey, lclust_path in inputs:
+        akey_text = str(akey)
+        akey_can = canonicalize_akey(akey_text)
+        if akey_can not in unresolved_keys:
+            continue
+        if akey_text in loaded_nestdict or akey_can in loaded_nestdict:
+            selected.append((akey, lclust_path))
+            unresolved_keys.discard(akey_can)
+    return selected
+
+
 def inspect_cluster_scoring_signature_input(path):
     try:
         p = os.path.abspath(os.path.expanduser(str(path)))
@@ -418,11 +487,7 @@ def sync_from_runtime() -> None:
     if mem_override:
         memFile = mem_override
     else:
-        outdir = getattr(rt, "outdir", None)
-        if outdir:
-            memFile = os.path.join(outdir, MEM_FILE_DEFAULT)
-        else:
-            memFile = MEM_FILE_DEFAULT
+        memFile = default_memfile_path()
 
 
 def candidate_output_needs_rebuild(path: str) -> bool:
@@ -1039,42 +1104,65 @@ def scoringprocess(
     initial_worker_cap = _cluster_scoring_initial_worker_cap()
     max_worker_cap = _cluster_scoring_max_worker_cap()
 
-    # -------------------- Collect nest dict (needed keys only) ----------------
-    needed_nest_keys = _cluster_scoring_needed_nest_keys(libchrs_clust_toscore)
-    print(
-        f"[scan] Loading parser nestdict sources for {len(needed_nest_keys)} cluster key(s)...",
-        flush=True,
-    )
-    libchrs_nestdict = build_libchrs_nestdict(
-        libs_nestdict,
-        needed_keys=needed_nest_keys,
-        initial_worker_cap=initial_worker_cap,
-        max_worker_cap=max_worker_cap,
-    )
-    print(
-        f"[scan] Loaded nestdict entries for {len(libchrs_nestdict)} cluster key(s).",
-        flush=True,
-    )
-
-    # -------------------- Filter: existing .lclust + available nest -----------
-    filtered_inputs, missing_akeys, missing_files = [], [], []
+    # -------------------- Filter: existing .lclust files ----------------------
+    existing_inputs, missing_files = [], []
     for akey, lclust_path in libchrs_clust_toscore:
         if not os.path.isfile(lclust_path):
             missing_files.append(lclust_path)
             continue
-        if (akey in libchrs_nestdict) or (canonicalize_akey(akey) in libchrs_nestdict):
-            filtered_inputs.append((akey, lclust_path))
-        else:
-            missing_akeys.append(akey)
+        existing_inputs.append((akey, lclust_path))
 
     if missing_files:
         print(f"[WARN] Missing .lclust files for {len(missing_files)}; e.g.: {missing_files[:3]}")
-    if missing_akeys:
-        print(f"[WARN] Missing nestdict for {len(missing_akeys)} akeys; skipped. Example: {missing_akeys[:5]}")
 
-    if not filtered_inputs:
+    if not existing_inputs:
         print("[WARN] No valid inputs after filtering; returning empty list.")
         return []
+
+    # -------------------- Collect nest dict availability ----------------------
+    # Normal parserprocess output is a list of per-library .dict pickle paths.
+    # Use the memory-light batched path for that case and keep the old merged
+    # dict path for explicit dict objects or unusual callers.
+    batched_nest_sources = _nestdict_pickle_sources(libs_nestdict)
+    libchrs_nestdict = None
+
+    if batched_nest_sources is None:
+        needed_nest_keys = _cluster_scoring_needed_nest_keys(existing_inputs)
+        print(
+            f"[scan] Loading parser nestdict sources for {len(needed_nest_keys)} cluster key(s)...",
+            flush=True,
+        )
+        libchrs_nestdict = build_libchrs_nestdict(
+            libs_nestdict,
+            needed_keys=needed_nest_keys,
+            initial_worker_cap=initial_worker_cap,
+            max_worker_cap=max_worker_cap,
+        )
+        print(
+            f"[scan] Loaded nestdict entries for {len(libchrs_nestdict)} cluster key(s).",
+            flush=True,
+        )
+
+        filtered_inputs, missing_akeys = [], []
+        for akey, lclust_path in existing_inputs:
+            if (akey in libchrs_nestdict) or (canonicalize_akey(akey) in libchrs_nestdict):
+                filtered_inputs.append((akey, lclust_path))
+            else:
+                missing_akeys.append(akey)
+
+        if missing_akeys:
+            print(f"[WARN] Missing nestdict for {len(missing_akeys)} akeys; skipped. Example: {missing_akeys[:5]}")
+
+        if not filtered_inputs:
+            print("[WARN] No valid inputs after filtering; returning empty list.")
+            return []
+    else:
+        filtered_inputs = existing_inputs
+        print(
+            f"[scan] Using per-library batched parser loading for "
+            f"{len(batched_nest_sources)} source file(s) and {len(filtered_inputs)} cluster key(s).",
+            flush=True,
+        )
 
     # -------------------- Concat mode detection/target lib --------------------
     if concat_mode is None:
@@ -1179,7 +1267,7 @@ def scoringprocess(
     all_outputs_verified = bool(expected_outfiles) and all(
         verified_outputs.get(outf, False) for _, outf in expected_outfiles
     )
-    if all_outputs_verified and not changed_inputs_global and not force_rescore:
+    if all_outputs_verified and not changed_inputs_global and not force_rescore and not purge_existing:
         print(
             "[scan] Candidate outputs verified and all .lclust inputs are unchanged; "
             "batch scoring work will be skipped.",
@@ -1193,6 +1281,7 @@ def scoringprocess(
 
     global scoredClustFolder
     scoredClustFolder = scored_dir if scored_dir else base_scored
+    os.makedirs(scoredClustFolder, exist_ok=True)
 
     if purge_existing and os.path.isdir(scoredClustFolder):
         # Purge only .cluster files; keep the folder
@@ -1236,9 +1325,7 @@ def scoringprocess(
     if purge_existing or force_rescore:
         libs_marked_stale.update(alib for (alib, _) in expected_outfiles)
 
-    # -------------------- Process batches ------------------------------------
-    for b_idx, b_tot, batch in batches:
-        #print(f" Initial chunk_size set to {batch_size}")
+    def _process_scoring_batch(batch, nestdict_for_batch, label, progress_desc):
         # 1) Determine affected libs for this batch
         batch_libs = set()
         for akey, _ in batch:
@@ -1267,7 +1354,7 @@ def scoringprocess(
         changed_inputs = set()
         if batch_pairs:
             print(
-                f"[scan] Batch {b_idx}/{b_tot}: consulting precomputed .lclust manifest for {len(batch_pairs)} input(s)...",
+                f"[scan] {label}: consulting precomputed .lclust manifest for {len(batch_pairs)} input(s)...",
                 flush=True,
             )
             for akey, p_abs in batch_pairs:
@@ -1276,23 +1363,23 @@ def scoringprocess(
                     changed_inputs.add(akey)
 
         # If outputs are OK and there are no changed inputs, we can skip scoring
-        if batch_outputs_ok and not changed_inputs and not force_rescore:
+        if batch_outputs_ok and not changed_inputs and not force_rescore and not purge_existing:
             print(
-                f"[scan] Batch {b_idx}/{b_tot}: candidate outputs verified and inputs unchanged; skipping scoring.",
+                f"[scan] {label}: candidate outputs verified and inputs unchanged; skipping scoring.",
                 flush=True,
             )
-            continue
+            return
 
         # 4) Load lclust dicts for the batch
         to_process = [(akey, p_abs) for (akey, p_abs) in batch_pairs]
         print(
-            f"[scan] Batch {b_idx}/{b_tot}: loading {len(to_process)} .lclust file(s)...",
+            f"[scan] {label}: loading {len(to_process)} .lclust file(s)...",
             flush=True,
         )
         loaded = run_parallel_with_progress(
             load_lclust_for_scoring,
             to_process,
-            desc=f"Loading .lclust (batch {b_idx}/{b_tot}, {len(to_process)} akeys)",
+            desc=f"Loading .lclust ({progress_desc}, {len(to_process)} akeys)",
             min_chunk=1,
             unit="lib-chr",
             **load_parallel_kwargs,
@@ -1342,19 +1429,19 @@ def scoringprocess(
                     continue
 
             # Probe the nest dict using expected key, then canonical
-            if akey_exp in libchrs_nestdict:
+            if akey_exp in nestdict_for_batch:
                 nest_key = akey_exp
-            elif akey_can in libchrs_nestdict:
+            elif akey_can in nestdict_for_batch:
                 nest_key = akey_can
             else:
                 missing_nest += 1
                 continue
 
-            rawinputs.append((akey_can, ldict, libchrs_nestdict[nest_key], sens, asens, scoredClustFolder))
+            rawinputs.append((akey_can, ldict, nestdict_for_batch[nest_key], sens, asens, scoredClustFolder))
 
         if mismatches or missing_in_loader or missing_nest:
             print(
-                f"[INFO] Batch {b_idx}/{b_tot}: fixups={mismatches}, "
+                f"[INFO] {label}: fixups={mismatches}, "
                 f"path_fallbacks={missing_in_loader}, missing_nest={missing_nest}"
             )
             # Any of these conditions means touched libs should be re-assembled
@@ -1363,24 +1450,91 @@ def scoringprocess(
         # 6) Score clusters -> *.cluster chunks
         if rawinputs:
             print(
-                f"[scan] Batch {b_idx}/{b_tot}: scoring {len(rawinputs)} lib-chr cluster set(s)...",
+                f"[scan] {label}: scoring {len(rawinputs)} lib-chr cluster set(s)...",
                 flush=True,
             )
             run_parallel_with_progress(
                 clustassemble,
                 rawinputs,
-                desc=f"Scoring clusters (batch {b_idx}/{b_tot})",
+                desc=f"Scoring clusters ({progress_desc})",
                 min_chunk=1,
                 unit="lib-chr",
                 **score_parallel_kwargs,
             )
             libs_marked_stale.update(batch_libs)
         else:
-            print(f"[INFO] Batch {b_idx}/{b_tot}: nothing to score after loader/nest checks.")
+            print(f"[INFO] {label}: nothing to score after loader/nest checks.")
 
         # Free batch data
         del loaded, by_path, by_akey, rawinputs
         gc.collect()
+
+    # -------------------- Process batches ------------------------------------
+    skip_all_scoring = all_outputs_verified and not changed_inputs_global and not force_rescore and not purge_existing
+
+    if skip_all_scoring:
+        print("[scan] Skipping cluster scoring batches after cache/output preflight.", flush=True)
+    elif batched_nest_sources is None:
+        for b_idx, b_tot, batch in batches:
+            _process_scoring_batch(
+                batch,
+                libchrs_nestdict,
+                f"Batch {b_idx}/{b_tot}",
+                f"batch {b_idx}/{b_tot}",
+            )
+    else:
+        unresolved_keys = {canonicalize_akey(akey) for akey, _ in filtered_inputs}
+        scored_input_count = 0
+        for src_idx, src in enumerate(batched_nest_sources, 1):
+            label = _nestdict_source_label(src)
+            print(
+                f"[scan] Loading nestdict for library {label} "
+                f"({src_idx}/{len(batched_nest_sources)})...",
+                flush=True,
+            )
+            nestdict_for_source = _load_nestdict_source_direct(src)
+            if not isinstance(nestdict_for_source, dict):
+                continue
+
+            source_inputs = _select_inputs_for_nestdict_source(
+                filtered_inputs,
+                nestdict_for_source,
+                unresolved_keys,
+            )
+            print(
+                f"[scan] Loaded nestdict for library {label}; matched "
+                f"{len(source_inputs)} cluster key(s) for scoring.",
+                flush=True,
+            )
+
+            if not source_inputs:
+                del nestdict_for_source
+                gc.collect()
+                continue
+
+            scored_input_count += len(source_inputs)
+            source_batch_size = _cluster_scoring_batch_size(len(source_inputs), initial_worker_cap)
+            for b_idx, b_tot, batch in iter_batches(source_inputs, source_batch_size):
+                _process_scoring_batch(
+                    batch,
+                    nestdict_for_source,
+                    f"Library {label} batch {b_idx}/{b_tot}",
+                    f"{label} batch {b_idx}/{b_tot}",
+                )
+
+            del nestdict_for_source
+            gc.collect()
+
+        if unresolved_keys:
+            examples = sorted(unresolved_keys)[:5]
+            print(
+                f"[WARN] Missing nestdict for {len(unresolved_keys)} akeys; skipped. "
+                f"Example: {examples}",
+                flush=True,
+            )
+        if scored_input_count == 0:
+            print("[WARN] No valid inputs after batched nestdict loading; returning empty list.")
+            return []
 
     # -------------------- Assemble per-lib outputs ----------------------------
     clusterFiles = []

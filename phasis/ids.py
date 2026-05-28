@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MEM_FILE_DEFAULT, MemCache, phase2_basename, stage_signature
+from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
 from phasis.parallel import run_parallel_with_progress
 
 # ---------------------------------------------------------------------
@@ -623,7 +623,7 @@ def merge_candidate_clusters_parametric(
         {phase}_mergedClusterDict.tab
       with md5 caching in memFile.
     """
-    memFile_local = memFile or getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
+    memFile_local = memFile or getattr(rt, "memFile", None) or default_memfile_path()
     buf = int(getattr(rt, "clustbuffer", 0) or 0) if clustbuffer is None else int(clustbuffer)
 
     cache = MemCache.load(memFile_local)
@@ -718,7 +718,7 @@ def ensure_mergedClusterDict_always(
     """
     dict_tab = phase2_basename("mergedClusterDict.tab")
 
-    memFile_local = memFile or getattr(rt, "memFile", None) or MEM_FILE_DEFAULT
+    memFile_local = memFile or getattr(rt, "memFile", None) or default_memfile_path()
     cache = MemCache.load(memFile_local)
 
     try:
