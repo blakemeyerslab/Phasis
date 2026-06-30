@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import io
 import os
 import pickle
@@ -107,6 +108,123 @@ class ClusterScoringBatchedNestdictTests(unittest.TestCase):
             log = captured.getvalue()
         self.assertIn("Using per-library batched parser loading", log)
         self.assertIn("Loading nestdict for library", log)
+
+
+class ClusterScoringChunkBookkeepingTests(unittest.TestCase):
+    def _write_chunks(self, tmpdir: str, phase: int = 24, count: int = 3):
+        paths = []
+        for idx in range(count):
+            path = os.path.join(tmpdir, f"libA-{idx}.sRNA_{phase}.cluster")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(f"cluster {idx}\n")
+            paths.append(os.path.realpath(path))
+        with open(os.path.join(tmpdir, f"libA-ignore.sRNA_21.cluster"), "w", encoding="utf-8") as handle:
+            handle.write("wrong phase\n")
+        return paths
+
+    def test_default_records_lightweight_manifest_not_per_chunk_hashes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_chunks(tmpdir, count=4)
+            cfg = configparser.ConfigParser()
+            cfg.add_section("SCORED_CHUNKS")
+            cfg["SCORED_CHUNKS"]["stale"] = "old"
+
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING", None)
+                os.environ.pop("PHASIS_CLUSTER_SCORING_CHUNK_HASH_MODE", None)
+                os.environ.pop("PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT", None)
+                manifest = cluster_scoring._record_scored_chunk_bookkeeping(
+                    cfg,
+                    "SCORED_CHUNKS",
+                    tmpdir,
+                    phase_value=24,
+                    max_worker_cap=2,
+                )
+
+        self.assertEqual(manifest["__bookkeeping_mode__"], "manifest")
+        self.assertEqual(cfg["SCORED_CHUNKS"].get("__chunk_count__"), "4")
+        self.assertIn("__manifest_signature__", cfg["SCORED_CHUNKS"])
+        self.assertNotIn("stale", cfg["SCORED_CHUNKS"])
+        per_chunk_keys = [
+            key for key in cfg["SCORED_CHUNKS"].keys()
+            if key.endswith(".srna_24.cluster")
+        ]
+        self.assertEqual(per_chunk_keys, [])
+
+    def test_exact_mode_records_legacy_per_chunk_hashes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._write_chunks(tmpdir, count=2)
+            cfg = configparser.ConfigParser()
+            cfg.add_section("SCORED_CHUNKS")
+
+            with mock.patch.dict(
+                os.environ,
+                {"PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING": "exact"},
+                clear=False,
+            ):
+                manifest = cluster_scoring._record_scored_chunk_bookkeeping(
+                    cfg,
+                    "SCORED_CHUNKS",
+                    tmpdir,
+                    phase_value=24,
+                    max_worker_cap=2,
+                )
+
+        self.assertEqual(manifest["__bookkeeping_mode__"], "exact")
+        self.assertEqual(cfg["SCORED_CHUNKS"].get("__chunk_count__"), "2")
+        for path in paths:
+            self.assertTrue(cfg["SCORED_CHUNKS"].get(path))
+
+    def test_skip_mode_keeps_manifest_and_omits_per_chunk_hashes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._write_chunks(tmpdir, count=2)
+            cfg = configparser.ConfigParser()
+            cfg.add_section("SCORED_CHUNKS")
+
+            with mock.patch.dict(
+                os.environ,
+                {"PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING": "skip"},
+                clear=False,
+            ):
+                manifest = cluster_scoring._record_scored_chunk_bookkeeping(
+                    cfg,
+                    "SCORED_CHUNKS",
+                    tmpdir,
+                    phase_value=24,
+                    max_worker_cap=2,
+                )
+
+        self.assertEqual(manifest["__bookkeeping_mode__"], "skip")
+        self.assertEqual(cfg["SCORED_CHUNKS"].get("__chunk_count__"), "2")
+        for path in paths:
+            self.assertIsNone(cfg["SCORED_CHUNKS"].get(path))
+
+    def test_exact_mode_falls_back_to_manifest_when_hash_limit_is_exceeded(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._write_chunks(tmpdir, count=3)
+            cfg = configparser.ConfigParser()
+            cfg.add_section("SCORED_CHUNKS")
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING": "exact",
+                    "PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT": "2",
+                },
+                clear=False,
+            ):
+                manifest = cluster_scoring._record_scored_chunk_bookkeeping(
+                    cfg,
+                    "SCORED_CHUNKS",
+                    tmpdir,
+                    phase_value=24,
+                    max_worker_cap=2,
+                )
+
+        self.assertEqual(manifest["__bookkeeping_mode__"], "manifest")
+        self.assertEqual(cfg["SCORED_CHUNKS"].get("__chunk_count__"), "3")
+        for path in paths:
+            self.assertIsNone(cfg["SCORED_CHUNKS"].get(path))
 
 
 if __name__ == "__main__":
