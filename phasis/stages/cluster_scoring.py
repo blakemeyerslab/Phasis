@@ -7,7 +7,9 @@ scored chunk folder explicitly to worker tasks.
 """
 
 import configparser
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import gc
+import hashlib
 import multiprocessing
 import os
 import pickle
@@ -16,6 +18,7 @@ import sys
 from collections import Counter, defaultdict
 
 from scipy.stats import combine_pvalues, hypergeom, mannwhitneyu
+from tqdm import tqdm
 
 import phasis.runtime as rt
 from phasis.cache import (
@@ -66,6 +69,234 @@ def _coerce_positive_int(value, default=None):
         return value
     except Exception:
         return default
+
+
+def _cluster_scoring_chunk_hash_limit() -> int | None:
+    raw = os.environ.get("PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT")
+    if raw is None or raw == "":
+        return None
+    try:
+        limit = int(raw)
+    except Exception:
+        return None
+    return max(0, limit)
+
+
+def _cluster_scoring_chunk_bookkeeping_mode() -> str:
+    """Return how scored chunk bookkeeping should be recorded.
+
+    The historical path stored one fingerprint per scored chunk. On large
+    pooled runs this can mean hundreds of thousands of tiny-file stats/opens and
+    a very large mem file, which is painful on HPC shared storage. The default
+    is therefore an aggregate manifest. Exact per-chunk hashes remain available
+    for debugging/repro runs through an explicit environment variable.
+    """
+    raw = (
+        os.environ.get("PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING")
+        or os.environ.get("PHASIS_CLUSTER_SCORING_CHUNK_HASH_MODE")
+        or ""
+    ).strip().lower().replace("-", "_")
+
+    if not raw:
+        # Backward-compatible escape hatch from the earlier local mitigation.
+        if os.environ.get("PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT") == "0":
+            return "skip"
+        return "manifest"
+
+    if raw in {"manifest", "light", "lightweight", "summary"}:
+        return "manifest"
+    if raw in {"exact", "hash", "hashes", "full", "legacy"}:
+        return "exact"
+    if raw in {"skip", "off", "none", "false", "0"}:
+        return "skip"
+    return "manifest"
+
+
+def _hash_existing_file_no_wait(path: str):
+    try:
+        p = os.path.realpath(path)
+    except Exception:
+        p = path
+    _, md5hex = getmd5(p, wait_stable=False)
+    return (p, md5hex or None)
+
+
+def _iter_chunk_hashes_streaming(chunk_paths, *, max_workers: int):
+    """Yield chunk fingerprints without building a huge result list."""
+    paths = list(chunk_paths)
+    if not paths:
+        return
+
+    worker_count = max(1, min(int(max_workers or 1), len(paths)))
+    max_inflight = max(worker_count * 32, worker_count)
+    iterator = iter(paths)
+    futures = set()
+
+    def submit_next(executor):
+        try:
+            path = next(iterator)
+        except StopIteration:
+            return False
+        futures.add(executor.submit(_hash_existing_file_no_wait, path))
+        return True
+
+    with tqdm(total=len(paths), desc="Hashing .cluster chunks", unit="file") as pbar:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for _ in range(min(max_inflight, len(paths))):
+                if not submit_next(executor):
+                    break
+
+            while futures:
+                done, futures_left = wait(futures, return_when=FIRST_COMPLETED)
+                futures = futures_left
+                for fut in done:
+                    try:
+                        result = fut.result()
+                    except Exception:
+                        result = None
+                    pbar.update(1)
+                    submit_next(executor)
+                    if result is not None:
+                        yield result
+
+
+def _clear_config_section(config: configparser.ConfigParser, section: str) -> None:
+    if not config.has_section(section):
+        config.add_section(section)
+        return
+    for key in list(config[section].keys()):
+        config.remove_option(section, key)
+
+
+def _discover_scored_chunk_paths(scored_dir: str, phase_value) -> list[str]:
+    suffix = f".sRNA_{phase_value}.cluster"
+    if not os.path.isdir(scored_dir):
+        return []
+
+    paths = []
+    with os.scandir(scored_dir) as entries:
+        for entry in entries:
+            if not entry.name.endswith(suffix):
+                continue
+            try:
+                if not entry.is_file():
+                    continue
+            except OSError:
+                continue
+            try:
+                paths.append(os.path.realpath(entry.path))
+            except Exception:
+                paths.append(entry.path)
+    return sorted(set(paths))
+
+
+def _scored_chunk_manifest(chunk_paths) -> dict[str, str]:
+    h = hashlib.blake2s(digest_size=16)
+    count = 0
+    missing = 0
+    total_size = 0
+    newest_mtime_ns = 0
+
+    for path in sorted(set(chunk_paths)):
+        name = os.path.basename(path)
+        try:
+            st = os.stat(path)
+            size = int(st.st_size)
+            mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+            exists = 1
+            count += 1
+            total_size += size
+            newest_mtime_ns = max(newest_mtime_ns, mtime_ns)
+        except OSError:
+            size = -1
+            mtime_ns = -1
+            exists = 0
+            missing += 1
+
+        h.update(name.encode("utf-8", errors="surrogateescape"))
+        h.update(b"\t")
+        h.update(str(size).encode("ascii"))
+        h.update(b"\t")
+        h.update(str(mtime_ns).encode("ascii"))
+        h.update(b"\t")
+        h.update(str(exists).encode("ascii"))
+        h.update(b"\n")
+
+    return {
+        "__bookkeeping_mode__": "manifest",
+        "__chunk_count__": str(count),
+        "__missing_chunk_count__": str(missing),
+        "__chunk_total_size_bytes__": str(total_size),
+        "__chunk_newest_mtime_ns__": str(newest_mtime_ns),
+        "__manifest_signature__": h.hexdigest(),
+    }
+
+
+def _record_scored_chunk_bookkeeping(
+    config: configparser.ConfigParser,
+    section: str,
+    scored_dir: str,
+    *,
+    phase_value,
+    max_worker_cap: int,
+) -> dict[str, str]:
+    chunk_paths = _discover_scored_chunk_paths(scored_dir, phase_value)
+    _clear_config_section(config, section)
+
+    if not chunk_paths:
+        manifest = _scored_chunk_manifest([])
+        for key, value in manifest.items():
+            config[section][key] = value
+        return manifest
+
+    mode = _cluster_scoring_chunk_bookkeeping_mode()
+    hash_limit = _cluster_scoring_chunk_hash_limit()
+
+    if mode == "skip":
+        manifest = _scored_chunk_manifest(chunk_paths)
+        manifest["__bookkeeping_mode__"] = "skip"
+        for key, value in manifest.items():
+            config[section][key] = value
+        print(
+            f"[scan] Skipping exact [SCORED_CHUNKS] hashes for {len(chunk_paths)} "
+            ".cluster chunks; recorded lightweight manifest only.",
+            flush=True,
+        )
+        return manifest
+
+    if mode == "exact" and hash_limit is not None and len(chunk_paths) > hash_limit:
+        print(
+            f"[scan] Requested exact [SCORED_CHUNKS] hashing, but {len(chunk_paths)} "
+            f".cluster chunks exceeds PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT={hash_limit}; "
+            "recording lightweight manifest instead.",
+            flush=True,
+        )
+        mode = "manifest"
+
+    if mode == "exact":
+        manifest = _scored_chunk_manifest(chunk_paths)
+        manifest["__bookkeeping_mode__"] = "exact"
+        for key, value in manifest.items():
+            config[section][key] = value
+        md5_chunks = _iter_chunk_hashes_streaming(
+            chunk_paths,
+            max_workers=max_worker_cap,
+        )
+        for p_abs, md5 in md5_chunks:
+            if md5:
+                config[section][p_abs] = md5
+        return manifest
+
+    manifest = _scored_chunk_manifest(chunk_paths)
+    for key, value in manifest.items():
+        config[section][key] = value
+    print(
+        f"[scan] Recorded lightweight [SCORED_CHUNKS] manifest for "
+        f"{len(chunk_paths)} .cluster chunks. Set "
+        "PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING=exact for legacy per-chunk hashes.",
+        flush=True,
+    )
+    return manifest
 
 
 def _cluster_scoring_ncores() -> int:
@@ -1301,11 +1532,6 @@ def scoringprocess(
         f"can grow to {max_worker_cap}, and will process batches of up to {batch_size} lib-chr inputs.",
         flush=True,
     )
-    hash_parallel_kwargs = _cluster_scoring_parallel_kwargs(
-        maxtasksperchild=CLUSTER_SCORING_HASH_MAXTASKSPERCHILD,
-        initial_worker_cap=initial_worker_cap,
-        max_worker_cap=max_worker_cap,
-    )
     load_parallel_kwargs = _cluster_scoring_parallel_kwargs(
         maxtasksperchild=CLUSTER_SCORING_LOAD_MAXTASKSPERCHILD,
         initial_worker_cap=initial_worker_cap,
@@ -1607,25 +1833,15 @@ def scoringprocess(
         print("[WARN] No libraries passed for output assembly step.")
 
     # -------------------- Hash regenerated outputs -> [CLUSTERS] --------------
-    # -------------------- Hash chunk files -> [SCORED_CHUNKS] -----------------
+    # -------------------- Hash/manifest chunk files -> [SCORED_CHUNKS] --------
     if os.path.isdir(scoredClustFolder):
-        chunk_paths = [
-            os.path.realpath(os.path.join(scoredClustFolder, f))
-            for f in os.listdir(scoredClustFolder)
-            if f.endswith(f".sRNA_{phase}.cluster")
-        ]
-        if chunk_paths:
-            md5_chunks = run_parallel_with_progress(
-                md5_file_worker,
-                chunk_paths,
-                desc="Hashing .cluster chunks",
-                min_chunk=1,
-                unit="file",
-                **hash_parallel_kwargs,
-            )
-            for p_abs, md5 in md5_chunks:
-                if md5:
-                    config[sect_chunks][p_abs] = md5
+        _record_scored_chunk_bookkeeping(
+            config,
+            sect_chunks,
+            scoredClustFolder,
+            phase_value=phase,
+            max_worker_cap=max_worker_cap,
+        )
 
     # -------------------- Persist input md5 -> [CLUSTERED] --------------------
     for p_abs, md5 in lclust_md5_updates.items():
