@@ -330,6 +330,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         argv = sys.argv[1:]
 
     parser = build_parser()
+    if not argv:
+        parser.print_help()
+        return 0
+
     args = parser.parse_args(argv)
 
     if _cleanup_requested(args):

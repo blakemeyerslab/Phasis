@@ -21,6 +21,21 @@ def _touch(path: str) -> str:
 
 
 class CliReferenceIdModeTests(unittest.TestCase):
+    def test_main_without_args_prints_help_and_exits_before_run_path(self):
+        captured = io.StringIO()
+        with (
+            mock.patch.object(cli, "require_dependencies") as deps,
+            mock.patch.object(cli, "run_pipeline") as pipeline,
+            redirect_stdout(captured),
+        ):
+            result = cli.main([])
+
+        self.assertEqual(result, 0)
+        self.assertIn("usage:", captured.getvalue())
+        self.assertIn("-libs", captured.getvalue())
+        deps.assert_not_called()
+        pipeline.assert_not_called()
+
     def test_classifier_defaults_to_gmm(self):
         parser = cli.build_parser()
         args = parser.parse_args([])
