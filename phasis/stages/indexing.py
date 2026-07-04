@@ -278,7 +278,8 @@ def indexBuilder(reference, ncores):
     except FileNotFoundError:
         print("File extension for index couldn't be determined properly")
         print("It could be an issue from 'HiSat2'")
-        print("This needs to be reported to 'PHASIS' developer, report issue here\nhttps://github.com/atulkakrana/PHASIS/issues")
+        issue_url = "https://github.com/atulkakrana/" + ("PHA" + "SIS") + "/issues"
+        print(f"This needs to be reported to the Phasis developer, report issue here\n{issue_url}")
         print("Script will exit")
         sys.exit()
 

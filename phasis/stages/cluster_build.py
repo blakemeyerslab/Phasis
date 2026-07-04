@@ -12,6 +12,7 @@ from collections import OrderedDict
 
 import phasis.runtime as rt
 from phasis.cache import MemCache, default_memfile_path, getmd5, sig_key, stage_signature
+from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress, make_pool
 
 
@@ -85,7 +86,7 @@ def _cluster_build_ncores() -> int:
 def _resolve_cluster_build_worker_cap(runtime_attr: str, env_name: str, default=None) -> int:
     configured = _coerce_positive_int(
         getattr(rt, runtime_attr, None),
-        _coerce_positive_int(os.environ.get(env_name), default),
+        _coerce_positive_int(getenv(env_name), default),
     )
     ncores = _cluster_build_ncores()
     if configured is None:
@@ -96,7 +97,7 @@ def _resolve_cluster_build_worker_cap(runtime_attr: str, env_name: str, default=
 def _cluster_build_initial_worker_cap() -> int:
     return _resolve_cluster_build_worker_cap(
         "cluster_build_initial_worker_cap",
-        "PHASIS_CLUSTER_BUILD_INITIAL_WORKER_CAP",
+        "Phasis_CLUSTER_BUILD_INITIAL_WORKER_CAP",
         CLUSTER_BUILD_DEFAULT_INITIAL_WORKER_CAP,
     )
 
@@ -104,7 +105,7 @@ def _cluster_build_initial_worker_cap() -> int:
 def _cluster_build_max_worker_cap() -> int:
     return _resolve_cluster_build_worker_cap(
         "cluster_build_max_worker_cap",
-        "PHASIS_CLUSTER_BUILD_MAX_WORKER_CAP",
+        "Phasis_CLUSTER_BUILD_MAX_WORKER_CAP",
         None,
     )
 

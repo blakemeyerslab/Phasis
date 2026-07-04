@@ -128,11 +128,14 @@ class ClusterScoringChunkBookkeepingTests(unittest.TestCase):
             cfg = configparser.ConfigParser()
             cfg.add_section("SCORED_CHUNKS")
             cfg["SCORED_CHUNKS"]["stale"] = "old"
+            bookkeeping_env = "Phasis_CLUSTER_SCORING_CHUNK_BOOKKEEPING"
+            hash_mode_env = "Phasis_CLUSTER_SCORING_CHUNK_HASH_MODE"
+            hash_limit_env = "Phasis_CLUSTER_SCORING_CHUNK_HASH_LIMIT"
 
             with mock.patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING", None)
-                os.environ.pop("PHASIS_CLUSTER_SCORING_CHUNK_HASH_MODE", None)
-                os.environ.pop("PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT", None)
+                os.environ.pop(bookkeeping_env, None)
+                os.environ.pop(hash_mode_env, None)
+                os.environ.pop(hash_limit_env, None)
                 manifest = cluster_scoring._record_scored_chunk_bookkeeping(
                     cfg,
                     "SCORED_CHUNKS",
@@ -159,7 +162,7 @@ class ClusterScoringChunkBookkeepingTests(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING": "exact"},
+                {"Phasis_CLUSTER_SCORING_CHUNK_BOOKKEEPING": "exact"},
                 clear=False,
             ):
                 manifest = cluster_scoring._record_scored_chunk_bookkeeping(
@@ -183,7 +186,7 @@ class ClusterScoringChunkBookkeepingTests(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING": "skip"},
+                {"Phasis_CLUSTER_SCORING_CHUNK_BOOKKEEPING": "skip"},
                 clear=False,
             ):
                 manifest = cluster_scoring._record_scored_chunk_bookkeeping(
@@ -208,8 +211,8 @@ class ClusterScoringChunkBookkeepingTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING": "exact",
-                    "PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT": "2",
+                    "Phasis_CLUSTER_SCORING_CHUNK_BOOKKEEPING": "exact",
+                    "Phasis_CLUSTER_SCORING_CHUNK_HASH_LIMIT": "2",
                 },
                 clear=False,
             ):

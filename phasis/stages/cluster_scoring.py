@@ -30,6 +30,7 @@ from phasis.cache import (
     md5_file_worker,
     sanitize_mem_md5s,
 )
+from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress
 
 # Match legacy advanced defaults
@@ -72,7 +73,7 @@ def _coerce_positive_int(value, default=None):
 
 
 def _cluster_scoring_chunk_hash_limit() -> int | None:
-    raw = os.environ.get("PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT")
+    raw = getenv("Phasis_CLUSTER_SCORING_CHUNK_HASH_LIMIT")
     if raw is None or raw == "":
         return None
     try:
@@ -92,14 +93,14 @@ def _cluster_scoring_chunk_bookkeeping_mode() -> str:
     for debugging/repro runs through an explicit environment variable.
     """
     raw = (
-        os.environ.get("PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING")
-        or os.environ.get("PHASIS_CLUSTER_SCORING_CHUNK_HASH_MODE")
+        getenv("Phasis_CLUSTER_SCORING_CHUNK_BOOKKEEPING")
+        or getenv("Phasis_CLUSTER_SCORING_CHUNK_HASH_MODE")
         or ""
     ).strip().lower().replace("-", "_")
 
     if not raw:
         # Backward-compatible escape hatch from the earlier local mitigation.
-        if os.environ.get("PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT") == "0":
+        if getenv("Phasis_CLUSTER_SCORING_CHUNK_HASH_LIMIT") == "0":
             return "skip"
         return "manifest"
 
@@ -267,7 +268,7 @@ def _record_scored_chunk_bookkeeping(
     if mode == "exact" and hash_limit is not None and len(chunk_paths) > hash_limit:
         print(
             f"[scan] Requested exact [SCORED_CHUNKS] hashing, but {len(chunk_paths)} "
-            f".cluster chunks exceeds PHASIS_CLUSTER_SCORING_CHUNK_HASH_LIMIT={hash_limit}; "
+            f".cluster chunks exceeds Phasis_CLUSTER_SCORING_CHUNK_HASH_LIMIT={hash_limit}; "
             "recording lightweight manifest instead.",
             flush=True,
         )
@@ -293,7 +294,7 @@ def _record_scored_chunk_bookkeeping(
     print(
         f"[scan] Recorded lightweight [SCORED_CHUNKS] manifest for "
         f"{len(chunk_paths)} .cluster chunks. Set "
-        "PHASIS_CLUSTER_SCORING_CHUNK_BOOKKEEPING=exact for legacy per-chunk hashes.",
+        "Phasis_CLUSTER_SCORING_CHUNK_BOOKKEEPING=exact for legacy per-chunk hashes.",
         flush=True,
     )
     return manifest
@@ -313,7 +314,7 @@ def _cluster_scoring_ncores() -> int:
 def _resolve_cluster_scoring_worker_cap(runtime_attr: str, env_name: str, default=None) -> int:
     configured = _coerce_positive_int(
         getattr(rt, runtime_attr, None),
-        _coerce_positive_int(os.environ.get(env_name), default),
+        _coerce_positive_int(getenv(env_name), default),
     )
     ncores = _cluster_scoring_ncores()
     if configured is None:
@@ -324,7 +325,7 @@ def _resolve_cluster_scoring_worker_cap(runtime_attr: str, env_name: str, defaul
 def _cluster_scoring_initial_worker_cap() -> int:
     return _resolve_cluster_scoring_worker_cap(
         "cluster_scoring_initial_worker_cap",
-        "PHASIS_CLUSTER_SCORING_INITIAL_WORKER_CAP",
+        "Phasis_CLUSTER_SCORING_INITIAL_WORKER_CAP",
         CLUSTER_SCORING_DEFAULT_INITIAL_WORKER_CAP,
     )
 
@@ -332,7 +333,7 @@ def _cluster_scoring_initial_worker_cap() -> int:
 def _cluster_scoring_max_worker_cap() -> int:
     return _resolve_cluster_scoring_worker_cap(
         "cluster_scoring_max_worker_cap",
-        "PHASIS_CLUSTER_SCORING_MAX_WORKER_CAP",
+        "Phasis_CLUSTER_SCORING_MAX_WORKER_CAP",
         None,
     )
 
@@ -1050,7 +1051,7 @@ def mapPhaseSites(posinfo, poslist, direction, sens):
                 list_labeled.append((*bent, label))
     else:
         print(f"Unexpected input for scoring direction:{direction}")
-        print("PHASIS will exit now, please contact authors")
+        print("Phasis will exit now, please contact authors")
         sys.exit()
 
     return list_labeled
