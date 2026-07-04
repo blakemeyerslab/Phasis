@@ -29,7 +29,7 @@ import pandas as pd
 
 import phasis.runtime as rt
 import phasis.ids as ids
-from phasis.cache import phase2_basename
+from phasis.cache import artifact_exists, phase2_basename, resolve_artifact_path
 from phasis.config import Phase2Config
 from phasis.state import set_win_score_lookup
 
@@ -69,7 +69,7 @@ def infer_class_cluster_files(cfg: Phase2Config) -> list[str]:
     """
     explicit_files = _coerce_path_list(cfg.class_cluster_file)
     if explicit_files:
-        missing = [path for path in explicit_files if not os.path.isfile(path)]
+        missing = [path for path in explicit_files if not artifact_exists(path)]
         if missing:
             expected = "\n  - ".join(missing)
             raise FileNotFoundError(
@@ -89,7 +89,7 @@ def infer_class_cluster_files(cfg: Phase2Config) -> list[str]:
 
     run_dir = os.path.abspath(os.path.expanduser(str(getattr(rt, "run_dir", None) or os.getcwd())))
     resolved = [os.path.join(run_dir, name) for name in expected_names]
-    missing = [path for path in resolved if not os.path.isfile(path)]
+    missing = [path for path in resolved if not artifact_exists(path)]
     if missing:
         expected = "\n  - ".join(resolved)
         raise FileNotFoundError(
@@ -166,7 +166,9 @@ def run_phase2_pipeline(
     else:
         proc_path = phase2_basename("processed_clusters.tab")
         allClusters = (
-            pd.read_csv(proc_path, sep="\t") if os.path.isfile(proc_path) else pd.DataFrame()
+            pd.read_csv(resolve_artifact_path(proc_path) or proc_path, sep="\t")
+            if artifact_exists(proc_path)
+            else pd.DataFrame()
         )
 
     # Normalize for downstream grouping

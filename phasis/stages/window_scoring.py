@@ -8,7 +8,15 @@ import pandas as pd
 from scipy.stats import combine_pvalues
 
 import phasis.runtime as rt
-from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
+from phasis.cache import (
+    MemCache,
+    default_memfile_path,
+    finalize_text_artifact,
+    phase2_basename,
+    resolve_artifact_path,
+    stage_signature,
+)
+from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress
 
 from .. import state as st
@@ -152,11 +160,11 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
 
     if cache.hit("CLUSTERS_SCORED", outfname, input_sig):
         print(f"  - Output up-to-date (hash+sig match). Skipping computation: {outfname}")
-        df_cached = pd.read_csv(outfname, sep="\t")
+        df_cached = pd.read_csv(resolve_artifact_path(outfname) or outfname, sep="\t")
         for c in ("phasis_score", "combined_fishers"):
             if c in df_cached.columns:
                 df_cached[c] = pd.to_numeric(df_cached[c], errors="coerce").fillna(0.0)
-        _record_clusters_scored_tsv_path(outfname)
+        _record_clusters_scored_tsv_path(resolve_artifact_path(outfname) or outfname)
         return df_cached
 
     # Guard empty input
@@ -164,8 +172,8 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
         print("[INFO] compute_and_save_phasis_scores: empty input; writing empty file.")
         empty = pd.DataFrame(columns=["cID", "phasis_score", "combined_fishers"])
         empty.to_csv(outfname, sep="\t", index=False)
-        cache.record("CLUSTERS_SCORED", outfname, input_sig)
-        _record_clusters_scored_tsv_path(outfname)
+        finalize_text_artifact(cache, "CLUSTERS_SCORED", outfname, input_sig)
+        _record_clusters_scored_tsv_path(resolve_artifact_path(outfname) or outfname)
         return empty
 
     clusters = clusters.copy()
@@ -201,11 +209,11 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
         print("[INFO] No groups formed; writing empty scored TSV.")
         empty = pd.DataFrame(columns=["cID", "phasis_score", "combined_fishers"])
         empty.to_csv(outfname, sep="\t", index=False)
-        cache.record("CLUSTERS_SCORED", outfname, input_sig)
-        _record_clusters_scored_tsv_path(outfname)
+        finalize_text_artifact(cache, "CLUSTERS_SCORED", outfname, input_sig)
+        _record_clusters_scored_tsv_path(resolve_artifact_path(outfname) or outfname)
         return empty
 
-    preferred_start = getattr(rt, "mp_start_method", None) or os.environ.get("PHASIS_MP_START_METHOD")
+    preferred_start = getattr(rt, "mp_start_method", None) or getenv("Phasis_MP_START_METHOD")
     if preferred_start is None and sys.platform != "darwin":
         preferred_start = "forkserver"
 
@@ -223,11 +231,11 @@ def compute_and_save_phasis_scores(clusters: pd.DataFrame) -> pd.DataFrame:
     win_phasis_score = pd.DataFrame(flat, columns=["cID", "phasis_score", "combined_fishers"])
 
     win_phasis_score.to_csv(outfname, sep="\t", index=False)
-    fp = cache.record("CLUSTERS_SCORED", outfname, input_sig)
+    fp = finalize_text_artifact(cache, "CLUSTERS_SCORED", outfname, input_sig)
     if fp:
         print(f"  - Wrote {outfname} (md5: {fp})")
     else:
         print(f"  - Wrote {outfname}")
 
-    _record_clusters_scored_tsv_path(outfname)
+    _record_clusters_scored_tsv_path(resolve_artifact_path(outfname) or outfname)
     return win_phasis_score

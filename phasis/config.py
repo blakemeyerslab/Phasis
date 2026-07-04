@@ -38,6 +38,7 @@ class Phase2Config:
 
     # cache
     memFile: Optional[str] = None
+    compress_intermediates: bool = True
 
     @classmethod
     def from_runtime(cls) -> "Phase2Config":
@@ -60,4 +61,5 @@ class Phase2Config:
             classification_overrides=getattr(rt, "classification_overrides", None),
             locus_plot_mode=str(getattr(rt, "locus_plot_mode", "clean") or "clean"),
             memFile=getattr(rt, "memFile", None),
+            compress_intermediates=bool(getattr(rt, "compress_intermediates", True)),
         )

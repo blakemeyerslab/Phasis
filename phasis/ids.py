@@ -30,7 +30,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
+from phasis.cache import (
+    MemCache,
+    artifact_exists,
+    default_memfile_path,
+    finalize_text_artifact,
+    open_text_artifact,
+    phase2_basename,
+    resolve_artifact_path,
+    stage_signature,
+)
 from phasis.parallel import run_parallel_with_progress
 
 # ---------------------------------------------------------------------
@@ -62,7 +71,7 @@ def _pick_colname(cols: List[str], candidates: Sequence[str]) -> Optional[str]:
 def _load_simple_tab_dict(path: str) -> Dict[str, List[str]]:
     """Load a key \\t values... tab into {key: [values...]}; tolerate empty lines."""
     out: Dict[str, List[str]] = {}
-    with open(path, "r") as fh:
+    with open_text_artifact(path, "rt") as fh:
         for line in fh:
             parts = line.rstrip("\n").split("\t")
             if not parts or not parts[0]:
@@ -119,7 +128,7 @@ def ensure_mergedClusterDict(phase: Optional[str] = None) -> Dict[str, List[str]
 
         # 2) load from disk
         dict_tab = phase2_basename("mergedClusterDict.tab")
-        if os.path.isfile(dict_tab):
+        if artifact_exists(dict_tab):
             try:
                 mcd = _load_simple_tab_dict(dict_tab)
                 _set_reverse_merged_map(mcd)
@@ -371,7 +380,7 @@ def assemble_candidate_clusters_parametric(
     cid2coord: Dict[str, Tuple[str, int, int]] = {}
     try:
         loci_path = phase2_basename("candidate.loci_table.tab")
-        ldf = pd.read_csv(loci_path, sep="\t", engine="python")
+        ldf = pd.read_csv(resolve_artifact_path(loci_path) or loci_path, sep="\t", engine="python")
 
         # normalize headers from stage output
         ldf = ldf.rename(
@@ -594,10 +603,11 @@ def _identity_dict_from_tsv_firstcol(
     """
     Build an identity mapping {cid: [cid]} from the first usable ID column in a TSV.
     """
+    physical_path = resolve_artifact_path(path) or path
     try:
-        df = pd.read_csv(path, sep="\t", engine="python")
+        df = pd.read_csv(physical_path, sep="\t", engine="python")
     except Exception:
-        df = pd.read_csv(path, sep="\t", header=None, engine="python")
+        df = pd.read_csv(physical_path, sep="\t", header=None, engine="python")
         if df.shape[1] >= 1:
             df.columns = ["Cluster"] + [f"col{i}" for i in range(2, df.shape[1] + 1)]
 
@@ -691,8 +701,8 @@ def merge_candidate_clusters_parametric(
             wr.writerow([key] + values)
 
     # update cache
-    cache.record("MERGED_CLUSTERS", merged_pairs_path, input_sig)
-    cache.record("MERGED_DICT", merged_dict_path, input_sig)
+    finalize_text_artifact(cache, "MERGED_CLUSTERS", merged_pairs_path, input_sig)
+    finalize_text_artifact(cache, "MERGED_DICT", merged_dict_path, input_sig)
 
     return mcd
 
@@ -755,10 +765,10 @@ def ensure_mergedClusterDict_always(
 
     # ---- recompute ----
     if concat_libs:
-        if not os.path.isfile(merged_out_path):
+        if not artifact_exists(merged_out_path):
             raise FileNotFoundError(f"Missing merged candidates TSV: {merged_out_path}")
 
-        mdf = pd.read_csv(merged_out_path, sep="	", engine="python")
+        mdf = pd.read_csv(resolve_artifact_path(merged_out_path) or merged_out_path, sep="	", engine="python")
 
         cid_col = _pick_colname(list(mdf.columns), ("Cluster", "clusterID", "name", "cID"))
         chr_col = _pick_colname(list(mdf.columns), ("chromosome", "chr"))
@@ -785,7 +795,7 @@ def ensure_mergedClusterDict_always(
             for key, values in mcd.items():
                 wr.writerow([key] + values)
 
-        cache.record("MERGED_DICT", dict_tab, dict_input_sig)
+        finalize_text_artifact(cache, "MERGED_DICT", dict_tab, dict_input_sig)
 
         _set_reverse_merged_map(mcd)
         return mcd

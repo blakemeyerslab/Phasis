@@ -111,6 +111,40 @@ class CliReferenceIdModeTests(unittest.TestCase):
 
         self.assertIn("only used with -steps class", captured.getvalue())
 
+    def test_pool_libraries_preferred_option_sets_concat_runtime_flag(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["--pool_libraries"])
+        cli._validate_args(args)
+
+        self.assertTrue(args.concat_libs)
+
+    def test_concat_libs_legacy_alias_sets_same_runtime_flag(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["--concat_libs"])
+        cli._validate_args(args)
+
+        self.assertTrue(args.concat_libs)
+
+    def test_concat_libs_legacy_alias_is_hidden_from_main_help(self):
+        help_text = cli.build_parser().format_help()
+
+        self.assertIn("--pool_libraries", help_text)
+        self.assertNotIn("--concat_libs", help_text)
+
+    def test_compress_intermediates_is_default_with_visible_opt_out(self):
+        parser = cli.build_parser()
+
+        default_args = parser.parse_args([])
+        disabled_args = parser.parse_args(["--no_compress_intermediates"])
+        enabled_args = parser.parse_args(["--compress_intermediates"])
+
+        self.assertTrue(default_args.compress_intermediates)
+        self.assertFalse(disabled_args.compress_intermediates)
+        self.assertTrue(enabled_args.compress_intermediates)
+        help_text = parser.format_help()
+        self.assertIn("--compress_intermediates", help_text)
+        self.assertIn("--no_compress_intermediates", help_text)
+
     def test_configure_runtime_stores_reference_id_mode(self):
         parser = cli.build_parser()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -132,6 +166,27 @@ class CliReferenceIdModeTests(unittest.TestCase):
             with mock.patch.object(rt, "reference_id_mode", None, create=True):
                 cli.configure_runtime(args)
                 self.assertEqual(rt.reference_id_mode, "preserve")
+
+    def test_configure_runtime_stores_compress_intermediates_flag(self):
+        parser = cli.build_parser()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ref = _touch(os.path.join(tmpdir, "ref.fa"))
+            lib = _touch(os.path.join(tmpdir, "lib.tag"))
+            args = parser.parse_args(
+                [
+                    "-libs",
+                    lib,
+                    "-reference",
+                    ref,
+                    "--no_compress_intermediates",
+                    "--outdir",
+                    os.path.join(tmpdir, "results"),
+                ]
+            )
+
+            with mock.patch.object(rt, "compress_intermediates", True, create=True):
+                cli.configure_runtime(args)
+                self.assertFalse(rt.compress_intermediates)
 
 
 class ClassClusterInferenceTests(unittest.TestCase):

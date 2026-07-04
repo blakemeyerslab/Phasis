@@ -21,7 +21,15 @@ import pandas as pd
 from scipy.stats import combine_pvalues
 
 import phasis.runtime as rt
-from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
+from phasis.cache import (
+    MemCache,
+    artifact_exists,
+    default_memfile_path,
+    finalize_text_artifact,
+    phase2_basename,
+    resolve_artifact_path,
+    stage_signature,
+)
 from phasis.parallel import run_parallel_with_progress
 import phasis.ids as ids
 
@@ -43,12 +51,13 @@ def load_processed_clusters_fallback() -> pd.DataFrame:
     NOTE: the actual filename comes from phasis.cache.phase2_basename, which uses rt.phase/rt.concat_libs.
     """
     proc_path = phase2_basename("processed_clusters.tab")
-    if os.path.isfile(proc_path):
+    if artifact_exists(proc_path):
         print(f"  - Detected non-20-col input; loading processed-clusters fallback: {proc_path}")
+        physical_proc_path = resolve_artifact_path(proc_path) or proc_path
         try:
-            return pd.read_csv(proc_path, sep="\t", engine="python")
+            return pd.read_csv(physical_proc_path, sep="\t", engine="python")
         except Exception:
-            return pd.read_csv(proc_path, sep="\t")
+            return pd.read_csv(physical_proc_path, sep="\t")
     print(f"[WARN] Processed-clusters fallback not found: {proc_path}")
     return pd.DataFrame()
 
@@ -69,10 +78,11 @@ def _read_cached_phas_to_detect(output_file: str, cache: MemCache, input_sig: st
     section_name = "PHAS_TO_DETECT"
     if cache.hit(section_name, output_file, input_sig):
         print(f"  - Output up-to-date (hash+sig match). Skipping processing: {output_file}")
+        physical_output_file = resolve_artifact_path(output_file) or output_file
         try:
-            df = pd.read_csv(output_file, sep="\t", engine="python")
+            df = pd.read_csv(physical_output_file, sep="\t", engine="python")
         except Exception:
-            df = pd.read_csv(output_file, sep="\t")
+            df = pd.read_csv(physical_output_file, sep="\t")
         df = _coerce_numeric_allowlist(df)
         return df
     return None
@@ -264,7 +274,7 @@ def build_and_save_phas_clusters(
 
     # ---- Write + update md5 cache (best effort) ----
     clusters_data.to_csv(output_file, sep="\t", encoding="utf-8", index=False)
-    fp = cache.record("PHAS_TO_DETECT", output_file, input_sig)
+    fp = finalize_text_artifact(cache, "PHAS_TO_DETECT", output_file, input_sig)
     if fp:
         print(f"  - Wrote {output_file} (md5: {fp})")
     else:
