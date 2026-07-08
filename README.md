@@ -282,8 +282,7 @@ The default matching window uses genomic overlap with a +/-300 nt flank.
 
 ## Troubleshooting
 
-- Phasis currently targets NumPy `1.26.4` and scikit-learn `1.3.0`.
-- Avoid NumPy `2.x` with the current Phasis release because scikit-learn `1.3.0` is not compatible with that series.
+- Phasis currently tests against NumPy `1.26.4` and scikit-learn `1.3.0`.
 - If command-line examples produce no plots, check whether the run produced final *PHAS* or *PHAS*-like calls and whether `--plot_staging` copied staged plots back to `--outdir`.
 - If reference IDs are unexpected in outputs, use `--reference_id_mode preserve` for the next run.
 
