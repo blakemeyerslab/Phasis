@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 
+from phasis.cache import resolve_artifact_path
+
 # Process-local cache used by workers (read-only in worker hot paths).
 # Keys are cluster IDs (cID), values are (phasis_score, combined_fishers).
 WIN_SCORE_LOOKUP: dict[str, tuple[float, float]] = {}
@@ -81,13 +83,14 @@ def load_win_score_lookup_from_tsv(path: str | Path) -> dict[str, tuple[float, f
         WIN_SCORE_LOOKUP.clear()
         return WIN_SCORE_LOOKUP
 
-    if not p.exists():
+    physical = resolve_artifact_path(str(p))
+    if not physical:
         WIN_SCORE_LOOKUP.clear()
         return WIN_SCORE_LOOKUP
 
     mapping: dict[str, tuple[float, float]] = {}
     try:
-        df = pd.read_csv(str(p), sep="\t", usecols=["cID", "phasis_score", "combined_fishers"])
+        df = pd.read_csv(physical, sep="\t", usecols=["cID", "phasis_score", "combined_fishers"])
     except Exception:
         WIN_SCORE_LOOKUP.clear()
         return WIN_SCORE_LOOKUP

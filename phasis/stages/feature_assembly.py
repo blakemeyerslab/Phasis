@@ -9,7 +9,15 @@ import numpy as np
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
+from phasis.cache import (
+    MemCache,
+    default_memfile_path,
+    finalize_text_artifact,
+    phase2_basename,
+    resolve_artifact_path,
+    stage_signature,
+)
+from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress
 
 DCL_OVERHANG = 2          # canonical 2-nt 3' overhang used for opposite-strand duplex pairing
@@ -28,8 +36,8 @@ CROSS_STRAND_BRIDGE_RELAXED_MIN_RATIO = 0.35
 MAIN_UNIT_MIN_SUPPORTED_POSITIONS = 2
 MAIN_UNIT_MIN_EXACT_POSITIONS = 1
 MAIN_PARTNER_TRACE_DEFAULT_NAME = "main_partner_trace.tsv"
-MAIN_PARTNER_TRACE_ENV = "PHASIS_MAIN_PARTNER_DEBUG"
-MAIN_PARTNER_TRACE_OUT_ENV = "PHASIS_MAIN_PARTNER_DEBUG_OUT"
+MAIN_PARTNER_TRACE_ENV = "Phasis_MAIN_PARTNER_DEBUG"
+MAIN_PARTNER_TRACE_OUT_ENV = "Phasis_MAIN_PARTNER_DEBUG_OUT"
 MAIN_PARTNER_TRACE_COLS = [
     "identifier",
     "alib",
@@ -112,13 +120,13 @@ def _truthy_env(value) -> bool:
 
 
 def _main_partner_trace_enabled() -> bool:
-    return _truthy_env(os.environ.get(MAIN_PARTNER_TRACE_ENV)) or bool(
-        str(os.environ.get(MAIN_PARTNER_TRACE_OUT_ENV) or "").strip()
+    return _truthy_env(getenv(MAIN_PARTNER_TRACE_ENV)) or bool(
+        str(getenv(MAIN_PARTNER_TRACE_OUT_ENV) or "").strip()
     )
 
 
 def _main_partner_trace_outpath(*, phase: int | str | None, outdir: str | None, concat_libs: bool) -> str | None:
-    explicit = str(os.environ.get(MAIN_PARTNER_TRACE_OUT_ENV) or "").strip()
+    explicit = str(getenv(MAIN_PARTNER_TRACE_OUT_ENV) or "").strip()
     if explicit:
         return explicit
     if not _main_partner_trace_enabled() or not outdir:
@@ -189,8 +197,9 @@ def ensure_win_score_lookup_ready() -> None:
         if st.WIN_SCORE_LOOKUP:
             return
         p = getattr(rt, "clusters_scored_tsv", None)
-        if p and os.path.isfile(p):
-            st.load_win_score_lookup_from_tsv(p)
+        physical = resolve_artifact_path(p) if p else None
+        if physical:
+            st.load_win_score_lookup_from_tsv(physical)
     except Exception:
         # keep feature assembly robust; caller will fall back to defaults
         return
@@ -245,7 +254,7 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
     # ---------- Early cache check ----------
     if cache.hit(section, outfname, input_sig):
         print(f"  - Output up-to-date (hash+sig match). Skipping assembly: {outfname}")
-        df = pd.read_csv(outfname, sep="	")
+        df = pd.read_csv(resolve_artifact_path(outfname) or outfname, sep="	")
 
         # Coerce numerics by legacy names only
         for col in df.columns:
@@ -334,7 +343,7 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
         trace_frame = pd.DataFrame(trace_rows, columns=MAIN_PARTNER_TRACE_COLS)
         trace_frame.to_csv(trace_outpath, sep="\t", index=False)
         print(f"  - Wrote {trace_outpath}")
-    fp = cache.record(section, outfname, input_sig)
+    fp = finalize_text_artifact(cache, section, outfname, input_sig)
     if fp:
         print(f"  - Wrote {outfname} (md5: {fp})")
 
@@ -3721,6 +3730,9 @@ def summarize_relaxed_trace_subregions(
             overlapping_alt_groups,
             key=lambda item: float(item.get("peak_score", 0.0) or 0.0),
         )
+    best_overlap_shift_nt = (
+        None if best_overlap_group is None else best_overlap_group.get("shift_nt")
+    )
 
     return {
         "Howell_additional_peak_count": int(len(additional_region_scores)),
@@ -3732,7 +3744,7 @@ def summarize_relaxed_trace_subregions(
             np.nan if best_overlap_group is None else float(best_overlap_group.get("peak_score", 0.0) or 0.0)
         ),
         "Howell_overlapping_alt_best_shift_nt": (
-            np.nan if best_overlap_group is None else float(best_overlap_group.get("shift_nt"))
+            np.nan if best_overlap_shift_nt is None else float(best_overlap_shift_nt)
         ),
         "main_biogenesis_unit": main_unit,
         "additional_peak_groups": additional_peak_groups,

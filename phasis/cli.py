@@ -10,6 +10,7 @@ from .pipeline import run_pipeline
 from . import __version__
 from . import runtime as rt
 from .deps_check import require_dependencies
+from .env import getenv
 
 
 _CLEANUP_ONLY_FLAGS = {"-cleanup", "-cleanup_all", "-cleanup_index"}
@@ -97,8 +98,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-min_Howell_score", type=float, default=12.5,
                         help="Minimum Howell score [default 12.5]")
-    parser.add_argument("--concat_libs", dest="concat_libs", action="store_true",
-                        help="Concatenate all input libs into a single virtual library")
+    parser.add_argument(
+        "--pool_libraries",
+        dest="concat_libs",
+        action="store_true",
+        help="Pool all input libraries into one virtual library before PHAS candidate detection",
+    )
+    parser.add_argument(
+        "--concat_libs",
+        dest="concat_libs",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--outdir", dest="outdir", metavar="DIR", type=str,
                         default="{phase}_results",
                         help="Output directory (supports {phase}); default {phase}_results")
@@ -129,6 +140,20 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("clean", "debug"),
         default="clean",
         help="Locus Howell panel mode: clean hides relaxed off-lattice trace points; debug preserves the full relaxed trace [default clean]",
+    )
+    compression_group = parser.add_mutually_exclusive_group()
+    compression_group.add_argument(
+        "--compress_intermediates",
+        dest="compress_intermediates",
+        action="store_true",
+        default=True,
+        help="Gzip completed Phase II text intermediates after writing them [default enabled]",
+    )
+    compression_group.add_argument(
+        "--no_compress_intermediates",
+        dest="compress_intermediates",
+        action="store_false",
+        help="Keep completed Phase II text intermediates as plain TSV/TAB files",
     )
 
     parser.add_argument(
@@ -308,7 +333,7 @@ def configure_runtime(args: argparse.Namespace) -> None:
     rt.plot_staging = str(
         args.plot_staging
         if args.plot_staging is not None
-        else os.environ.get("PHASIS_PLOT_STAGING", "auto")
+        else getenv("Phasis_PLOT_STAGING", "auto")
     ).strip().lower()
     rt.legacy_classification = bool(args.legacy_classification)
     rt.classification_overrides = (
@@ -317,6 +342,7 @@ def configure_runtime(args: argparse.Namespace) -> None:
         else None
     )
     rt.locus_plot_mode = str(args.locus_plot_mode or "clean").strip().lower()
+    rt.compress_intermediates = bool(getattr(args, "compress_intermediates", True))
 
     # store optional flags too
     rt.cleanup = args.cleanup

@@ -300,7 +300,7 @@ class LocusPlotHelperTests(unittest.TestCase):
                 with mock.patch.object(locus_plots.os, "access", return_value=False):
                     strategy = locus_plots._resolve_plot_staging_strategy(
                         "/tmp/24_KNN_PHAS_locus_plots",
-                        env={"PHASIS_PLOT_STAGING": "local", "TMPDIR": "/path/that/does/not/exist"},
+                        env={"Phasis_PLOT_STAGING": "local", "TMPDIR": "/path/that/does/not/exist"},
                         mountinfo_text="",
                     )
         self.assertEqual(strategy["mode"], "direct")

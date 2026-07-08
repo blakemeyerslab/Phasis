@@ -29,7 +29,14 @@ import numpy as np
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
+from phasis.cache import (
+    MemCache,
+    default_memfile_path,
+    finalize_text_artifact,
+    phase2_basename,
+    resolve_artifact_path,
+    stage_signature,
+)
 from phasis.parallel import run_parallel_with_progress
 
 WINDOWS_COLUMNS: List[str] = [
@@ -42,13 +49,14 @@ WINDOWS_COLUMNS: List[str] = [
 
 
 def load_window_chunk_file(path: str):
-    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+    physical_path = resolve_artifact_path(path)
+    if not physical_path or os.path.getsize(physical_path) <= 0:
         return (path, None)
 
     try:
-        frame = pd.read_csv(path, sep="\t", engine="python")
+        frame = pd.read_csv(physical_path, sep="\t", engine="python")
     except Exception:
-        frame = pd.read_csv(path, sep="\t")
+        frame = pd.read_csv(physical_path, sep="\t")
     return (path, frame)
 
 
@@ -70,10 +78,11 @@ def _load_final_if_cached(
         return None
 
     print(f"  - Output up-to-date (hash+sig match). Skipping computation: {outfname}")
+    physical_outfname = resolve_artifact_path(outfname) or outfname
     try:
-        df = pd.read_csv(outfname, sep="\t", engine="python")
+        df = pd.read_csv(physical_outfname, sep="\t", engine="python")
     except Exception:
-        df = pd.read_csv(outfname, sep="\t")
+        df = pd.read_csv(physical_outfname, sep="\t")
 
     for c in ("window_n", "fw_pval_corr", "rv_pval_corr", "combined_window_p_value"):
         if c in df.columns:
@@ -83,7 +92,7 @@ def _load_final_if_cached(
 
 def _record_final(cache: MemCache, outfname: str, input_sig: Optional[str] = None) -> None:
     """Record outfname fingerprint and (optional) signature into phasis.mem."""
-    fp = cache.record("WINDOWS_TO_SCORE", outfname, input_sig)
+    fp = finalize_text_artifact(cache, "WINDOWS_TO_SCORE", outfname, input_sig)
     if fp:
         print(f"  - Wrote {outfname} (md5: {fp})")
     else:
@@ -194,7 +203,8 @@ def select_scoring_windows(
         key = f"{libid}__chr{chrom}"
         outp = os.path.join(outdir, f"{_safe_key(key)}.tsv")
 
-        if os.path.isfile(outp) and os.path.getsize(outp) > 0:
+        physical_outp = resolve_artifact_path(outp)
+        if physical_outp and os.path.getsize(physical_outp) > 0:
             kept_paths.append(outp)
             continue
 

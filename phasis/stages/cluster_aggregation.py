@@ -20,7 +20,16 @@ from typing import List, Sequence, Tuple
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
+from phasis.cache import (
+    MemCache,
+    artifact_exists,
+    default_memfile_path,
+    finalize_text_artifact,
+    open_text_artifact,
+    phase2_basename,
+    resolve_artifact_path,
+    stage_signature,
+)
 from phasis.parallel import run_parallel_with_progress
 
 
@@ -54,7 +63,7 @@ def process_single_lib_cluster(filename: str) -> List[Tuple]:
     Parse a single *.PHAS.candidate.clusters file into a list of tuples matching
     PROCESSED_CLUSTER_COLUMNS.
     """
-    if not os.path.isfile(filename):
+    if not artifact_exists(filename):
         raise FileNotFoundError(f"Cluster file not found: {filename}")
 
     clustlist: List[Tuple] = []
@@ -64,7 +73,7 @@ def process_single_lib_cluster(filename: str) -> List[Tuple]:
     base = os.path.basename(filename)
     alib = re.sub(r"\.\d+-PHAS\.candidate\.clusters$", "", base)
 
-    with open(filename) as fh:
+    with open_text_artifact(filename, "rt") as fh:
         lines = fh.readlines()
 
     aid = None
@@ -160,7 +169,7 @@ def aggregate_and_write_processed_clusters(
     if not paths:
         raise ValueError("No cluster files provided to aggregate_and_write_processed_clusters().")
 
-    missing = [p for p in paths if not os.path.isfile(p)]
+    missing = [p for p in paths if not artifact_exists(p)]
     if missing:
         raise FileNotFoundError(f"Missing cluster file(s): {missing}")
 
@@ -181,7 +190,7 @@ def aggregate_and_write_processed_clusters(
 
     if cache.hit("PROCESSED", outfname, input_sig):
         print(f"  - Output up-to-date (hash+sig match). Skipping aggregation: {outfname}")
-        df_cached = pd.read_csv(outfname, sep="\t")
+        df_cached = pd.read_csv(resolve_artifact_path(outfname) or outfname, sep="\t")
         print(f"Processed clusters written to {outfname}")
         return df_cached
 
@@ -201,7 +210,7 @@ def aggregate_and_write_processed_clusters(
 
     allClusters.to_csv(outfname, sep="\t", index=False, header=True)
 
-    fp = cache.record("PROCESSED", outfname, input_sig)
+    fp = finalize_text_artifact(cache, "PROCESSED", outfname, input_sig)
     if fp:
         print(f"Hash for {outfname}: {fp}")
 

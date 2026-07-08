@@ -813,6 +813,46 @@ class HowellAmbiguityScoringTests(unittest.TestCase):
         self.assertEqual(len(summary["promoted_secondary_units"]), 0)
         self.assertEqual(len(summary["unpromoted_secondary_units"]), 1)
 
+    def test_summarize_relaxed_trace_subregions_allows_promoted_overlap_without_shift(self):
+        trace = {
+            "w": [
+                {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 20.0, "best_register": 0},
+            ],
+            "c": [],
+        }
+        overlap_unit = {
+            "category": "overlapping_alternative",
+            "peak_score": 18.0,
+            "shift_nt": None,
+        }
+
+        with (
+            mock.patch.object(
+                feature_assembly,
+                "_main_biogenesis_unit",
+                return_value=({"category": "main_hpsp"}, [dict(overlap_unit)]),
+            ),
+            mock.patch.object(
+                feature_assembly,
+                "_annotate_secondary_units_against_main_unit",
+                return_value=[dict(overlap_unit)],
+            ),
+            mock.patch.object(
+                feature_assembly,
+                "_annotate_promoted_secondary_units",
+                return_value=([dict(overlap_unit)], []),
+            ),
+        ):
+            summary = feature_assembly.summarize_relaxed_trace_subregions(
+                trace,
+                score_cutoff=12.5,
+                phase=21,
+            )
+
+        self.assertEqual(summary["Howell_overlapping_alt_count"], 1)
+        self.assertAlmostEqual(summary["Howell_overlapping_alt_best_score"], 18.0)
+        self.assertTrue(np.isnan(summary["Howell_overlapping_alt_best_shift_nt"]))
+
     def test_secondary_unit_is_promotable_for_strong_noncanonical_cross_strand_secondary(self):
         unit = {
             "category": "overlapping_alternative",

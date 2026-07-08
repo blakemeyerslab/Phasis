@@ -6,7 +6,16 @@ from functools import partial
 import pandas as pd
 
 import phasis.runtime as rt
-from phasis.cache import MemCache, default_memfile_path, phase2_basename, stage_signature
+from phasis.cache import (
+    MemCache,
+    artifact_exists,
+    default_memfile_path,
+    finalize_text_artifact,
+    open_text_artifact,
+    phase2_basename,
+    resolve_artifact_path,
+    stage_signature,
+)
 from phasis.parallel import run_parallel_with_progress
 
 
@@ -83,7 +92,7 @@ def loci_table_from_clusters(
     if cache.hit("LOCI_TABLE", outfname, input_sig):
         print(f"File {outfname} is up-to-date (hash+sig match). Skipping recomputation.")
         print(f"Loci table written to {outfname}")
-        with open(outfname, "r") as fh:
+        with open_text_artifact(outfname, "rt") as fh:
             file_lines = fh.readlines()[1:]  # skip header
             lociTablelist_unique = [ln.strip().split("	") for ln in file_lines]
         return pd.DataFrame(lociTablelist_unique, columns=["name", "pval", "chr", "start", "end"])
@@ -116,7 +125,7 @@ def loci_table_from_clusters(
             fh.write("\t".join(map(str, row)) + "\n")
 
     if os.path.isfile(outfname):
-        fp = cache.record("LOCI_TABLE", outfname, input_sig)
+        fp = finalize_text_artifact(cache, "LOCI_TABLE", outfname, input_sig)
         if fp:
             print(f"Hash for {outfname}: {fp}")
 
@@ -151,7 +160,7 @@ def merge_candidate_clusters_across_libs(
 
     if cache.hit("MERGED_CANDIDATES", out_path, input_sig):
         print("Outputs up-to-date (hash+sig match). Skipping merge computation.")
-        df_cached = pd.read_csv(out_path, sep="	")
+        df_cached = pd.read_csv(resolve_artifact_path(out_path) or out_path, sep="	")
 
         if "chromosome" not in df_cached.columns and "chr" in df_cached.columns:
             df_cached = df_cached.rename(columns={"chr": "chromosome"})
@@ -161,11 +170,11 @@ def merge_candidate_clusters_across_libs(
             print("[WARN] Cached merged table lacks 'alib' in non-concat mode.")
         return df_cached
 
-    if not os.path.isfile(loci_table_path):
+    if not artifact_exists(loci_table_path):
         print(f"[WARN] Loci table not found: {loci_table_path}. Returning empty DataFrame.")
         return pd.DataFrame()
 
-    merged_df = pd.read_csv(loci_table_path, sep="\t")
+    merged_df = pd.read_csv(resolve_artifact_path(loci_table_path) or loci_table_path, sep="\t")
 
     if "chromosome" not in merged_df.columns and "chr" in merged_df.columns:
         merged_df = merged_df.rename(columns={"chr": "chromosome"})
@@ -178,7 +187,7 @@ def merge_candidate_clusters_across_libs(
             merged_df["alib"] = "UNKNOWN"
 
     merged_df.to_csv(out_path, sep="	", index=False)
-    fp = cache.record("MERGED_CANDIDATES", out_path, input_sig)
+    fp = finalize_text_artifact(cache, "MERGED_CANDIDATES", out_path, input_sig)
     if fp:
         print(f"Hash for {os.path.basename(out_path)}: {fp}")
 

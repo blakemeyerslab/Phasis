@@ -16,6 +16,7 @@ from matplotlib.legend_handler import HandlerTuple
 from matplotlib.ticker import FuncFormatter
 
 import phasis.runtime as rt
+from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress
 from phasis.stages import feature_assembly as st_feat
 
@@ -1402,7 +1403,9 @@ def _resolve_plot_staging_strategy(
     mountinfo_text: str | None = None,
 ) -> dict:
     env = os.environ if env is None else env
-    requested_mode = _normalize_plot_staging_mode(getattr(rt, "plot_staging", None) or env.get("PHASIS_PLOT_STAGING", "auto"))
+    requested_mode = _normalize_plot_staging_mode(
+        getattr(rt, "plot_staging", None) or getenv("Phasis_PLOT_STAGING", "auto", env=env)
+    )
     is_remote_output, mount_point, fs_type = _detect_remote_filesystem(final_plot_dir, mountinfo_text=mountinfo_text)
     scheduler_detected = _scheduler_environment_detected(env=env)
     staging_root = None

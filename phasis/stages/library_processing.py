@@ -7,6 +7,7 @@ import hashlib
 from phasis import libprep
 from phasis import runtime as rt
 from phasis.cache import MemCache, compute_md5_str, default_memfile_path, sig_key, stage_signature
+from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress
 
 # Stage-local globals (only what libraryprocess needs)
@@ -74,13 +75,13 @@ def _sum_output_for_fas(fas_path):
 
 
 def _cache_debug_enabled():
-    value = str(os.environ.get("PHASIS_CACHE_DEBUG", "")).strip().lower()
+    value = str(getenv("Phasis_CACHE_DEBUG", "")).strip().lower()
     return value in {"1", "true", "yes", "y", "on"}
 
 
 def _cache_debug(msg):
     if _cache_debug_enabled():
-        print(f"[PHASIS:CACHE] {msg}")
+        print(f"[Phasis:CACHE] {msg}")
 
 def _materialize_fas_from_gz_if_needed(fas_path):
     """

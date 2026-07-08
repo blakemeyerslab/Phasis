@@ -26,6 +26,7 @@ classification_overrides = None
 locus_plot_mode = None
 reference_id_mode = None
 classifier_aliases = None
+compress_intermediates = True
 
 # (keep your existing globals below; I’m not repeating them all)
 
@@ -41,6 +42,7 @@ _RUNTIME_KEYS = [
     "cluster_scoring_initial_worker_cap","cluster_scoring_max_worker_cap",
     "plot_staging","plot_staging_mode","plot_staging_root",
     "legacy_classification","classification_overrides","locus_plot_mode",
+    "compress_intermediates",
 ]
 
 def _snapshot_path(run_dir_override: str | None = None) -> str:

@@ -19,7 +19,7 @@
 import sys, os, argparse, datetime, csv
 from collections import defaultdict
 
-REQUIRED_PHASIS_COLS = {"identifier","achr","start","end","alib"}
+REQUIRED_CALL_COLS = {"identifier","achr","start","end","alib"}
 
 def _read_tsv_header(path):
     with open(path, "r", newline="") as fh:
@@ -34,7 +34,7 @@ def parse_phasis_cals(path, one_based=True):
     if not header:
         raise ValueError("Empty or invalid Phasis cals file: %s" % path)
     cols = {name: idx for idx, name in enumerate(header)}
-    missing = REQUIRED_PHASIS_COLS - set(cols.keys())
+    missing = REQUIRED_CALL_COLS - set(cols.keys())
     if missing:
         raise ValueError("Missing required columns in phasis file: %s" % sorted(missing))
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 import phasis.runtime as rt
 import configparser
 import datetime
+import gzip
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -12,7 +13,10 @@ import shutil
 import time
 import re
 
+from phasis.env import getenv
+
 MEM_FILE_DEFAULT = "phasis.mem"
+COMPRESSED_ARTIFACT_SUFFIXES = (".gz",)
 
 
 def default_memfile_path(run_dir: str | None = None) -> str:
@@ -22,6 +26,113 @@ def default_memfile_path(run_dir: str | None = None) -> str:
         os.path.abspath(os.path.expanduser(str(base_dir))),
         MEM_FILE_DEFAULT,
     )
+
+
+def compressed_artifact_candidates(path: str) -> tuple[str, ...]:
+    """Return the canonical path plus supported compressed physical variants."""
+    p = str(path or "")
+    if not p:
+        return tuple()
+    if p.endswith(COMPRESSED_ARTIFACT_SUFFIXES):
+        return (p,)
+    return (p,) + tuple(f"{p}{suffix}" for suffix in COMPRESSED_ARTIFACT_SUFFIXES)
+
+
+def resolve_artifact_path(path: str) -> str | None:
+    """Resolve a logical artifact path to an existing physical path.
+
+    The uncompressed path is preferred for backward compatibility. If it is
+    absent, a supported compressed variant such as ``path + ".gz"`` is accepted.
+    """
+    for candidate in compressed_artifact_candidates(path):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def artifact_exists(path: str) -> bool:
+    """Return True when a logical path or supported compressed variant exists."""
+    return resolve_artifact_path(path) is not None
+
+
+def open_text_artifact(path: str, mode: str = "rt", **kwargs):
+    """Open a logical text artifact, resolving ``.gz`` on reads.
+
+    This is intentionally small and dependency-free. Writers only compress when
+    the caller explicitly passes a path ending in ``.gz``; default Phasis writes
+    remain unchanged.
+    """
+    if "r" in mode and all(flag not in mode for flag in ("w", "a", "x", "+")):
+        resolved = resolve_artifact_path(path)
+        if resolved is None:
+            raise FileNotFoundError(path)
+        path = resolved
+    if str(path).endswith(".gz"):
+        return gzip.open(path, mode, **kwargs)
+    return open(path, mode, **kwargs)
+
+
+def compress_intermediates_enabled(default: bool = True) -> bool:
+    """Return whether completed text intermediates should be gzipped.
+
+    Runtime configuration wins, with an environment override for batch systems
+    and smoke tests. Compression is enabled by default because large Phase II
+    TSV/TAB intermediates are often the dominant disk cost.
+    """
+    env = getenv("Phasis_COMPRESS_INTERMEDIATES")
+    if env is not None:
+        return str(env).strip().lower() not in {"0", "false", "no", "n", "off"}
+    return bool(getattr(rt, "compress_intermediates", default))
+
+
+def gzip_text_artifact(path: str) -> str:
+    """Atomically gzip a completed text artifact and remove the plain file.
+
+    Returns the physical artifact path. If the plain file is already absent but
+    ``path + ".gz"`` exists, the gzipped artifact is returned unchanged.
+    """
+    path = str(path or "")
+    if not path:
+        return path
+    if path.endswith(".gz"):
+        return path
+    gz_path = f"{path}.gz"
+    if not os.path.isfile(path):
+        return gz_path if os.path.isfile(gz_path) else path
+
+    tmp_path = f"{gz_path}.tmp"
+    try:
+        with open(path, "rb") as src, open(tmp_path, "wb") as raw_dst:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0) as dst:
+                shutil.copyfileobj(src, dst)
+        os.replace(tmp_path, gz_path)
+        os.remove(path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    return gz_path
+
+
+def finalize_text_artifact(
+    cache: "MemCache",
+    section: str,
+    outpath: str,
+    input_sig: str | None = None,
+    *,
+    compress: bool | None = None,
+) -> str:
+    """Optionally gzip a completed text artifact, then record it in cache.
+
+    Cache entries remain keyed by the logical uncompressed path. This preserves
+    existing stage names while allowing the physical file to be ``.gz``.
+    """
+    do_compress = compress_intermediates_enabled() if compress is None else bool(compress)
+    if do_compress:
+        gzip_text_artifact(outpath)
+    return cache.record(section, outpath, input_sig)
 
 
 # ---------------------------------------------------------------------------
@@ -72,12 +183,12 @@ class MemCache:
         return str(fp or "")
 
     def _dbg_enabled(self) -> bool:
-        v = str(os.environ.get("PHASIS_CACHE_DEBUG", "")).strip().lower()
+        v = str(getenv("Phasis_CACHE_DEBUG", "")).strip().lower()
         return v in {"1", "true", "yes", "y", "on"}
 
     def _dbg(self, msg: str) -> None:
         if self._dbg_enabled():
-            print(f"[PHASIS:CACHE] {msg}")
+            print(f"[Phasis:CACHE] {msg}")
 
     def hit(
         self,
@@ -91,11 +202,16 @@ class MemCache:
         if not outpath:
             self._dbg(f"MISS section={section} out=<empty> reason=empty_outpath")
             return False
-        if not os.path.isfile(outpath):
+        physical_outpath = resolve_artifact_path(outpath)
+        if not physical_outpath:
             self._dbg(f"MISS section={section} out={outpath} reason=missing_file")
             return False
-        cur_fp = self.fingerprint(outpath, wait_stable=wait_stable)
+        cur_fp = self.fingerprint(physical_outpath, wait_stable=wait_stable)
         prev_fp = self.get(section, outpath)
+        if not prev_fp and physical_outpath != outpath:
+            # Compatibility for callers that may have recorded the physical
+            # compressed path directly before the logical-path convention.
+            prev_fp = self.get(section, physical_outpath)
         if not prev_fp:
             self._dbg(f"MISS section={section} out={outpath} reason=not_registered")
             return False
@@ -111,6 +227,8 @@ class MemCache:
             self._dbg(f"HIT  section={section} out={outpath} mode=hash_only")
             return True
         prev_sig = self.get(section, sig_key(outpath))
+        if not prev_sig and physical_outpath != outpath:
+            prev_sig = self.get(section, sig_key(physical_outpath))
         if not prev_sig:
             self._dbg(f"MISS section={section} out={outpath} reason=signature_not_registered")
             return False
@@ -132,7 +250,8 @@ class MemCache:
         wait_stable: bool = True,
     ) -> str:
         self.ensure(section)
-        if not outpath or not os.path.isfile(outpath):
+        physical_outpath = resolve_artifact_path(outpath) if outpath else None
+        if not outpath or not physical_outpath:
             if not outpath:
                 self._dbg(f"RECORD_SKIP section={section} out=<empty> reason=empty_outpath")
             else:
@@ -140,9 +259,11 @@ class MemCache:
             return ""
         cur_fp = str(output_fp or "")
         if not cur_fp:
-            cur_fp = self.fingerprint(outpath, wait_stable=wait_stable)
+            cur_fp = self.fingerprint(physical_outpath, wait_stable=wait_stable)
         if cur_fp:
             self.set(section, outpath, cur_fp)
+            if physical_outpath != outpath:
+                self.set(section, f"{outpath}.artifact", physical_outpath)
         if input_sig is not None:
             self.set(section, sig_key(outpath), input_sig)
         self.flush()
@@ -351,7 +472,7 @@ def _prune_mem_to_sections(mem_file: str, keep_sections=INDEX_ONLY_MEM_SECTIONS)
 
 def cleanup(base_dir: str | None = None, patterns=None) -> None:
     """
-    Delete PHASIS intermediate files/directories under the run directory.
+    Delete Phasis intermediate files/directories under the run directory.
 
     Kept as a canonical helper outside legacy.py so the active pipeline can
     support standalone intermediate cleanup without routing logic through legacy.
@@ -370,7 +491,7 @@ def cleanup(base_dir: str | None = None, patterns=None) -> None:
 
 def cleanup_all(base_dir: str | None = None, patterns=None) -> None:
     """
-    Delete PHASIS intermediate files/directories plus index/ and phasis.mem,
+    Delete Phasis intermediate files/directories plus index/ and phasis.mem,
     while preserving results directories.
     """
     cleanup_patterns = list(patterns or CLEANUP_PATTERNS)
@@ -556,13 +677,14 @@ def compute_cache_signature(
 
     for f in (files or []):
         p = os.path.abspath(os.path.expanduser(str(f)))
-        if os.path.isfile(p):
+        physical_path = resolve_artifact_path(p)
+        if physical_path:
             try:
-                _, fp = getmd5(p)
+                _, fp = getmd5(physical_path)
             except Exception:
                 fp = ""
             try:
-                size = os.path.getsize(p)
+                size = os.path.getsize(physical_path)
             except Exception:
                 size = -1
             items.append(f"FILE	{p}	{fp}	{size}")
@@ -893,7 +1015,7 @@ def write_mem_basic(
     timestamp: str | None = None,
 ) -> None:
     """
-    Canonical writer for the PHASIS mem file.
+    Canonical writer for the Phasis mem file.
     """
     mem_dir = os.path.dirname(mem_file)
     if mem_dir:
@@ -926,6 +1048,13 @@ __all__ = [
     "CLEANUP_PATTERNS",
     "CLEANUP_REQUIRED_MARKERS",
     "CLEANUP_RUN_MARKERS",
+    "artifact_exists",
+    "compress_intermediates_enabled",
+    "compressed_artifact_candidates",
+    "finalize_text_artifact",
+    "gzip_text_artifact",
+    "open_text_artifact",
+    "resolve_artifact_path",
     "match_pattern",
     "detect_cleanup_run_dir",
     "cleanup",

@@ -1,6 +1,7 @@
-import os, multiprocessing, gc, traceback, sys, re
+import os, multiprocessing, gc, traceback, sys, re, tempfile
 from tqdm import tqdm
 import phasis.runtime as rt
+from phasis.env import getenv
 
 
 def _coerce_positive_int(value, default=None):
@@ -55,16 +56,64 @@ def _effective_visible_cpu_count(env=None):
 
 def _effective_start_method(start_method=None):
     if start_method is None:
-        start_method = getattr(rt, "mp_start_method", None) or os.environ.get("PHASIS_MP_START_METHOD")
+        start_method = getattr(rt, "mp_start_method", None) or getenv("Phasis_MP_START_METHOD")
     if start_method is None:
         start_method = "spawn" if sys.platform == "darwin" else "forkserver"
     return start_method
 
 
+def _disabled_env_value(value) -> bool:
+    return str(value or "").strip().lower() in {"0", "false", "no", "n", "off", "none", "disable", "disabled"}
+
+
+def _default_pycache_root(env=None) -> str:
+    env = os.environ if env is None else env
+    for key in ("SLURM_TMPDIR", "TMPDIR", "TMP", "TEMP"):
+        value = str(env.get(key) or "").strip()
+        if value:
+            return value
+    return tempfile.gettempdir()
+
+
+def _ensure_worker_pycache_prefix(env=None) -> str | None:
+    """Route worker bytecode caches away from shared source/install trees.
+
+    Forkserver/spawn workers start fresh Python interpreters and import Phasis
+    before worker initializers run. On shared filesystems, a truncated or
+    concurrently written ``.pyc`` can make those workers fail during import.
+    Setting ``PYTHONPYCACHEPREFIX`` before pool creation makes child
+    interpreters use a job-local cache prefix instead.
+    """
+    env = os.environ if env is None else env
+    configured = getenv("Phasis_PYCACHE_PREFIX", env=env)
+    if _disabled_env_value(configured):
+        return None
+
+    prefix = str(configured or env.get("PYTHONPYCACHEPREFIX") or "").strip()
+    if not prefix:
+        try:
+            user_token = str(os.getuid())
+        except Exception:
+            user_token = "user"
+        prefix = os.path.join(
+            _default_pycache_root(env=env),
+            f"phasis_pycache_{user_token}_{os.getpid()}",
+        )
+
+    try:
+        prefix = os.path.abspath(os.path.expanduser(prefix))
+        os.makedirs(prefix, exist_ok=True)
+        env["PYTHONPYCACHEPREFIX"] = prefix
+        sys.pycache_prefix = prefix
+        return prefix
+    except Exception:
+        return None
+
+
 def _resolve_lib_worker_cap(ncores_local: int) -> int:
     configured = _coerce_positive_int(
         getattr(rt, "parallel_lib_worker_cap", None),
-        _coerce_positive_int(os.environ.get("PHASIS_LIB_WORKER_CAP"), None),
+        _coerce_positive_int(getenv("Phasis_LIB_WORKER_CAP"), None),
     )
     if configured is None:
         configured = int(max(1, ncores_local))
@@ -92,7 +141,7 @@ def _resolve_maxtasksperchild(
 
     configured = _coerce_positive_int(
         getattr(rt, "parallel_maxtasksperchild", None),
-        _coerce_positive_int(os.environ.get("PHASIS_MAXTASKSPERCHILD"), None),
+        _coerce_positive_int(getenv("Phasis_MAXTASKSPERCHILD"), None),
     )
     if configured is not None:
         return configured
@@ -488,6 +537,7 @@ def make_pool(nworkers: int | None = None, *, processes: int | None = None, star
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    _ensure_worker_pycache_prefix()
 
     if processes is not None:
         nworkers = processes
@@ -530,7 +580,7 @@ def safe_worker(args):
 
 def coreReserve(cores):
     """
-    Decide how many CPU cores PHASIS should reserve for the active run.
+    Decide how many CPU cores Phasis should reserve for the active run.
 
     Kept as a canonical helper outside legacy.py so startup can reserve cores
     without routing the real logic through the compatibility layer.
