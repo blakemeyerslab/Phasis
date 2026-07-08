@@ -3730,6 +3730,9 @@ def summarize_relaxed_trace_subregions(
             overlapping_alt_groups,
             key=lambda item: float(item.get("peak_score", 0.0) or 0.0),
         )
+    best_overlap_shift_nt = (
+        None if best_overlap_group is None else best_overlap_group.get("shift_nt")
+    )
 
     return {
         "Howell_additional_peak_count": int(len(additional_region_scores)),
@@ -3741,7 +3744,7 @@ def summarize_relaxed_trace_subregions(
             np.nan if best_overlap_group is None else float(best_overlap_group.get("peak_score", 0.0) or 0.0)
         ),
         "Howell_overlapping_alt_best_shift_nt": (
-            np.nan if best_overlap_group is None else float(best_overlap_group.get("shift_nt"))
+            np.nan if best_overlap_shift_nt is None else float(best_overlap_shift_nt)
         ),
         "main_biogenesis_unit": main_unit,
         "additional_peak_groups": additional_peak_groups,
