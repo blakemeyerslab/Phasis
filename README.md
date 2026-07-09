@@ -171,10 +171,18 @@ The Register-Resolved Locus Interpretation Layer (RRL) evaluates the register-le
 
 Each diagnostic plot contains:
 
+- Title: library, genomic interval, and phase class for the plotted locus.
 - Top panel: abundance context, with sRNAs colored by size and separated by strand.
 - Bottom panel: Howell score/register context across candidate phased windows.
-- Phase-colored marks: reads assigned to the called phased register.
-- Register anchor: the highest phased-score position used to interpret the locus.
+- Phase-colored guides and halos: reads/windows assigned to the interpreted phased register.
+- Register anchor: the highest phasing score position used to interpret the locus.
+- Sidebar: compact register-resolved interpretation, including exact-only support, relaxed peak score, final class, opposite-strand partner status, coherent extension, and secondary phased-window summary.
+
+Example:
+
+![Example individual PHAS locus plot](docs/images/phas_locus_plot_example.png)
+
+In the example above, the blue region is the main phased unit. Diamonds in the abundance context are mapped sRNAs; fill distinguishes uni-mapper and multi-mapper reads, while color indicates sRNA length. The phase-colored halo marks reads assigned to the called phased register. In the score context, each point summarizes a scored window anchored at one mapped phase-length sRNA. The red point marks the highest phasing score position / register anchor (HPSP), hollow gray points are scored nearby windows that were not promoted, and rose-colored windows are promoted secondary phased windows shown separately from the main register.
 
 These plots are intended for manual inspection of candidate architecture, opposite-strand partner support, and secondary or overlapping phased windows.
 
