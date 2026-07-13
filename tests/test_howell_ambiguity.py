@@ -1271,8 +1271,8 @@ class HowellAmbiguityOutputTests(unittest.TestCase):
                                     job_phase=21,
                                 )
 
-            all_path = os.path.join(outdir, "21_KNN_all_clusters.tsv")
-            calls_path = os.path.join(outdir, "21_KNN_calls.tsv")
+            all_path = os.path.join(outdir, "21_all_clusters.tsv")
+            calls_path = os.path.join(outdir, "21_calls.tsv")
             self.assertTrue(os.path.isfile(all_path))
             self.assertTrue(os.path.isfile(calls_path))
 

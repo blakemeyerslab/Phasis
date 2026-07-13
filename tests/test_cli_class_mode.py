@@ -39,13 +39,15 @@ class CliReferenceIdModeTests(unittest.TestCase):
     def test_classifier_defaults_to_gmm(self):
         parser = cli.build_parser()
         args = parser.parse_args([])
-        cli._validate_args(args)
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            cli._validate_args(args)
 
         self.assertEqual(args.classifier, "GMM")
-        self.assertEqual(args.classifier_aliases, ["GMM"])
         self.assertEqual(args.requested_classifier, "GMM")
+        self.assertEqual(captured.getvalue(), "")
 
-    def test_legacy_knn_classifier_is_accepted_as_alias_only(self):
+    def test_legacy_knn_classifier_is_accepted_but_ignored(self):
         parser = cli.build_parser()
         args = parser.parse_args(["-classifier", "KNN"])
 
@@ -54,8 +56,18 @@ class CliReferenceIdModeTests(unittest.TestCase):
             cli._validate_args(args)
 
         self.assertEqual(args.classifier, "GMM")
-        self.assertEqual(args.classifier_aliases, ["GMM", "KNN"])
         self.assertEqual(args.requested_classifier, "KNN")
+        self.assertIn("deprecated and ignored", captured.getvalue())
+
+    def test_explicit_gmm_classifier_is_also_deprecated(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["-classifier", "GMM"])
+
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            cli._validate_args(args)
+
+        self.assertEqual(args.classifier, "GMM")
         self.assertIn("deprecated and ignored", captured.getvalue())
 
     def test_invalid_classifier_still_errors(self):

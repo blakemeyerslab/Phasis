@@ -167,65 +167,6 @@ def _join_outdir(dirpath: str | None, name: str) -> str:
     return dirpath + name if dirpath.endswith("/") else dirpath + "/" + name
 
 
-def _classifier_output_aliases(method_name: str | None = None) -> list[str]:
-    aliases = []
-    runtime_aliases = getattr(rt, "classifier_aliases", None) or []
-    for alias in runtime_aliases:
-        text = str(alias or "").strip().upper()
-        if text and text not in aliases:
-            aliases.append(text)
-    text = str(method_name or "").strip().upper()
-    if text and text not in aliases:
-        aliases.append(text)
-    return aliases
-
-
-def _copy_file_alias(primary_path: str, alias_path: str) -> None:
-    if not primary_path or not alias_path:
-        return
-    if os.path.abspath(primary_path) == os.path.abspath(alias_path):
-        return
-    if not os.path.exists(primary_path):
-        return
-    parent = os.path.dirname(alias_path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    if os.path.lexists(alias_path):
-        if os.path.isdir(alias_path) and not os.path.islink(alias_path):
-            shutil.rmtree(alias_path)
-        else:
-            os.unlink(alias_path)
-    shutil.copy2(primary_path, alias_path)
-
-
-def _copy_file_aliases(primary_path: str, alias_paths: list[str]) -> None:
-    for alias_path in alias_paths:
-        _copy_file_alias(primary_path, alias_path)
-
-
-def _copy_dir_alias(primary_dir: str, alias_dir: str) -> None:
-    if not primary_dir or not alias_dir:
-        return
-    if os.path.abspath(primary_dir) == os.path.abspath(alias_dir):
-        return
-    if not os.path.isdir(primary_dir):
-        return
-    parent = os.path.dirname(alias_dir)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    if os.path.lexists(alias_dir):
-        if os.path.isdir(alias_dir) and not os.path.islink(alias_dir):
-            shutil.rmtree(alias_dir)
-        else:
-            os.unlink(alias_dir)
-    shutil.copytree(primary_dir, alias_dir)
-
-
-def _copy_dir_aliases(primary_dir: str, alias_dirs: list[str]) -> None:
-    for alias_dir in alias_dirs:
-        _copy_dir_alias(primary_dir, alias_dir)
-
-
 def _sanitize_plot_name(text: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text).strip())
     clean = re.sub(r"_+", "_", clean).strip("._")
@@ -2958,37 +2899,71 @@ def _raise_parallel_failures(results, *, stage_name: str) -> None:
 
 
 def _plot_bucket_specs(phase_value: int, method_name: str) -> list[dict]:
-    aliases = _classifier_output_aliases(method_name)
+    """Return canonical output locations for each final call class.
+
+    ``method_name`` is retained for pipeline-facing compatibility but no longer
+    affects output paths: classifier aliases are not output formats.
+    """
+    _ = method_name
+    phas_like_dir = f"{phase_value}_PHAS_like"
     return [
         {
             "final_class": "PHAS",
             "display_class": "PHAS",
             "plot_dir": f"{phase_value}_PHAS_locus_plots",
-            "plot_dir_aliases": [
-                f"{phase_value}_{alias}_PHAS_locus_plots"
-                for alias in aliases
-            ],
             "export_name": f"{phase_value}_phasiRNAs.tsv",
-            "export_aliases": [
-                f"{phase_value}_{alias}_phasiRNAs.tsv"
-                for alias in aliases
-            ],
         },
         {
             "final_class": "PHAS-like",
             "display_class": "PHAS-like",
-            "plot_dir": f"{phase_value}_PHAS_like_locus_plots",
-            "plot_dir_aliases": [
-                f"{phase_value}_{alias}_PHAS_like_locus_plots"
-                for alias in aliases
-            ],
-            "export_name": f"{phase_value}_PHAS_like_phasiRNAs.tsv",
-            "export_aliases": [
-                f"{phase_value}_{alias}_PHAS_like_phasiRNAs.tsv"
-                for alias in aliases
-            ],
+            "plot_dir": os.path.join(phas_like_dir, "locus_plots"),
+            "export_name": os.path.join(
+                phas_like_dir,
+                f"{phase_value}_PHAS_like_phasiRNAs.tsv",
+            ),
         },
     ]
+
+
+def _select_plot_calls(bucket_calls: pd.DataFrame) -> pd.DataFrame:
+    """Choose one deterministic plot/export source per library and locus.
+
+    The output filename intentionally represents a library/locus pair rather
+    than an individual candidate cluster.  Ranking resolves repeated final
+    calls before any expensive analysis or rendering is scheduled.
+    """
+    if bucket_calls.empty:
+        return bucket_calls
+
+    ranked = bucket_calls.copy()
+    ranking_columns = [
+        "Howell_exact_support_score",
+        "Peak_Howell_score",
+        "phasis_score",
+    ]
+    for column in ranking_columns:
+        ranked[f"__plot_rank_{column}"] = pd.to_numeric(
+            ranked.get(column, pd.Series(np.nan, index=ranked.index)),
+            errors="coerce",
+        ).fillna(float("-inf"))
+    ranked["__plot_rank_cid"] = ranked["cID"].astype(str)
+
+    ranked = ranked.sort_values(
+        [
+            "identifier",
+            "alib",
+            "__plot_rank_Howell_exact_support_score",
+            "__plot_rank_Peak_Howell_score",
+            "__plot_rank_phasis_score",
+            "__plot_rank_cid",
+        ],
+        ascending=[True, True, False, False, False, True],
+        kind="mergesort",
+    )
+    selected = ranked.drop_duplicates(subset=["identifier", "alib"], keep="first")
+    return selected.drop(
+        columns=[column for column in selected.columns if column.startswith("__plot_rank_")]
+    ).reset_index(drop=True)
 
 
 def _format_locus_title(alib_value: str, identifier_value: str, phase_value: int, display_class: str) -> str:
@@ -3011,15 +2986,8 @@ def write_individual_phas_locus_plots(
     if not final_class_series.isin(["PHAS", "PHAS-like"]).any():
         for spec in bucket_specs:
             shutil.rmtree(_join_outdir(job_outdir, spec["plot_dir"]), ignore_errors=True)
-            for alias_dir in spec.get("plot_dir_aliases", []):
-                shutil.rmtree(_join_outdir(job_outdir, alias_dir), ignore_errors=True)
             export_path = _join_outdir(job_outdir, spec["export_name"])
-            export_alias_paths = [
-                _join_outdir(job_outdir, alias_name)
-                for alias_name in spec.get("export_aliases", [])
-            ]
             _write_phasirna_export(export_path, [])
-            _copy_file_aliases(export_path, export_alias_paths)
             print(f"[INFO] Wrote 0 phase-length in-register phasiRNA row(s) to {export_path}")
         print("[INFO] No PHAS or PHAS-like calls were detected; skipping individual locus plots.")
         return
@@ -3048,26 +3016,15 @@ def write_individual_phas_locus_plots(
 
     for spec in bucket_specs:
         final_plot_dir = _join_outdir(job_outdir, spec["plot_dir"])
-        final_plot_dir_aliases = [
-            _join_outdir(job_outdir, alias_dir)
-            for alias_dir in spec.get("plot_dir_aliases", [])
-        ]
         phasirna_out = _join_outdir(job_outdir, spec["export_name"])
-        phasirna_alias_paths = [
-            _join_outdir(job_outdir, alias_name)
-            for alias_name in spec.get("export_aliases", [])
-        ]
         bucket_calls = labeled_features.loc[final_class_series == spec["final_class"]].copy()
         if bucket_calls.empty:
             shutil.rmtree(final_plot_dir, ignore_errors=True)
-            for alias_dir in final_plot_dir_aliases:
-                shutil.rmtree(alias_dir, ignore_errors=True)
             _write_phasirna_export(phasirna_out, [])
-            _copy_file_aliases(phasirna_out, phasirna_alias_paths)
             print(f"[INFO] Wrote 0 phase-length in-register phasiRNA row(s) to {phasirna_out}")
             continue
 
-        bucket_calls = bucket_calls.drop_duplicates(subset=call_cols, keep="first").reset_index(drop=True)
+        bucket_calls = _select_plot_calls(bucket_calls)
         raw_tasks = []
         for row in bucket_calls.itertuples(index=False):
             identifier_value = str(getattr(row, "identifier")).strip()
@@ -3122,10 +3079,7 @@ def write_individual_phas_locus_plots(
 
         if not raw_tasks:
             shutil.rmtree(final_plot_dir, ignore_errors=True)
-            for alias_dir in final_plot_dir_aliases:
-                shutil.rmtree(alias_dir, ignore_errors=True)
             _write_phasirna_export(phasirna_out, [])
-            _copy_file_aliases(phasirna_out, phasirna_alias_paths)
             print(f"[INFO] Wrote 0 phase-length in-register phasiRNA row(s) to {phasirna_out}")
             continue
 
@@ -3171,7 +3125,6 @@ def write_individual_phas_locus_plots(
             export_rows.extend(res.get("phasiRNA_rows", []) or [])
 
         export_count = _write_phasirna_export(phasirna_out, export_rows)
-        _copy_file_aliases(phasirna_out, phasirna_alias_paths)
         print(f"[INFO] Wrote {export_count} phase-length in-register phasiRNA row(s) to {phasirna_out}")
 
         render_worker_cap = _resolve_locus_plot_worker_cap(
@@ -3196,7 +3149,6 @@ def write_individual_phas_locus_plots(
 
             if activated_plan["mode"] == "local":
                 _finalize_staged_plot_dir(activated_plan["plot_dir"], activated_plan["final_plot_dir"])
-            _copy_dir_aliases(activated_plan["final_plot_dir"], final_plot_dir_aliases)
         finally:
             if activated_plan.get("staging_run_dir"):
                 shutil.rmtree(activated_plan["staging_run_dir"], ignore_errors=True)

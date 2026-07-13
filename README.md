@@ -162,10 +162,11 @@ For each phase, Phasis writes the main outputs to `--outdir`.
 | `{phase}_Howell_scores.pdf` | Heatmaps of Peak Howell score and strict Peak Howell score. |
 | `{phase}_PHAS_locus_plots/` | Per-locus diagnostic plots showing abundance context and score/register context. |
 | `{phase}_phasiRNAs.tsv` | Per-locus phased-register phasiRNA table for final *PHAS* loci. |
+| `{phase}_PHAS_like/` | Self-contained *PHAS*-like calls, evidence, GFF, phasiRNAs, and diagnostic locus plots. |
 
 ### What is *PHAS*-like?
 
-The Register-Resolved Locus Interpretation Layer (RRL) evaluates the register-level evidence after candidate detection. High-confidence *PHAS* calls require sufficient exact-register support. Candidates with a visible phased structure but weaker exact-register support are retained as *PHAS*-like in `{phase}_classification_evidence.tsv`; they are not merged into the high-confidence `{phase}_calls.tsv` table.
+The Register-Resolved Locus Interpretation Layer (RRL) evaluates the register-level evidence after candidate detection. High-confidence *PHAS* calls require sufficient exact-register support. Candidates with a visible phased structure but weaker exact-register support are retained as *PHAS*-like; they are not merged into the high-confidence `{phase}_calls.tsv` table. Their filtered calls, evidence, `{phase}-PHAS-like` GFF, in-register phasiRNAs, and diagnostic plots are collected in `{phase}_PHAS_like/` for focused follow-up analysis.
 
 ### Individual locus plots
 
@@ -218,6 +219,7 @@ If `-class_cluster_files` is omitted, Phasis tries to infer the expected cluster
 | `-max_complexity` | Maximum complexity filter. |
 | `-mismat` | Post-alignment mismatch filter while parsing alignments. |
 | `-min_Howell_score` | Minimum Howell score used during classification/output filtering. |
+| `-classifier` | Deprecated compatibility flag: `KNN` and `GMM` are accepted but ignored; Phasis always uses its GMM classifier and output names remain canonical. |
 | `--pool_libraries` | Pool all input libraries into one virtual library before candidate detection. |
 | `--no_compress_intermediates` | Keep completed Phase II intermediate TSV/TAB files uncompressed. |
 | `--outdir` | Final output directory; supports `{phase}` in the name. |
