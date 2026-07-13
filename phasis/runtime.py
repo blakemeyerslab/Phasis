@@ -25,7 +25,6 @@ legacy_classification = None
 classification_overrides = None
 locus_plot_mode = None
 reference_id_mode = None
-classifier_aliases = None
 compress_intermediates = True
 
 # (keep your existing globals below; I’m not repeating them all)
@@ -36,7 +35,7 @@ RUNTIME_SNAPSHOT_NAME = ".phasis.runtime.json"
 _RUNTIME_KEYS = [
     "libs","reference","norm","norm_factor","maxhits","runtype","reference_id_mode","mindepth","uniqueRatioCut","mismat",
     "libformat","phase","phase2","phaseLen","clustbuffer","phasisScoreCutoff","minClusterLength","window_len","sliding",
-    "cores","classifier","classifier_aliases","steps","class_cluster_file","max_complexity","min_Howell_score","concat_libs",
+    "cores","classifier","steps","class_cluster_file","max_complexity","min_Howell_score","concat_libs",
     "outdir","run_dir","memFile","clusters_scored_tsv","cleanup","cleanup_all",
     "cluster_build_initial_worker_cap","cluster_build_max_worker_cap",
     "cluster_scoring_initial_worker_cap","cluster_scoring_max_worker_cap",

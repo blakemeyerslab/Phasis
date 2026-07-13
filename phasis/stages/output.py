@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 from multiprocessing import cpu_count
 from typing import Any
 
@@ -47,43 +46,8 @@ def _join_outdir(dirpath: str | None, name: str) -> str:
     return dirpath + name if dirpath.endswith("/") else dirpath + "/" + name
 
 
-def _classifier_output_aliases(method_name: str | None = None) -> list[str]:
-    aliases = []
-    runtime_aliases = getattr(rt, "classifier_aliases", None) or []
-    for alias in runtime_aliases:
-        text = str(alias or "").strip().upper()
-        if text and text not in aliases:
-            aliases.append(text)
-    text = str(method_name or "").strip().upper()
-    if text and text not in aliases:
-        aliases.append(text)
-    return aliases
-
-
-def _copy_file_alias(primary_path: str, alias_path: str) -> None:
-    if not primary_path or not alias_path or os.path.abspath(primary_path) == os.path.abspath(alias_path):
-        return
-    if not os.path.exists(primary_path):
-        return
-    parent = os.path.dirname(alias_path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    if os.path.lexists(alias_path):
-        if os.path.isdir(alias_path) and not os.path.islink(alias_path):
-            shutil.rmtree(alias_path)
-        else:
-            os.unlink(alias_path)
-    shutil.copy2(primary_path, alias_path)
-
-
-def _copy_file_aliases(primary_path: str, alias_paths: list[str]) -> None:
-    for alias_path in alias_paths:
-        _copy_file_alias(primary_path, alias_path)
-
-
-def _savefig_with_aliases(fig, primary_path: str, alias_paths: list[str], **kwargs) -> None:
-    fig.savefig(primary_path, **kwargs)
-    _copy_file_aliases(primary_path, alias_paths)
+def _savefig(fig, output_path: str, **kwargs) -> None:
+    fig.savefig(output_path, **kwargs)
 
 
 def _fallback_series(nrows: int) -> pd.Series:
@@ -298,7 +262,7 @@ def format_attributes(row):
     return attr_str
 
 
-def write_gff(phasis_result_df,gff_filename):
+def write_gff(phasis_result_df, gff_filename, *, feature_type: str | None = None):
     unique_df = phasis_result_df.groupby('identifier').first().reset_index()
     # Write to GFF3 file
     
@@ -306,14 +270,14 @@ def write_gff(phasis_result_df,gff_filename):
         for index, row in unique_df.iterrows():
             seq_id = row['achr']
             source = 'Phasis'
-            feature_type = f'{phase}-PHAS'
+            row_feature_type = feature_type or f'{phase}-PHAS'
             start_pos = str(row['start'])
             end_pos = str(row['end'])
             score = str(row['phasis_score'])
             strand = '.'
             t_phase = '.'
             attributes = format_attributes(row)
-            gff_line = f"{seq_id}\t{source}\t{feature_type}\t{start_pos}\t{end_pos}\t{score}\t{strand}\t{t_phase}\t{attributes}\n"
+            gff_line = f"{seq_id}\t{source}\t{row_feature_type}\t{start_pos}\t{end_pos}\t{score}\t{strand}\t{t_phase}\t{attributes}\n"
             gff_file.write(gff_line)
 
     return None
@@ -328,11 +292,11 @@ def _filter_plot_df(phasis_result_df):
     return df
 
 
-def _empty_plot_placeholder(outfile, message, alias_paths: list[str] | None = None):
+def _empty_plot_placeholder(outfile, message):
     f, ax = plt.subplots(figsize=(6, 2))
     ax.axis("off")
     ax.text(0.01, 0.5, _format_phas_plot_text(message), fontsize=12)
-    _savefig_with_aliases(f, outfile, alias_paths or [], dpi=300)
+    _savefig(f, outfile, dpi=300)
     plt.close(f)
     return None
 
@@ -515,14 +479,10 @@ def plot_howell_score_heat_maps(phasis_result_df, plot_type):
     global outdir, phase
 
     outfile = _join_outdir(outdir, f"{phase}_Howell_scores.pdf")
-    alias_paths = [
-        _join_outdir(outdir, f"{alias}_{phase}_Howell_scores.pdf")
-        for alias in _classifier_output_aliases(plot_type)
-    ]
     df = _filter_plot_df(phasis_result_df)
 
     if df.empty:
-        return _empty_plot_placeholder(outfile, f"No {phase}-PHAS loci detected.", alias_paths)
+        return _empty_plot_placeholder(outfile, f"No {phase}-PHAS loci detected.")
 
     data_howell, phas_mask, chrom_data, unique_chromosomes = _build_score_heatmap_data(df, "Peak_Howell_score")
     data_howell_strict, phas_mask_strict, _, _ = _build_score_heatmap_data(df, "Peak_Howell_score_strict")
@@ -557,7 +517,7 @@ def plot_howell_score_heat_maps(phasis_result_df, plot_type):
 
     _add_score_colorbar(fig, axes[0], purple_cmap, norm_howell, max_howell, "Peak Howell score", side="left")
     _add_score_colorbar(fig, axes[1], teal_cmap, norm_howell_strict, max_howell_strict, "Peak Howell score (strict)", side="left")
-    _savefig_with_aliases(fig, outfile, alias_paths, dpi=300)
+    _savefig(fig, outfile, dpi=300)
     plt.close(fig)
     return None
 
@@ -581,11 +541,7 @@ def plot_report_heat_map(phasis_result_df, plot_type):
             ax.axis("off")
             ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
             primary_path = _join_outdir(outdir, f"{phase}_PHAS.pdf")
-            alias_paths = [
-                _join_outdir(outdir, f"{phase}_{alias}_PHAS.pdf")
-                for alias in _classifier_output_aliases(plot_type)
-            ]
-            _savefig_with_aliases(f, primary_path, alias_paths, dpi=300)
+            _savefig(f, primary_path, dpi=300)
             plt.close(f)
             return
 
@@ -698,11 +654,7 @@ def plot_report_heat_map(phasis_result_df, plot_type):
 
     fig = heat.get_figure()
     primary_path = _join_outdir(outdir, f"{phase}_PHAS.pdf")
-    alias_paths = [
-        _join_outdir(outdir, f"{phase}_{alias}_PHAS.pdf")
-        for alias in _classifier_output_aliases(plot_type)
-    ]
-    _savefig_with_aliases(fig, primary_path, alias_paths, dpi=300)
+    _savefig(fig, primary_path, dpi=300)
     plt.close(fig)
     return
 
@@ -725,11 +677,7 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
             ax.axis("off")
             ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
             primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS.pdf")
-            alias_paths = [
-                _join_outdir(outdir, f"{alias}_{phase}_Abundance_PHAS.pdf")
-                for alias in _classifier_output_aliases(plot_type)
-            ]
-            _savefig_with_aliases(f, primary_path, alias_paths, dpi=300)
+            _savefig(f, primary_path, dpi=300)
             plt.close(f)
             return None
 
@@ -822,11 +770,7 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
 
     fig = heat.get_figure()
     primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS.pdf")
-    alias_paths = [
-        _join_outdir(outdir, f"{alias}_{phase}_Abundance_PHAS.pdf")
-        for alias in _classifier_output_aliases(plot_type)
-    ]
-    _savefig_with_aliases(fig, primary_path, alias_paths, dpi=300)
+    _savefig(fig, primary_path, dpi=300)
     plt.close(fig)
     return None
 
@@ -849,11 +793,7 @@ def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
             ax.axis("off")
             ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
             primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS_and_nonPHAS.pdf")
-            alias_paths = [
-                _join_outdir(outdir, f"{alias}_{phase}_Abundance_PHAS_and_nonPHAS.pdf")
-                for alias in _classifier_output_aliases(plot_type)
-            ]
-            _savefig_with_aliases(f, primary_path, alias_paths, dpi=300)
+            _savefig(f, primary_path, dpi=300)
             plt.close(f)
             return None
 
@@ -955,11 +895,7 @@ def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
 
     fig = ax.get_figure()
     primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS_and_nonPHAS.pdf")
-    alias_paths = [
-        _join_outdir(outdir, f"{alias}_{phase}_Abundance_PHAS_and_nonPHAS.pdf")
-        for alias in _classifier_output_aliases(plot_type)
-    ]
-    _savefig_with_aliases(fig, primary_path, alias_paths, dpi=300)
+    _savefig(fig, primary_path, dpi=300)
     plt.close(fig)
     return None
 
@@ -1092,28 +1028,25 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         'Peak_Howell_score_strict': features.get('Peak_Howell_score_strict', _fallback_series(nrows)),
     })
 
-    # Standardized filenames
-    all_out   = _join_outdir(outdir, f"{phase}_all_clusters.tsv")
+    # Canonical root-level outputs for high-confidence PHAS calls.
+    all_out = _join_outdir(outdir, f"{phase}_all_clusters.tsv")
     calls_out = _join_outdir(outdir, f"{phase}_calls.tsv")
-    gff_out   = _join_outdir(outdir, f"{phase}_PHAS.gff")
+    gff_out = _join_outdir(outdir, f"{phase}_PHAS.gff")
     evidence_out = _join_outdir(outdir, f"{phase}_classification_evidence.tsv")
-    classifier_aliases = _classifier_output_aliases(method_name)
-    all_alias_paths = [
-        _join_outdir(outdir, f"{phase}_{alias}_all_clusters.tsv")
-        for alias in classifier_aliases
-    ]
-    calls_alias_paths = [
-        _join_outdir(outdir, f"{phase}_{alias}_calls.tsv")
-        for alias in classifier_aliases
-    ]
-    evidence_alias_paths = [
-        _join_outdir(outdir, f"{phase}_{alias}_classification_evidence.tsv")
-        for alias in classifier_aliases
-    ]
+
+    # Keep PHAS-like material together so it can be reviewed independently.
+    phas_like_dir = _join_outdir(outdir, f"{phase}_PHAS_like")
+    os.makedirs(phas_like_dir, exist_ok=True)
+    os.makedirs(os.path.join(phas_like_dir, "locus_plots"), exist_ok=True)
+    phas_like_calls_out = os.path.join(phas_like_dir, f"{phase}_PHAS_like_calls.tsv")
+    phas_like_gff_out = os.path.join(phas_like_dir, f"{phase}_PHAS_like.gff")
+    phas_like_evidence_out = os.path.join(
+        phas_like_dir,
+        f"{phase}_PHAS_like_classification_evidence.tsv",
+    )
  
     # Write all clusters with labels
     all_df.to_csv(all_out, sep="\t", index=False)
-    _copy_file_aliases(all_out, all_alias_paths)
 
     evidence_df = pd.DataFrame({
         "identifier": features["identifier"],
@@ -1143,14 +1076,20 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         "override_note": features.get("override_note", _fallback_text_series(nrows)),
     })
     evidence_df.to_csv(evidence_out, sep="\t", index=False)
-    _copy_file_aliases(evidence_out, evidence_alias_paths)
 
     final_class_series = features.get("final_class", features["label"]).astype(str)
     phas_mask = final_class_series == "PHAS"
+    phas_like_mask = final_class_series == "PHAS-like"
     phas_df = all_df.loc[phas_mask].copy()
+    phas_like_df = all_df.loc[phas_like_mask].copy()
 
-    # Write GFF
-    write_gff(phas_df,gff_out)
+    # Write class-specific GFFs. Empty dataframes intentionally produce empty files.
+    write_gff(phas_df, gff_out)
+    write_gff(
+        phas_like_df,
+        phas_like_gff_out,
+        feature_type=f"{phase}-PHAS-like",
+    )
 
     # ---- Compact calls table (same as before + Peak_Howell_score_strict) ----
     calls_cols = [
@@ -1166,13 +1105,17 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         'Howell_overlapping_alt_best_shift_nt',
         'Howell_exact_relaxed_ratio', 'Howell_strict_relaxed_ratio',
     ]
-    # Ensure missing columns are created as NaN so write doesn't fail
-    for col in calls_cols:
-        if col not in phas_df.columns:
-            phas_df[col] = np.nan
+    # Ensure missing columns are created as NaN so write doesn't fail.
+    for call_df in (phas_df, phas_like_df):
+        for col in calls_cols:
+            if col not in call_df.columns:
+                call_df[col] = np.nan
+
     compact_calls = phas_df[calls_cols].copy()
+    phas_like_compact_calls = phas_like_df[calls_cols].copy()
     compact_calls.to_csv(calls_out, sep="\t", index=False)
-    _copy_file_aliases(calls_out, calls_alias_paths)
+    phas_like_compact_calls.to_csv(phas_like_calls_out, sep="\t", index=False)
+    evidence_df.loc[phas_like_mask].to_csv(phas_like_evidence_out, sep="\t", index=False)
 
     # --- Run the 4 plots in parallel (each on a core) ---
     plot_jobs = [
@@ -1192,5 +1135,8 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
         raise
     _print_final_detection_summary(
         phas_df,
-        wrote_line=f"  - Wrote: {all_out}, {calls_out}, {evidence_out}, and {gff_out}",
+        wrote_line=(
+            f"  - Wrote: {all_out}, {calls_out}, {evidence_out}, {gff_out}, "
+            f"and PHAS-like analysis bundle {phas_like_dir}"
+        ),
     )

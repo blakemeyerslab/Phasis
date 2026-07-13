@@ -350,9 +350,20 @@ class EvidenceOutputTests(unittest.TestCase):
                                     job_phase=24,
                                 )
 
-            all_df = pd.read_csv(os.path.join(outdir, "24_KNN_all_clusters.tsv"), sep="\t")
-            calls_df = pd.read_csv(os.path.join(outdir, "24_KNN_calls.tsv"), sep="\t")
-            evidence_df = pd.read_csv(os.path.join(outdir, "24_KNN_classification_evidence.tsv"), sep="\t")
+            all_df = pd.read_csv(os.path.join(outdir, "24_all_clusters.tsv"), sep="\t")
+            calls_df = pd.read_csv(os.path.join(outdir, "24_calls.tsv"), sep="\t")
+            evidence_df = pd.read_csv(os.path.join(outdir, "24_classification_evidence.tsv"), sep="\t")
+            phas_like_dir = os.path.join(outdir, "24_PHAS_like")
+            phas_like_calls = pd.read_csv(
+                os.path.join(phas_like_dir, "24_PHAS_like_calls.tsv"),
+                sep="\t",
+            )
+            phas_like_evidence = pd.read_csv(
+                os.path.join(phas_like_dir, "24_PHAS_like_classification_evidence.tsv"),
+                sep="\t",
+            )
+            with open(os.path.join(phas_like_dir, "24_PHAS_like.gff"), encoding="utf-8") as handle:
+                phas_like_gff = handle.read()
 
             self.assertEqual(sorted(all_df["label"].unique().tolist()), ["PHAS", "non-PHAS"])
             self.assertEqual(calls_df["identifier"].tolist(), ["chr1:100..400"])
@@ -364,6 +375,53 @@ class EvidenceOutputTests(unittest.TestCase):
             self.assertEqual(int(row["Howell_crowding_window_count"]), 7)
             self.assertIn("Howell_exact_relaxed_ratio", evidence_df.columns)
             self.assertIn("Howell_strict_relaxed_ratio", evidence_df.columns)
+            self.assertEqual(phas_like_calls["identifier"].tolist(), ["chr2:500..900"])
+            self.assertEqual(phas_like_evidence["final_class"].tolist(), ["PHAS-like"])
+            self.assertIn("24-PHAS-like", phas_like_gff)
+            self.assertFalse(
+                any(
+                    "GMM" in name or "KNN" in name
+                    for _root, _dirs, files in os.walk(outdir)
+                    for name in files
+                )
+            )
+
+    def test_finalize_creates_empty_phas_like_bundle(self):
+        features = classify.apply_evidence_classification(
+            pd.DataFrame([_base_feature_row()]),
+            phase=24,
+        )
+
+        with tempfile.TemporaryDirectory() as outdir:
+            with mock.patch.object(output, "make_pool", return_value=_DummyPool()):
+                with mock.patch.object(output, "plot_report_heat_map", return_value=None):
+                    with mock.patch.object(output, "plot_phasAbundance_heat_map", return_value=None):
+                        with mock.patch.object(output, "plot_totalAbundance_heat_map", return_value=None):
+                            with mock.patch.object(output, "plot_howell_score_heat_maps", return_value=None):
+                                output.finalize_and_write_results(
+                                    "GMM",
+                                    features,
+                                    job_outdir=outdir,
+                                    job_phase=24,
+                                )
+
+            bundle = os.path.join(outdir, "24_PHAS_like")
+            self.assertTrue(os.path.isdir(bundle))
+            self.assertTrue(os.path.isdir(os.path.join(bundle, "locus_plots")))
+            self.assertEqual(
+                len(pd.read_csv(os.path.join(bundle, "24_PHAS_like_calls.tsv"), sep="\t")),
+                0,
+            )
+            self.assertEqual(
+                len(
+                    pd.read_csv(
+                        os.path.join(bundle, "24_PHAS_like_classification_evidence.tsv"),
+                        sep="\t",
+                    )
+                ),
+                0,
+            )
+            self.assertEqual(os.path.getsize(os.path.join(bundle, "24_PHAS_like.gff")), 0)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,6 @@ class Phase2Config:
 
     # classification
     classifier: str = ""
-    classifier_aliases: Any = None
     phasisScoreCutoff: float = 0.0
     min_Howell_score: float = 0.0
     max_complexity: float = 1.0
@@ -53,7 +52,6 @@ class Phase2Config:
             sliding=int(getattr(rt, "sliding", 0) or 0),
             minClusterLength=int(getattr(rt, "minClusterLength", 0) or 0),
             classifier=str(getattr(rt, "classifier", "")),
-            classifier_aliases=getattr(rt, "classifier_aliases", None),
             phasisScoreCutoff=float(getattr(rt, "phasisScoreCutoff", 0.0) or 0.0),
             min_Howell_score=float(getattr(rt, "min_Howell_score", 0.0) or 0.0),
             max_complexity=float(getattr(rt, "max_complexity", 1.0) or 1.0),

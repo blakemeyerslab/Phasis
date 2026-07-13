@@ -68,11 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Normalization factor (default 1e7)")
     parser.add_argument(
         "-classifier",
-        default="GMM",
+        default=None,
         type=str,
         help=(
-            "Deprecated compatibility option. Phasis now always uses GMM; "
-            "KNN is accepted for older scripts but ignored [default GMM]"
+            "Deprecated compatibility option. KNN and GMM are accepted for "
+            "older scripts but ignored; Phasis always uses GMM internally"
         ),
     )
     cleanup_group = parser.add_mutually_exclusive_group()
@@ -179,14 +179,6 @@ def _normalize_outdir(outdir: str, phase: int) -> str:
 def _validate_args(args: argparse.Namespace) -> None:
     requested_classifier = str(args.classifier or "GMM").upper()
     args.requested_classifier = requested_classifier
-    args.classifier_aliases = ["GMM"]
-    if requested_classifier == "KNN":
-        print(
-            "WARNING: -classifier KNN is deprecated and ignored; "
-            "Phasis now uses GMM classification."
-        )
-        args.classifier_aliases.append("KNN")
-    args.classifier = "GMM"
     args.libformat = str(args.libformat).upper()
     args.runtype = str(args.runtype).upper()
     args.steps = str(args.steps).lower()
@@ -194,6 +186,13 @@ def _validate_args(args: argparse.Namespace) -> None:
     if requested_classifier not in ("KNN", "GMM"):
         print("\nERROR: Wrong classifier option (legacy accepted values: KNN or GMM)\n")
         raise SystemExit(2)
+
+    if args.classifier is not None:
+        print(
+            "WARNING: -classifier is deprecated and ignored; "
+            "Phasis always uses GMM classification."
+        )
+    args.classifier = "GMM"
 
     if args.libformat not in ("F", "T", "Q"):
         print("\nERROR: Wrong libformat option (use F, T, or Q)\n")
@@ -324,7 +323,6 @@ def configure_runtime(args: argparse.Namespace) -> None:
     rt.sliding = sliding
     rt.cores = args.cores
     rt.classifier = args.classifier
-    rt.classifier_aliases = args.classifier_aliases
     rt.steps = args.steps
     rt.class_cluster_file = args.class_cluster_file
     rt.min_Howell_score = args.min_Howell_score

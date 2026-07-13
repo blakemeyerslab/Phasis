@@ -267,7 +267,7 @@ class LocusPlotHelperTests(unittest.TestCase):
             "44 29 0:99 / /quobyte rw,relatime - fuse.quobyte quobyte rw\n"
         )
         is_remote, mount_point, fs_type = locus_plots._detect_remote_filesystem(
-            "/quobyte/project/run/24_KNN_PHAS_locus_plots",
+            "/quobyte/project/run/24_PHAS_locus_plots",
             mountinfo_text=mountinfo,
         )
         self.assertTrue(is_remote)
@@ -276,7 +276,7 @@ class LocusPlotHelperTests(unittest.TestCase):
 
     def test_remote_path_prefix_fallback_detects_quobyte(self):
         is_remote, mount_point, fs_type = locus_plots._detect_remote_filesystem(
-            "/quobyte/project/run/24_KNN_PHAS_locus_plots",
+            "/quobyte/project/run/24_PHAS_locus_plots",
             mountinfo_text="",
         )
         self.assertTrue(is_remote)
@@ -287,7 +287,7 @@ class LocusPlotHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.object(locus_plots.rt, "plot_staging", None):
                 strategy = locus_plots._resolve_plot_staging_strategy(
-                    "/tmp/24_KNN_PHAS_locus_plots",
+                    "/tmp/24_PHAS_locus_plots",
                     env={"SLURM_JOB_ID": "123", "TMPDIR": tmpdir},
                     mountinfo_text="",
                 )
@@ -299,7 +299,7 @@ class LocusPlotHelperTests(unittest.TestCase):
             with mock.patch.object(locus_plots.os.path, "isdir", return_value=False):
                 with mock.patch.object(locus_plots.os, "access", return_value=False):
                     strategy = locus_plots._resolve_plot_staging_strategy(
-                        "/tmp/24_KNN_PHAS_locus_plots",
+                        "/tmp/24_PHAS_locus_plots",
                         env={"Phasis_PLOT_STAGING": "local", "TMPDIR": "/path/that/does/not/exist"},
                         mountinfo_text="",
                     )
@@ -803,7 +803,7 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
                             job_phase=24,
                         )
 
-            export_df = pd.read_csv(os.path.join(outdir, "24_KNN_phasiRNAs.tsv"), sep="\t")
+            export_df = pd.read_csv(os.path.join(outdir, "24_phasiRNAs.tsv"), sep="\t")
             self.assertIn("window_unit_id", export_df.columns)
             self.assertIn("window_unit_role", export_df.columns)
             self.assertIn("window_unit_rank", export_df.columns)
@@ -1215,11 +1215,70 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
                                 job_phase=24,
                             )
 
-            phas_export = pd.read_csv(os.path.join(outdir, "24_KNN_phasiRNAs.tsv"), sep="\t")
-            phas_like_export = pd.read_csv(os.path.join(outdir, "24_KNN_PHAS_like_phasiRNAs.tsv"), sep="\t")
+            phas_export = pd.read_csv(os.path.join(outdir, "24_phasiRNAs.tsv"), sep="\t")
+            phas_like_export = pd.read_csv(
+                os.path.join(outdir, "24_PHAS_like", "24_PHAS_like_phasiRNAs.tsv"),
+                sep="\t",
+            )
             self.assertEqual(sorted(phas_export["identifier"].unique().tolist()), ["chr1:100..196"])
             self.assertEqual(sorted(phas_like_export["identifier"].unique().tolist()), ["chr2:500..596"])
-            self.assertFalse(os.path.exists(os.path.join(outdir, "24_KNN_non_PHAS_locus_plots")))
+            self.assertTrue(os.path.isdir(os.path.join(outdir, "24_PHAS_like", "locus_plots")))
+            self.assertFalse(os.path.exists(os.path.join(outdir, "24_non_PHAS_locus_plots")))
+
+    def test_duplicate_library_locus_calls_use_one_strongest_plot_source(self):
+        labeled_features = pd.DataFrame(
+            [
+                {
+                    "identifier": "chr1:100..196",
+                    "alib": "libA",
+                    "cID": "cluster_1",
+                    "label": "PHAS",
+                    "final_class": "PHAS",
+                    "Howell_exact_support_score": 10.0,
+                    "Peak_Howell_score": 30.0,
+                    "phasis_score": 300.0,
+                },
+                {
+                    "identifier": "chr1:100..196",
+                    "alib": "libA",
+                    "cID": "cluster_2",
+                    "label": "PHAS",
+                    "final_class": "PHAS",
+                    "Howell_exact_support_score": 20.0,
+                    "Peak_Howell_score": 25.0,
+                    "phasis_score": 250.0,
+                },
+            ]
+        )
+        clusters_data = pd.DataFrame(
+            [
+                {"clusterID": "cluster_1", "identifier": "chr1:100..196", "alib": "libA", "pos": 100, "abun": 5, "len": 24, "strand": "w", "tag_seq": "A1", "hits": 1},
+                {"clusterID": "cluster_1", "identifier": "chr1:100..196", "alib": "libA", "pos": 124, "abun": 6, "len": 24, "strand": "w", "tag_seq": "A2", "hits": 1},
+                {"clusterID": "cluster_1", "identifier": "chr1:100..196", "alib": "libA", "pos": 148, "abun": 7, "len": 24, "strand": "w", "tag_seq": "A3", "hits": 1},
+                {"clusterID": "cluster_1", "identifier": "chr1:100..196", "alib": "libA", "pos": 172, "abun": 8, "len": 24, "strand": "w", "tag_seq": "A4", "hits": 1},
+                {"clusterID": "cluster_2", "identifier": "chr1:100..196", "alib": "libA", "pos": 100, "abun": 9, "len": 24, "strand": "w", "tag_seq": "B1", "hits": 1},
+                {"clusterID": "cluster_2", "identifier": "chr1:100..196", "alib": "libA", "pos": 124, "abun": 10, "len": 24, "strand": "w", "tag_seq": "B2", "hits": 1},
+                {"clusterID": "cluster_2", "identifier": "chr1:100..196", "alib": "libA", "pos": 148, "abun": 11, "len": 24, "strand": "w", "tag_seq": "B3", "hits": 1},
+                {"clusterID": "cluster_2", "identifier": "chr1:100..196", "alib": "libA", "pos": 172, "abun": 12, "len": 24, "strand": "w", "tag_seq": "B4", "hits": 1},
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as outdir:
+            with mock.patch.object(locus_plots, "run_parallel_with_progress", side_effect=_serial_parallel_runner):
+                with mock.patch.object(locus_plots.rt, "plot_staging", "direct"):
+                    with mock.patch.object(locus_plots.rt, "save_snapshot", return_value=None):
+                        locus_plots.write_individual_phas_locus_plots(
+                            "GMM",
+                            labeled_features,
+                            clusters_data,
+                            job_outdir=outdir,
+                            job_phase=24,
+                        )
+
+            plot_dir = os.path.join(outdir, "24_PHAS_locus_plots")
+            self.assertEqual(len([name for name in os.listdir(plot_dir) if name.endswith(".png")]), 1)
+            export_df = pd.read_csv(os.path.join(outdir, "24_phasiRNAs.tsv"), sep="\t")
+            self.assertEqual(set(export_df["cID"].astype(str)), {"cluster_2"})
 
     def test_write_individual_plots_exports_only_phas_loci(self):
         labeled_features = pd.DataFrame(
@@ -1253,10 +1312,15 @@ class LocusPlotExportIntegrationTests(unittest.TestCase):
                             job_phase=24,
                         )
 
-            export_path = os.path.join(outdir, "24_KNN_phasiRNAs.tsv")
+            export_path = os.path.join(outdir, "24_phasiRNAs.tsv")
             self.assertTrue(os.path.isfile(export_path))
             export_df = pd.read_csv(export_path, sep="\t")
             self.assertEqual(sorted(export_df["identifier"].unique().tolist()), ["chr1:100..196"])
+            phas_like_export = pd.read_csv(
+                os.path.join(outdir, "24_PHAS_like", "24_PHAS_like_phasiRNAs.tsv"),
+                sep="\t",
+            )
+            self.assertTrue(phas_like_export.empty)
 
 
 if __name__ == "__main__":
