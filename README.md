@@ -24,9 +24,9 @@ conda install "numpy=1.26.4" "scikit-learn=1.3.0" -y
 
 ### 2) Install external tools
 
-Phasis requires `hisat2` and `samtools` on your `PATH`:
+Phasis requires `hisat2` and `samtools` 1.10 or newer on your `PATH`:
 ```bash
-conda install -c bioconda hisat2 samtools -y
+conda install -c conda-forge -c bioconda hisat2 "samtools>=1.10" -y
 ```
 
 ### 3) Install Phasis
