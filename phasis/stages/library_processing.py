@@ -8,7 +8,7 @@ from phasis import libprep
 from phasis import runtime as rt
 from phasis.cache import MemCache, compute_md5_str, default_memfile_path, sig_key, stage_signature
 from phasis.env import getenv
-from phasis.parallel import run_parallel_with_progress
+from phasis.parallel import resolve_library_worker_cap, run_parallel_with_progress
 
 # Stage-local globals (only what libraryprocess needs)
 mindepth = None
@@ -480,12 +480,24 @@ def _process_single_library_job(job):
 
 def _process_input_libraries(libs_to_process):
     jobs = [(alib, _fas_output_for_input(alib)) for alib in libs_to_process]
-    print("Processing libraries:")
+    ncores_local = int(getattr(rt, "ncores", 1) or 1)
+    worker_cap, source = resolve_library_worker_cap(ncores_local)
+    print(
+        f"Processing libraries with at most {worker_cap} concurrent worker(s) ({source})."
+    )
+    if libformat == "Q":
+        print(
+            "[INFO] FASTQ conversion is intentionally memory-conservative. "
+            "Set PHASIS_LIB_WORKER_CAP above 1 only when the job has enough memory per concurrent library.",
+            flush=True,
+        )
     proc_results = run_parallel_with_progress(
         _process_single_library_job,
         jobs,
         desc="Filtering/Converting",
         maxtasksperchild=LIBRARY_PROCESS_MAXTASKSPERCHILD,
+        initial_worker_cap=worker_cap,
+        max_worker_cap=worker_cap,
     )
     if _runtime_errors(proc_results):
         sys.exit("One or more libraries failed during filtering/conversion; see errors above.")
@@ -532,6 +544,18 @@ def libraryprocess(libs):
     sync_from_runtime()
 
     print("#### Fn: Lib Processor #######################")
+    ncores_local = int(getattr(rt, "ncores", 1) or 1)
+    worker_cap, worker_cap_source = resolve_library_worker_cap(ncores_local)
+    print(
+        f"[INFO] Library-processing worker cap: {worker_cap} ({worker_cap_source}); "
+        f"input format={libformat}."
+    )
+    if libformat == "Q":
+        print(
+            "[INFO] FASTQ conversion defaults to one library at a time to control memory use. "
+            "PHASIS_LIB_WORKER_CAP raises this limit and increases memory use per concurrent library.",
+            flush=True,
+        )
 
     cache = MemCache.load(memFile)
     config = cache.cfg

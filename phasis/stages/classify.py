@@ -3,7 +3,7 @@ Classification stage.
 
 IMPORTANT:
 - Pure stage: does NOT write files and does NOT plot.
-- Phasis 2.8 uses GMM classification followed by the
+- Phasis 2.8.1 uses GMM classification followed by the
   Register-Resolved Locus Interpretation Layer.
 - No nested functions; no imports inside functions.
 """

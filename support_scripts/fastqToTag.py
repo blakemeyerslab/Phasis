@@ -1,73 +1,59 @@
-import sys
+from __future__ import annotations
+
 import os
-from collections import defaultdict
+from pathlib import Path
+import sys
 from tqdm import tqdm
 
-def chop_sequence(sequence):
-    """
-    Chops the sequence at the first occurrence of 'N' if it appears
-    within the first half of the sequence.
-    """
-    half_length = len(sequence) // 2
-    n_position = sequence.find('N', 0, half_length)
-    if n_position != -1:
-        return sequence[:n_position]
-    return sequence
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from phasis.fastq import count_fastq_tags, fastq_output_stem, write_tag_count
+
+
+class TqdmFastqProgress:
+    def __init__(self, description):
+        self._bar = tqdm(total=None, desc=description, unit="reads")
+
+    def __call__(self, stats, delta, final):
+        if delta:
+            self._bar.update(delta)
+        self._bar.set_postfix(
+            retained=stats.reads_retained,
+            length_rejects=stats.reads_rejected_length,
+            ambiguous_rejects=stats.reads_rejected_ambiguous,
+        )
+        if final:
+            self._bar.close()
 
 def fastq_to_count_table(fastq_file):
     """
-    Converts a FASTQ file to a tab-separated count table (.tag file),
-    handling sequences with 'N' as described.
+    Converts plain or gzip-compressed preprocessed sRNA FASTQ to a
+    Phasis-compatible tab-separated tag-count table.
     """
-    base_name = os.path.splitext(fastq_file)[0]
-    output_file = f"{base_name}.tag"
-
-    seq_counter = defaultdict(int)
-    removed_sequences = 0
-
-    with open(fastq_file, "r") as fq:
-        # Count total reads for progress bar (optional heavy):
-        total = None
-        try:
-            # Attempt to estimate record count for tqdm
-            lines = sum(1 for _ in open(fastq_file, 'r'))
-            total = lines // 4
-        except:
-            total = None
-
-        fq.seek(0)
-        reader = tqdm(total=total, desc="Processing reads") if total else None
-        try:
-            while True:
-                header = fq.readline().strip()
-                if not header:
-                    break
-                seq = fq.readline().strip()
-                fq.readline()  # plus line
-                fq.readline()  # quality line
-
-                processed_sequence = chop_sequence(seq)
-                if 18 <= len(processed_sequence) <= 35 and 'N' not in processed_sequence:
-                    seq_counter[processed_sequence] += 1
-                else:
-                    removed_sequences += 1
-
-                if reader:
-                    reader.update(1)
-        finally:
-            if reader:
-                reader.close()
-
-    with open(output_file, "w") as out:
-        for seq, count in sorted(seq_counter.items(), key=lambda x: x[1], reverse=True):
-            out.write(f"{seq}\t{count}\n")
+    output_file = str(Path(fastq_file).with_name(f"{fastq_output_stem(fastq_file)}.tag"))
+    progress = TqdmFastqProgress(f"Processing {os.path.basename(fastq_file)}")
+    seq_counter, stats = count_fastq_tags(fastq_file, progress_callback=progress)
+    write_tag_count(seq_counter, output_file)
 
     print(f"Output written to {output_file}")
-    print(f"Sequences removed or chopped due to 'N' presence: {removed_sequences}")
+    print(
+        "Reads examined:{0} | retained:{1} | rejected_length:{2} | rejected_ambiguous:{3} | "
+        "chopped_at_N:{4} | unique_retained_tags:{5}".format(
+            stats.reads_examined,
+            stats.reads_retained,
+            stats.reads_rejected_length,
+            stats.reads_rejected_ambiguous,
+            stats.reads_chopped_at_n,
+            len(seq_counter),
+        )
+    )
+    return output_file
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python script.py <input.fastq>")
+        print("Usage: python fastqToTag.py <input.fastq|input.fq|input.fastq.gz|input.fq.gz>")
     else:
         fastq_file = sys.argv[1]
         fastq_to_count_table(fastq_file)

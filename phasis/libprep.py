@@ -3,6 +3,7 @@ import time
 import collections
 import gzip
 import phasis.runtime as rt
+from phasis.fastq import count_fastq_tags
 
 # Module-level default used by legacy-style call sites.
 # Workers read the value from phasis.runtime when this stays unset.
@@ -200,35 +201,41 @@ def dedup_writer(acounter,alib, out_fas=None, out_sum=None):
 
 def fastq_process(alib, out_fas=None, out_sum=None):
     '''
-    Converts a quality-controlled FASTQ into de-duplicated FASTA counts.
+    Converts a preprocessed sRNA FASTQ into de-duplicated FASTA counts.
+    Records are streamed and filtered before they enter the tag counter.
     '''
     print("#### Fn: FASTQ Processor #####################")
-    seq_counter = collections.Counter()
-    fh_in = _open_text_maybe_gz(alib)
-    read_count = 0
+    print(
+        f"[INFO] Streaming preprocessed sRNA FASTQ: {alib} "
+        "(progress reports every 1,000,000 reads; raw adapter-containing input is rejected).",
+        flush=True,
+    )
+    seq_counter, stats = count_fastq_tags(alib, progress_callback=_fastq_progress_report)
+    count_file = dedup_writer(seq_counter, alib, out_fas=out_fas, out_sum=out_sum)
+    _, sum_file = _default_output_paths(alib, out_fas=out_fas, out_sum=out_sum)
+    with open(sum_file, "a") as fh_sum:
+        values = stats.as_dict(len(seq_counter))
+        fh_sum.write(
+            "FASTQ reads examined:{reads_examined} | retained:{reads_retained} | "
+            "rejected_length:{reads_rejected_length} | rejected_ambiguous:{reads_rejected_ambiguous} | "
+            "chopped_at_N:{reads_chopped_at_n} | unique_retained_tags:{unique_retained_tags}\n".format(**values)
+        )
+    return count_file
 
-    while True:
-        header = fh_in.readline()
-        if not header:
-            break
-        seq = fh_in.readline()
-        plus = fh_in.readline()
-        qual = fh_in.readline()
 
-        if not seq or not plus or not qual:
-            fh_in.close()
-            raise RuntimeError(f"Incomplete FASTQ record in {alib}")
-
-        if not header.startswith('@') or not plus.startswith('+'):
-            fh_in.close()
-            raise RuntimeError(f"Malformed FASTQ record in {alib}")
-
-        seq_counter[seq.rstrip('\n')] += 1
-        read_count += 1
-
-    fh_in.close()
-    print("Cached FASTQ file: %s | Reads: %s" % (alib, read_count))
-    return dedup_writer(seq_counter, alib, out_fas=out_fas, out_sum=out_sum)
+def _fastq_progress_report(stats, _delta, final):
+    suffix = " complete" if final else ""
+    print(
+        "[INFO] FASTQ reads examined:{0} | retained:{1} | rejected_length:{2} | "
+        "rejected_ambiguous:{3}{4}".format(
+            stats.reads_examined,
+            stats.reads_retained,
+            stats.reads_rejected_length,
+            stats.reads_rejected_ambiguous,
+            suffix,
+        ),
+        flush=True,
+    )
 
 def merge_processed_fastas(fas_paths, out_dir, out_basename, mindepth):
     """

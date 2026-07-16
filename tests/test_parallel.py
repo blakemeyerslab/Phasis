@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from phasis import parallel
+from phasis import runtime as rt
 
 
 class ParallelCpuTests(unittest.TestCase):
@@ -68,6 +69,28 @@ class ParallelPycacheTests(unittest.TestCase):
                 self.assertTrue(os.path.isdir(resolved))
         finally:
             parallel.sys.pycache_prefix = original_prefix
+
+
+class LibraryWorkerCapTests(unittest.TestCase):
+    def setUp(self):
+        self.original_format = getattr(rt, "libformat", None)
+        self.original_cap = getattr(rt, "parallel_lib_worker_cap", None)
+
+    def tearDown(self):
+        rt.libformat = self.original_format
+        rt.parallel_lib_worker_cap = self.original_cap
+
+    def test_fastq_defaults_to_one_library_worker(self):
+        rt.libformat = "Q"
+        rt.parallel_lib_worker_cap = None
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(parallel.resolve_library_worker_cap(8), (1, "conservative FASTQ default"))
+
+    def test_explicit_cap_is_honored_and_capped_by_cores(self):
+        rt.libformat = "Q"
+        rt.parallel_lib_worker_cap = None
+        with mock.patch.dict(os.environ, {"PHASIS_LIB_WORKER_CAP": "12"}, clear=True):
+            self.assertEqual(parallel.resolve_library_worker_cap(4), (4, "PHASIS_LIB_WORKER_CAP"))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import shutil
 from phasis import runtime as rt
 from phasis.cache import MemCache, compute_md5_str, default_memfile_path, sig_key, stage_signature
 from phasis.parallel import PPBalance, optimize, run_parallel_with_progress
+from phasis.samtools import runtime_samtools_path
 
 
 # Stage-local globals (populated by sync_from_runtime)
@@ -453,7 +454,7 @@ def mapper(aninput):
         sys.exit()
 
     retcode = subprocess.call(
-        ["samtools", "sort", "-@", str(nspread), "-O", "BAM", "-o", abam_sorted, asam_temp],
+        [runtime_samtools_path(), "sort", "-@", str(nspread), "-O", "BAM", "-o", abam_sorted, asam_temp],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -462,7 +463,7 @@ def mapper(aninput):
         sys.exit()
 
     retcode = subprocess.call(
-        ["samtools", "view", "-@", str(nspread), "-b", "-F", "4", "-o", abam_final, abam_sorted],
+        [runtime_samtools_path(), "view", "-@", str(nspread), "-b", "-F", "4", "-o", abam_final, abam_sorted],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -485,7 +486,7 @@ def _convert_legacy_sam_to_bam(aninput):
     nspread = str(nspread)
 
     retcode = subprocess.call(
-        ["samtools", "view", "-@", str(nspread), "-b", "-T", reference, "-F", "4", "-o", bam_path, sam_path],
+        [runtime_samtools_path(), "view", "-@", str(nspread), "-b", "-T", reference, "-F", "4", "-o", bam_path, sam_path],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

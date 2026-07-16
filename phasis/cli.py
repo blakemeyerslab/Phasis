@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     reqflags = parser.add_argument_group("required arguments")
     reqflags.add_argument(
         "-libs",
-        help="Quality-controlled libraries to process (FASTA, tag-count, or FASTQ; plain text or .gz)",
+        help="Quality-controlled libraries to process (FASTA, tag-count, or preprocessed sRNA FASTQ; plain text or .gz)",
         required=False,
         nargs="*",
     )
@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-mismat", default=0, type=int,
                         help="Post-alignment mismatch filter applied while parsing alignments [default 0]")
     parser.add_argument("-libformat", default="F", type=str,
-                        help="Library format: FASTA (F), tag-count (T), or FASTQ (Q) [default F]")
+                        help="Library format: FASTA (F), tag-count (T), or preprocessed sRNA FASTQ (Q; 18-35 nt) [default F]")
     parser.add_argument("-phase", default=21, type=int,
                         help="Desired phase length [default 21]")
     parser.add_argument("-clustbuffer", default=300, type=int,
@@ -364,11 +364,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         _validate_cleanup_only_argv(argv)
         return _run_cleanup_mode(args)
 
-    # Dependencies should be checked only in the real run path.
-    # (argparse will have already exited for -h/-version)
-    require_dependencies()
-
     configure_runtime(args)
+
+    # Dependencies should be checked only in the real run path.
+    # This follows runtime configuration so the validated samtools path is
+    # retained in the snapshot used by downstream worker processes.
+    require_dependencies()
 
     # MUST be before any multiprocessing pool creation
     import phasis.runtime as rt

@@ -1,6 +1,6 @@
 # Phasis - Phased sRNA Cluster Discovery and Annotation
 
-**Version:** v2.8  
+**Version:** v2.8.1
 **Updated:** 2026-07-03
 
 Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libraries. It supports:
@@ -123,7 +123,7 @@ Phasis accepts:
 
 - FASTA (`-libformat F`): plain text or `.gz`
 - Tag-count (`-libformat T`): plain text or `.gz`
-- FASTQ (`-libformat Q`): quality-controlled FASTQ, plain text or `.gz`
+- FASTQ (`-libformat Q`): preprocessed small-RNA FASTQ, plain text or `.gz`
 
 The reference FASTA passed to `-reference` can also be plain text or gzip-compressed.
 
@@ -133,6 +133,28 @@ For any supported input format, Phasis stores a processed `.fas.gz` copy under `
 ```bash
 phasis -libs sample.fastq.gz other_sample.fastq.gz -reference genome.fa.gz -libformat Q
 ```
+
+`-libformat Q` is intentionally a streaming small-RNA reader, not an adapter or
+quality trimmer. Supply reads that have already been adapter/quality trimmed and
+are expected to be 18–35 nt. Phasis filters invalid, ambiguous, short, and long
+records before counting; it stops with an actionable error when the input appears
+to be raw sequencing reads rather than silently truncating it.
+
+For a reproducible conversion to tag-count input, the bundled helper accepts
+`.fastq`, `.fq`, and gzip-compressed variants and reports progress while it
+streams:
+
+```bash
+python support_scripts/fastqToTag.py sample.fastq.gz
+phasis -libs sample.tag -reference genome.fa.gz -libformat T
+```
+
+### Samtools requirement
+
+Phasis requires `samtools` 1.10 or newer. At startup it resolves and validates
+one executable, prints its absolute path and version, and reuses that exact path
+for mapping and BAM parsing. If validation fails, activate the intended Conda
+environment and check `which samtools` and `samtools --version`.
 
 ### Convert FASTA to tag-count
 ```bash
@@ -210,7 +232,7 @@ If `-class_cluster_files` is omitted, Phasis tries to infer the expected cluster
 | --- | --- |
 | `-libs` | Input libraries to process. |
 | `-reference` | Genome or transcriptome reference FASTA. |
-| `-libformat` | `F` FASTA, `T` tag-count, or `Q` FASTQ. |
+| `-libformat` | `F` FASTA, `T` tag-count, or `Q` preprocessed small-RNA FASTQ. |
 | `-phase` | Phasing length, commonly `21` or `24`. |
 | `-cores` | `0` uses most free cores; `>0` sets an exact core count. |
 | `-maxhits` | Value passed as `-k` to HISAT2. |
@@ -227,6 +249,20 @@ If `-class_cluster_files` is omitted, Phasis tries to infer the expected cluster
 ---
 
 ## Advanced Options
+
+### Library-processing worker cap
+
+Set `PHASIS_LIB_WORKER_CAP` to limit concurrent library conversion jobs:
+
+```bash
+export PHASIS_LIB_WORKER_CAP=1
+phasis ... -libformat Q
+```
+
+FASTQ conversion defaults to one concurrent library because each worker retains
+its valid unique tags in memory. Raise the cap only when the job has sufficient
+memory per library. This cap applies to library preparation; mapping remains
+scheduled from the requested `-cores` value.
 
 ### Cleanup
 

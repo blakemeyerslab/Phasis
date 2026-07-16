@@ -1,6 +1,8 @@
 import shutil
 import sys
 
+from phasis.samtools import SamtoolsError, validate_runtime_samtools
+
 
 def _has_executable(cmd_name):
     """
@@ -30,8 +32,14 @@ def checkDependency():
     hisat_ok = _has_executable("hisat2")
     _print_status("Hisat (v2)", hisat_ok)
 
-    # samtools is required downstream (mapping/parser paths)
-    samtools_ok = _has_executable("samtools")
+    # The CLI has already validated the absolute runtime path. This re-check
+    # deliberately validates that same path rather than resolving PATH again.
+    try:
+        validate_runtime_samtools(announce=False)
+        samtools_ok = True
+    except SamtoolsError as exc:
+        samtools_ok = False
+        samtools_error = str(exc)
     _print_status("Samtools", samtools_ok)
 
     # Optional: if your legacy checkDependency includes more tools, add them here
@@ -46,5 +54,5 @@ def checkDependency():
         sys.exit()
 
     if not samtools_ok:
-        print("Samtools not found in PATH. Please install or activate the correct environment.")
+        print(samtools_error)
         sys.exit()

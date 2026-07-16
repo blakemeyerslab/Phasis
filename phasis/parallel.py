@@ -116,8 +116,24 @@ def _resolve_lib_worker_cap(ncores_local: int) -> int:
         _coerce_positive_int(getenv("Phasis_LIB_WORKER_CAP"), None),
     )
     if configured is None:
-        configured = int(max(1, ncores_local))
+        # Streaming FASTQ conversion can still retain many valid unique tags.
+        # Keep it sequential unless the user explicitly accepts more per-lib RAM.
+        configured = 1 if str(getattr(rt, "libformat", "")).upper() == "Q" else int(max(1, ncores_local))
     return int(max(1, min(ncores_local, configured)))
+
+
+def resolve_library_worker_cap(ncores_local: int) -> tuple[int, str]:
+    """Return the effective library-worker cap and whether it was explicitly configured."""
+    configured = _coerce_positive_int(
+        getattr(rt, "parallel_lib_worker_cap", None),
+        _coerce_positive_int(getenv("Phasis_LIB_WORKER_CAP"), None),
+    )
+    cap = _resolve_lib_worker_cap(ncores_local)
+    if configured is not None:
+        return cap, "PHASIS_LIB_WORKER_CAP"
+    if str(getattr(rt, "libformat", "")).upper() == "Q":
+        return cap, "conservative FASTQ default"
+    return cap, "default"
 
 
 def _resolve_worker_cap(cap_value, ncores_local: int) -> int:
@@ -234,6 +250,13 @@ def run_parallel_with_progress(
     ncores = rt.ncores
     if rt.ncores is None or rt.ncores <= 0:
         ncores = multiprocessing.cpu_count()
+    if unit == "lib":
+        library_worker_cap = _resolve_lib_worker_cap(ncores)
+        if initial_worker_cap is None:
+            initial_worker_cap = library_worker_cap
+        if max_worker_cap is None:
+            max_worker_cap = library_worker_cap
+
     resolved_maxtasksperchild = _resolve_maxtasksperchild(
         maxtasksperchild,
         unit=unit,

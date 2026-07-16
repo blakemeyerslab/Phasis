@@ -5,6 +5,8 @@ import importlib.util
 import shutil
 from typing import Iterable, List
 
+from phasis.samtools import SamtoolsError, validate_runtime_samtools
+
 
 PY_DEPS: List[str] = [
     "numpy",
@@ -18,7 +20,6 @@ PY_DEPS: List[str] = [
 
 TOOLS: List[str] = [
     "hisat2",
-    "samtools",
 ]
 
 
@@ -43,7 +44,12 @@ def require_dependencies() -> None:
     missing_tools = _missing_tools(TOOLS)
 
     if not missing_py and not missing_tools:
-        return
+        try:
+            validate_runtime_samtools(announce=True)
+            return
+        except SamtoolsError as exc:
+            print(f"\n[Phasis] {exc}\n")
+            raise SystemExit(2) from exc
 
     print("\n[Phasis] Missing dependencies detected:\n")
     if missing_py:

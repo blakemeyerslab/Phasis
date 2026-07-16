@@ -12,6 +12,7 @@ from typing import Iterable, List, Sequence, Tuple
 import phasis.runtime as rt
 from phasis.parallel import run_parallel_with_progress
 from phasis.cache import MemCache, compute_md5_str, default_memfile_path, getmd5, sig_key, stage_signature
+from phasis.samtools import runtime_samtools_path
 
 
 def _resolve_mem_file() -> str:
@@ -105,7 +106,7 @@ def _iter_alignment_lines(alib: str):
     """
     if alib.endswith(".bam"):
         proc = subprocess.Popen(
-            ["samtools", "view", alib],
+            [runtime_samtools_path(), "view", alib],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
