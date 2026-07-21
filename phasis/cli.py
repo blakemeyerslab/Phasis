@@ -52,6 +52,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Post-alignment mismatch filter applied while parsing alignments [default 0]")
     parser.add_argument("-libformat", default="F", type=str,
                         help="Library format: FASTA (F), tag-count (T), or preprocessed sRNA FASTQ (Q; 18-35 nt) [default F]")
+    parser.add_argument(
+        "--fastq-chunk-unique-tags",
+        dest="fastq_chunk_unique_tags",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "For -libformat Q, maximum unique tags held in RAM before writing a temporary "
+            "aggregation chunk; lower values reduce RAM and increase temporary disk I/O "
+            "[default 250000]"
+        ),
+    )
     parser.add_argument("-phase", default=21, type=int,
                         help="Desired phase length [default 21]")
     parser.add_argument("-clustbuffer", default=300, type=int,
@@ -61,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-minClusterLength", default=350, type=int,
                         help="Min length to score a PHAS locus [default 350]")
     parser.add_argument("-cores", default=0, type=int,
-                        help="0: most free cores | >0: exact cores [default 0]")
+                        help="0: all available cores | >0: exact cores [default 0]")
     parser.add_argument("-norm", action="store_true",
                         help="Enable normalization (CP10M) [default False]")
     parser.add_argument("-norm_factor", type=float, default=1e7,
@@ -198,6 +210,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         print("\nERROR: Wrong libformat option (use F, T, or Q)\n")
         raise SystemExit(2)
 
+    if args.fastq_chunk_unique_tags is not None and args.fastq_chunk_unique_tags < 1:
+        print("\nERROR: --fastq-chunk-unique-tags must be a positive integer\n")
+        raise SystemExit(2)
+
+    if args.cores < 0:
+        print("\nERROR: -cores must be 0 (all available cores) or a positive integer\n")
+        raise SystemExit(2)
+
     if args.runtype not in ("G", "T", "S"):
         print("\nERROR: Wrong runtype option (use G, T, or S)\n")
         raise SystemExit(2)
@@ -315,6 +335,7 @@ def configure_runtime(args: argparse.Namespace) -> None:
     rt.max_complexity = args.max_complexity
     rt.mismat = args.mismat
     rt.libformat = args.libformat
+    rt.fastq_chunk_unique_tags = args.fastq_chunk_unique_tags
     rt.phase = args.phase
     rt.clustbuffer = args.clustbuffer
     rt.phasisScoreCutoff = score_cutoff

@@ -2,12 +2,17 @@ import os
 import time
 import collections
 import gzip
+import heapq
+import shutil
+import tempfile
 import phasis.runtime as rt
-from phasis.fastq import count_fastq_tags
+from phasis.env import getenv
+from phasis.fastq import FastqTagChunker
 
 # Module-level default used by legacy-style call sites.
 # Workers read the value from phasis.runtime when this stays unset.
 mindepth = None
+FASTQ_CHUNK_UNIQUE_TAGS_DEFAULT = 250_000
 
 
 def _resolve_mindepth():
@@ -51,6 +56,94 @@ def _default_output_paths(alib, out_fas=None, out_sum=None):
     countFile = out_fas if out_fas is not None else f"{_input_stem(alib)}.fas"
     sumFile = out_sum if out_sum is not None else f"{countFile.rpartition('.')[0]}.sum"
     return countFile, sumFile
+
+
+def _fastq_chunk_unique_tags():
+    cli_value = getattr(rt, "fastq_chunk_unique_tags", None)
+    if cli_value is not None:
+        parsed = int(cli_value)
+        if parsed < 1:
+            raise RuntimeError("--fastq-chunk-unique-tags must be a positive integer.")
+        return parsed
+
+    value = getenv("Phasis_FASTQ_CHUNK_UNIQUE_TAGS")
+    if value is None:
+        return FASTQ_CHUNK_UNIQUE_TAGS_DEFAULT
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "Phasis_FASTQ_CHUNK_UNIQUE_TAGS must be a positive integer when set."
+        )
+    if parsed < 1:
+        raise RuntimeError("Phasis_FASTQ_CHUNK_UNIQUE_TAGS must be a positive integer when set.")
+    return parsed
+
+
+def _write_fastq_count_chunk(counter, path):
+    with open(path, "w", encoding="utf-8") as handle:
+        for sequence in sorted(counter):
+            handle.write(f"{sequence}\t{counter[sequence]}\n")
+
+
+def _next_tag_count(handle):
+    line = handle.readline()
+    if not line:
+        return None
+    sequence, count = line.rstrip("\n").split("\t")
+    return sequence, int(count)
+
+
+def _write_merged_fastq_chunks(chunk_paths, count_file, sum_file, alib, stats):
+    min_depth = int(_resolve_mindepth())
+    handles = [open(path, "r", encoding="utf-8") for path in chunk_paths]
+    heap = []
+    try:
+        for index, handle in enumerate(handles):
+            item = _next_tag_count(handle)
+            if item is not None:
+                sequence, count = item
+                heapq.heappush(heap, (sequence, index, count))
+
+        written = 0
+        filtered = 0
+        unique_tags = 0
+        with open(count_file, "w", encoding="utf-8") as output:
+            while heap:
+                sequence, index, count = heapq.heappop(heap)
+                total_count = count
+                item = _next_tag_count(handles[index])
+                if item is not None:
+                    next_sequence, next_count = item
+                    heapq.heappush(heap, (next_sequence, index, next_count))
+
+                while heap and heap[0][0] == sequence:
+                    _same_sequence, same_index, same_count = heapq.heappop(heap)
+                    total_count += same_count
+                    item = _next_tag_count(handles[same_index])
+                    if item is not None:
+                        next_sequence, next_count = item
+                        heapq.heappush(heap, (next_sequence, same_index, next_count))
+
+                unique_tags += 1
+                if total_count >= min_depth:
+                    written += 1
+                    output.write(f">seq_{written}|{total_count}\n{sequence}\n")
+                else:
+                    filtered += 1
+    finally:
+        for handle in handles:
+            handle.close()
+
+    values = stats.as_dict(unique_tags)
+    with open(sum_file, "w", encoding="utf-8") as summary:
+        summary.write(f"Library {alib} - tag written:{written} | tags filtered:{filtered}\n")
+        summary.write(
+            "FASTQ reads examined:{reads_examined} | retained:{reads_retained} | "
+            "rejected_length:{reads_rejected_length} | rejected_ambiguous:{reads_rejected_ambiguous} | "
+            "chopped_at_N:{reads_chopped_at_n} | unique_retained_tags:{unique_retained_tags}\n".format(**values)
+        )
+    return count_file
 
 def isfasta(afile):
     '''
@@ -205,22 +298,35 @@ def fastq_process(alib, out_fas=None, out_sum=None):
     Records are streamed and filtered before they enter the tag counter.
     '''
     print("#### Fn: FASTQ Processor #####################")
+    count_file, sum_file = _default_output_paths(alib, out_fas=out_fas, out_sum=out_sum)
+    chunk_unique_tags = _fastq_chunk_unique_tags()
     print(
         f"[INFO] Streaming preprocessed sRNA FASTQ: {alib} "
-        "(progress reports every 1,000,000 reads; raw adapter-containing input is rejected).",
+        f"(progress every 1,000,000 reads; disk-backed chunks of {chunk_unique_tags:,} unique tags).",
         flush=True,
     )
-    seq_counter, stats = count_fastq_tags(alib, progress_callback=_fastq_progress_report)
-    count_file = dedup_writer(seq_counter, alib, out_fas=out_fas, out_sum=out_sum)
-    _, sum_file = _default_output_paths(alib, out_fas=out_fas, out_sum=out_sum)
-    with open(sum_file, "a") as fh_sum:
-        values = stats.as_dict(len(seq_counter))
-        fh_sum.write(
-            "FASTQ reads examined:{reads_examined} | retained:{reads_retained} | "
-            "rejected_length:{reads_rejected_length} | rejected_ambiguous:{reads_rejected_ambiguous} | "
-            "chopped_at_N:{reads_chopped_at_n} | unique_retained_tags:{unique_retained_tags}\n".format(**values)
+    chunk_dir = tempfile.mkdtemp(
+        prefix=f".{_input_stem(alib)}.fastq_chunks_",
+        dir=os.path.dirname(os.path.abspath(count_file)) or None,
+    )
+    chunk_paths = []
+    try:
+        chunker = FastqTagChunker(
+            alib,
+            max_unique_tags=chunk_unique_tags,
+            progress_callback=_fastq_progress_report,
         )
-    return count_file
+        for index, counter in enumerate(chunker, start=1):
+            chunk_path = os.path.join(chunk_dir, f"chunk_{index:06d}.tsv")
+            _write_fastq_count_chunk(counter, chunk_path)
+            chunk_paths.append(chunk_path)
+        if not chunk_paths:
+            open(count_file, "w", encoding="utf-8").close()
+            _write_merged_fastq_chunks([], count_file, sum_file, alib, chunker.stats)
+            return count_file
+        return _write_merged_fastq_chunks(chunk_paths, count_file, sum_file, alib, chunker.stats)
+    finally:
+        shutil.rmtree(chunk_dir, ignore_errors=True)
 
 
 def _fastq_progress_report(stats, _delta, final):

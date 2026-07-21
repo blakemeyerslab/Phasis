@@ -495,7 +495,7 @@ def _process_input_libraries(libs_to_process):
         _process_single_library_job,
         jobs,
         desc="Filtering/Converting",
-        maxtasksperchild=LIBRARY_PROCESS_MAXTASKSPERCHILD,
+        maxtasksperchild=1 if libformat == "Q" else LIBRARY_PROCESS_MAXTASKSPERCHILD,
         initial_worker_cap=worker_cap,
         max_worker_cap=worker_cap,
     )

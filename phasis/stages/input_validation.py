@@ -2,6 +2,7 @@ import os
 import sys
 
 from phasis import runtime as rt
+from phasis.fastq import FastqFormatError, RawFastqInputError, preflight_fastq
 
 
 # Stage-local globals (minimal)
@@ -54,5 +55,17 @@ def checkLibs():
         print("\nERROR:Reference genome or transcriptome not found:%s" % (reference))
         print("------Please check file exists at specified location")
         sys.exit()
+
+    if str(getattr(rt, "libformat", "")).upper() == "Q":
+        print("Preflighting FASTQ input before index construction:")
+        for alib in libs:
+            try:
+                stats = preflight_fastq(alib)
+            except (FastqFormatError, RawFastqInputError) as exc:
+                sys.exit(f"FASTQ preflight failed: {exc}")
+            print(
+                f"  {alib}: checked {stats.sampled_reads} read(s); "
+                f"{stats.sampled_long_reads} exceed {35} nt."
+            )
 
     return libs

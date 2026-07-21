@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import gzip
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from phasis import libprep
-from phasis.fastq import FastqFormatError, RawFastqInputError, count_fastq_tags
+from phasis.fastq import FastqFormatError, RawFastqInputError, count_fastq_tags, preflight_fastq
 
 
 def write_fastq(path: Path, sequences: list[str]) -> None:
@@ -62,6 +64,13 @@ class FastqProcessingTests(unittest.TestCase):
             with self.assertRaisesRegex(RawFastqInputError, "adapter/quality trimming"):
                 count_fastq_tags(str(path))
 
+    def test_preflight_rejects_raw_reads_without_counting_the_full_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "raw.fastq"
+            write_fastq(path, ["A" * 76] * 1_005)
+            with self.assertRaisesRegex(RawFastqInputError, "1000/1000"):
+                preflight_fastq(str(path))
+
     def test_reports_progress_while_streaming(self):
         updates = []
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -91,9 +100,41 @@ class FastqProcessingTests(unittest.TestCase):
                 libprep.mindepth = original_mindepth
 
             helper = Path(__file__).resolve().parents[1] / "support_scripts" / "fastqToTag.py"
-            subprocess.run([sys.executable, str(helper), str(fastq)], cwd=tmpdir, check=True, capture_output=True, text=True)
+            subprocess.run(
+                [sys.executable, str(helper), str(fastq), "--chunk-unique-tags", "2"],
+                cwd=tmpdir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             internal = {sequence: count for sequence, count in libprep.fas_records(str(fas))}
             self.assertEqual(internal, read_tag_table(tmp / "sample.tag"))
+            self.assertFalse(list(tmp.glob(".sample.fastq_chunks_*")))
+
+    def test_chunked_q_conversion_merges_counts_without_retaining_all_tags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fastq = tmp / "sample.fastq"
+            sequences = ["A" * 21, "C" * 21, "G" * 21, "A" * 21, "C" * 21]
+            write_fastq(fastq, sequences)
+            fas = tmp / "chunked.fas"
+            summary = tmp / "chunked.sum"
+            original_mindepth = libprep.mindepth
+            original_chunk_size = getattr(libprep.rt, "fastq_chunk_unique_tags", None)
+            try:
+                libprep.mindepth = 1
+                libprep.rt.fastq_chunk_unique_tags = None
+                with mock.patch.dict(os.environ, {"PHASIS_FASTQ_CHUNK_UNIQUE_TAGS": "2"}, clear=False):
+                    libprep.fastq_process(str(fastq), str(fas), str(summary))
+            finally:
+                libprep.mindepth = original_mindepth
+                libprep.rt.fastq_chunk_unique_tags = original_chunk_size
+
+            self.assertEqual(
+                {sequence: count for sequence, count in libprep.fas_records(str(fas))},
+                {"A" * 21: 2, "C" * 21: 2, "G" * 21: 1},
+            )
+            self.assertFalse(list(tmp.glob(".sample.fastq_chunks_*")))
 
 
 if __name__ == "__main__":

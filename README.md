@@ -142,12 +142,16 @@ to be raw sequencing reads rather than silently truncating it.
 
 For a reproducible conversion to tag-count input, the bundled helper accepts
 `.fastq`, `.fq`, and gzip-compressed variants and reports progress while it
-streams:
+streams. It uses the same disk-backed aggregation as `-libformat Q`, so only a
+bounded number of unique tags is held in memory at once:
 
 ```bash
-python support_scripts/fastqToTag.py sample.fastq.gz
+python support_scripts/fastqToTag.py sample.fastq.gz --chunk-unique-tags 250000
 phasis -libs sample.tag -reference genome.fa.gz -libformat T
 ```
+
+Lower `--chunk-unique-tags` values reduce RAM use further but require more
+temporary disk I/O. The default is 250,000 unique tags per chunk.
 
 ### Samtools requirement
 
@@ -234,7 +238,8 @@ If `-class_cluster_files` is omitted, Phasis tries to infer the expected cluster
 | `-reference` | Genome or transcriptome reference FASTA. |
 | `-libformat` | `F` FASTA, `T` tag-count, or `Q` preprocessed small-RNA FASTQ. |
 | `-phase` | Phasing length, commonly `21` or `24`. |
-| `-cores` | `0` uses most free cores; `>0` sets an exact core count. |
+| `-cores` | `0` uses all CPU cores visible to the process (including scheduler limits); `>0` sets an exact core count, capped by that allocation. |
+| `--fastq-chunk-unique-tags` | For `-libformat Q`, maximum unique tags held in memory before a temporary disk-backed aggregation chunk is written (default `250000`). |
 | `-maxhits` | Value passed as `-k` to HISAT2. |
 | `-mindepth` | Minimum depth for p-value computation. |
 | `-uniqueRatioCut` | Minimum proportion of uniquely mapped reads. |
@@ -259,10 +264,10 @@ export PHASIS_LIB_WORKER_CAP=1
 phasis ... -libformat Q
 ```
 
-FASTQ conversion defaults to one concurrent library because each worker retains
-its valid unique tags in memory. Raise the cap only when the job has sufficient
-memory per library. This cap applies to library preparation; mapping remains
-scheduled from the requested `-cores` value.
+FASTQ conversion defaults to one concurrent library to avoid compounding
+temporary disk I/O and per-worker chunk memory. Raise the cap only when the job
+has sufficient I/O and memory per library. This cap applies to library
+preparation; mapping remains scheduled from the requested `-cores` value.
 
 ### Cleanup
 

@@ -35,7 +35,15 @@ def sync_from_runtime() -> None:
 
     reference = rt.reference
     outdir = rt.outdir
-    ncores = rt.cores
+    # The pipeline resolves ``-cores`` once at startup. In particular,
+    # ``-cores 0`` remains the requested value in ``rt.cores`` but HISAT2
+    # must receive the positive, resolved worker count.
+    try:
+        ncores = int(getattr(rt, "ncores", None))
+    except (TypeError, ValueError):
+        ncores = None
+    if ncores is None or ncores < 1:
+        ncores = getattr(rt, "cores", None)
     runtype = rt.runtype
     reference_id_mode = getattr(rt, "reference_id_mode", None)
     if not reference_id_mode:
@@ -258,8 +266,11 @@ def indexBuilder(reference, ncores):
     genoIndex = '%s/index/%s' % (os.getcwd(), fastaclean.rpartition('/')[-1].rpartition('.')[0])
     print('Creating index of cDNA/genomic sequences:%s**\n' % (genoIndex))
 
-    ncores = str(ncores)
-    retcode = subprocess.call(["hisat2-build", "-p", ncores, "-f", fastaclean, genoIndex])
+    try:
+        ncores = max(1, int(ncores))
+    except (TypeError, ValueError):
+        ncores = 1
+    retcode = subprocess.call(["hisat2-build", "-p", str(ncores), "-f", fastaclean, genoIndex])
     print(retcode)
 
     if retcode != 0:

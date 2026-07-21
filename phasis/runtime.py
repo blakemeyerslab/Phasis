@@ -29,6 +29,7 @@ compress_intermediates = True
 samtools_path = None
 samtools_version = None
 parallel_lib_worker_cap = None
+fastq_chunk_unique_tags = None
 
 # (keep your existing globals below; I’m not repeating them all)
 
@@ -44,7 +45,7 @@ _RUNTIME_KEYS = [
     "cluster_scoring_initial_worker_cap","cluster_scoring_max_worker_cap",
     "plot_staging","plot_staging_mode","plot_staging_root",
     "legacy_classification","classification_overrides","locus_plot_mode",
-    "compress_intermediates","samtools_path","samtools_version","parallel_lib_worker_cap",
+    "compress_intermediates","samtools_path","samtools_version","parallel_lib_worker_cap","fastq_chunk_unique_tags",
 ]
 
 def _snapshot_path(run_dir_override: str | None = None) -> str:

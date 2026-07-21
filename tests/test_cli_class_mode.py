@@ -157,6 +157,43 @@ class CliReferenceIdModeTests(unittest.TestCase):
         self.assertIn("--compress_intermediates", help_text)
         self.assertIn("--no_compress_intermediates", help_text)
 
+    def test_fastq_chunk_size_option_is_validated_and_stored_in_runtime(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["--fastq-chunk-unique-tags", "100000"])
+        cli._validate_args(args)
+        self.assertEqual(args.fastq_chunk_unique_tags, 100000)
+
+        original_chunk_size = getattr(rt, "fastq_chunk_unique_tags", None)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                ref = _touch(os.path.join(tmpdir, "ref.fa"))
+                lib = _touch(os.path.join(tmpdir, "lib.fastq"))
+                args = parser.parse_args(
+                    [
+                        "-libs",
+                        lib,
+                        "-reference",
+                        ref,
+                        "--fastq-chunk-unique-tags",
+                        "100000",
+                        "--outdir",
+                        os.path.join(tmpdir, "results"),
+                    ]
+                )
+                cli.configure_runtime(args)
+                self.assertEqual(rt.fastq_chunk_unique_tags, 100000)
+        finally:
+            rt.fastq_chunk_unique_tags = original_chunk_size
+
+        invalid_args = parser.parse_args(["--fastq-chunk-unique-tags", "0"])
+        with self.assertRaises(SystemExit):
+            cli._validate_args(invalid_args)
+
+    def test_negative_cores_are_rejected(self):
+        args = cli.build_parser().parse_args(["-cores", "-1"])
+        with self.assertRaises(SystemExit):
+            cli._validate_args(args)
+
     def test_configure_runtime_stores_reference_id_mode(self):
         parser = cli.build_parser()
         with tempfile.TemporaryDirectory() as tmpdir:

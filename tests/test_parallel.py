@@ -7,6 +7,7 @@ from unittest import mock
 
 from phasis import parallel
 from phasis import runtime as rt
+from phasis.stages import indexing
 
 
 class ParallelCpuTests(unittest.TestCase):
@@ -20,12 +21,84 @@ class ParallelCpuTests(unittest.TestCase):
     def test_core_reserve_respects_scheduler_visible_cpu_limit(self):
         with mock.patch.object(parallel.multiprocessing, "cpu_count", return_value=64):
             with mock.patch.dict(os.environ, {"SLURM_CPUS_PER_TASK": "8"}, clear=True):
-                self.assertEqual(parallel.coreReserve(0), 7)
+                self.assertEqual(parallel.coreReserve(0), 8)
 
     def test_core_reserve_caps_explicit_request_to_visible_cpus(self):
         with mock.patch.object(parallel.multiprocessing, "cpu_count", return_value=64):
             with mock.patch.dict(os.environ, {"SLURM_CPUS_PER_TASK": "8"}, clear=True):
                 self.assertEqual(parallel.coreReserve(20), 8)
+
+    def test_core_reserve_honors_an_explicit_request_without_scaling(self):
+        with mock.patch.object(parallel.multiprocessing, "cpu_count", return_value=64):
+            with mock.patch.dict(os.environ, {"SLURM_CPUS_PER_TASK": "8"}, clear=True):
+                self.assertEqual(parallel.coreReserve(4), 4)
+
+    def test_core_reserve_never_returns_zero_for_a_single_visible_cpu(self):
+        with mock.patch.object(parallel.multiprocessing, "cpu_count", return_value=1):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(parallel.coreReserve(0), 1)
+
+    def test_index_stage_uses_resolved_core_count_for_cores_zero(self):
+        original_ncores = indexing.ncores
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with mock.patch.multiple(
+                    rt,
+                    create=True,
+                    cores=0,
+                    ncores=8,
+                    reference=os.path.join(tmpdir, "reference.fa"),
+                    outdir=tmpdir,
+                    runtype="G",
+                    reference_id_mode="numeric",
+                    mindepth=1,
+                    clustbuffer=300,
+                    maxhits=25,
+                    mismat=0,
+                    memFile=os.path.join(tmpdir, "phasis.mem"),
+                ):
+                    indexing.sync_from_runtime()
+                    self.assertEqual(indexing.ncores, 8)
+        finally:
+            indexing.ncores = original_ncores
+
+    def test_index_builder_never_passes_zero_threads_to_hisat2(self):
+        original_cwd = os.getcwd()
+        original_ncores = indexing.ncores
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                reference = os.path.join(tmpdir, "reference.fa")
+                clean_reference = os.path.join(tmpdir, "reference.clean.fa")
+                summary = os.path.join(tmpdir, "reference.summ.txt")
+                for path in (reference, clean_reference, summary):
+                    with open(path, "w", encoding="utf-8") as handle:
+                        handle.write("test\n")
+
+                os.chdir(tmpdir)
+                with mock.patch.multiple(
+                    rt,
+                    create=True,
+                    cores=0,
+                    ncores=8,
+                    reference=reference,
+                    outdir=tmpdir,
+                    runtype="G",
+                    reference_id_mode="numeric",
+                    mindepth=1,
+                    clustbuffer=300,
+                    maxhits=25,
+                    mismat=0,
+                    memFile=os.path.join(tmpdir, "phasis.mem"),
+                ):
+                    with mock.patch.object(indexing, "refClean", return_value=(clean_reference, summary)):
+                        with mock.patch.object(indexing.subprocess, "call", return_value=1) as run_hisat2:
+                            with self.assertRaises(SystemExit):
+                                indexing.indexBuilder(reference, 8)
+
+                self.assertEqual(run_hisat2.call_args.args[0][0:3], ["hisat2-build", "-p", "8"])
+        finally:
+            os.chdir(original_cwd)
+            indexing.ncores = original_ncores
 
 
 class ParallelPycacheTests(unittest.TestCase):

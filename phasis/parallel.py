@@ -607,24 +607,18 @@ def coreReserve(cores):
 
     Kept as a canonical helper outside legacy.py so startup can reserve cores
     without routing the real logic through the compatibility layer.
+
+    ``-cores 0`` means all CPU cores visible to this process (respecting a
+    scheduler allocation such as ``SLURM_CPUS_PER_TASK``). A positive request
+    is exact unless it exceeds that visible allocation.
     """
     totalcores = _effective_visible_cpu_count()
-    if cores == 0:
-        if totalcores == 4:
-            ncores = 3
-        elif totalcores == 6:
-            ncores = 5
-        elif totalcores > 6 and totalcores <= 10:
-            ncores = 7
-        else:
-            ncores = int(totalcores * 0.95)
-    else:
-        if cores > totalcores:
-            ncores = totalcores
-        else:
-            ncores = int(cores * 0.95)
-
-    return ncores
+    requested = int(cores)
+    if requested < 0:
+        raise ValueError("cores must be zero or a positive integer")
+    if requested == 0:
+        return int(max(1, totalcores))
+    return int(max(1, min(requested, totalcores)))
 
 
 
