@@ -8,7 +8,11 @@ from phasis import libprep
 from phasis import runtime as rt
 from phasis.cache import MemCache, compute_md5_str, default_memfile_path, sig_key, stage_signature
 from phasis.env import getenv
-from phasis.parallel import resolve_library_worker_cap, run_parallel_with_progress
+from phasis.parallel import (
+    FASTQ_DYNAMIC_LIBRARY_WORKER_STEPS,
+    resolve_library_worker_cap,
+    run_parallel_with_progress,
+)
 
 # Stage-local globals (only what libraryprocess needs)
 mindepth = None
@@ -391,6 +395,19 @@ def _ensure_sections(cfg):
             cfg.add_section(sect)
 
 
+def _record_mindepth_metadata(cfg) -> bool:
+    """Record the active depth after old processed-library caches are assessed.
+
+    The index can be reused across depth values, but writing this before the
+    legacy cache check would allow an old depth's FASTA output to be reused.
+    """
+    desired = "" if mindepth is None else str(mindepth)
+    if cfg["ADVANCED"].get("mindepth") == desired:
+        return False
+    cfg["ADVANCED"]["mindepth"] = desired
+    return True
+
+
 def _library_input_signature(alib):
     return stage_signature(
         files=[alib],
@@ -487,8 +504,9 @@ def _process_input_libraries(libs_to_process):
     )
     if libformat == "Q":
         print(
-            "[INFO] FASTQ conversion is intentionally memory-conservative. "
-            "Set PHASIS_LIB_WORKER_CAP above 1 only when the job has enough memory per concurrent library.",
+            "[INFO] FASTQ conversion starts with one library worker, then expands after "
+            "successful batches up to the displayed cap. Worker failures automatically "
+            "reduce parallelism; set PHASIS_LIB_WORKER_CAP to choose a lower or higher cap.",
             flush=True,
         )
     proc_results = run_parallel_with_progress(
@@ -496,8 +514,13 @@ def _process_input_libraries(libs_to_process):
         jobs,
         desc="Filtering/Converting",
         maxtasksperchild=1 if libformat == "Q" else LIBRARY_PROCESS_MAXTASKSPERCHILD,
-        initial_worker_cap=worker_cap,
+        initial_worker_cap=1 if libformat == "Q" else worker_cap,
         max_worker_cap=worker_cap,
+        initial_chunk_size=1 if libformat == "Q" else None,
+        max_chunk_size=worker_cap if libformat == "Q" else None,
+        recovery_success_slices=1 if libformat == "Q" else 2,
+        recovery_progress_fraction=0.0 if libformat == "Q" else 0.05,
+        recovery_growth_steps=FASTQ_DYNAMIC_LIBRARY_WORKER_STEPS if libformat == "Q" else None,
     )
     if _runtime_errors(proc_results):
         sys.exit("One or more libraries failed during filtering/conversion; see errors above.")
@@ -552,8 +575,8 @@ def libraryprocess(libs):
     )
     if libformat == "Q":
         print(
-            "[INFO] FASTQ conversion defaults to one library at a time to control memory use. "
-            "PHASIS_LIB_WORKER_CAP raises this limit and increases memory use per concurrent library.",
+            "[INFO] FASTQ conversion starts with one library worker and adaptively expands "
+            f"to at most {worker_cap}; PHASIS_LIB_WORKER_CAP overrides that maximum.",
             flush=True,
         )
 
@@ -676,7 +699,8 @@ def libraryprocess(libs):
                 input_sig=input_sig,
             ) or cache_dirty
 
-    if compat_dirty or cache_dirty:
+    metadata_dirty = _record_mindepth_metadata(config)
+    if compat_dirty or cache_dirty or metadata_dirty:
         cache.flush()
 
     if concat_libs:

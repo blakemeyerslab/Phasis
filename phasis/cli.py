@@ -42,8 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Reference FASTA ID handling for the indexed .clean.fa: numeric or preserve [default derived from -runtype]",
     )
-    parser.add_argument("-mindepth", default=2, type=int,
-                        help="Minimum depth for p-value computation [default 2]")
+    parser.add_argument("-mindepth", default=1, type=int,
+                        help="Minimum depth for p-value computation [default 1]")
     parser.add_argument("-uniqueRatioCut", default=0.2, type=float,
                         help="Proportion of uniquely mapped reads filter [default 0.2]")
     parser.add_argument("-max_complexity", default=0.3, type=float,

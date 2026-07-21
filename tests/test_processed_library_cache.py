@@ -43,6 +43,64 @@ def _fake_mapper(aninput):
 
 
 class LibraryProcessingCacheTests(unittest.TestCase):
+    def test_mindepth_metadata_updates_after_cache_evaluation(self):
+        cfg = configparser.ConfigParser()
+        cfg.optionxform = str
+        cfg["ADVANCED"] = {"mindepth": "2", "maxhits": "25"}
+
+        original_mindepth = library_processing.mindepth
+        try:
+            library_processing.mindepth = 1
+            self.assertTrue(library_processing._record_mindepth_metadata(cfg))
+        finally:
+            library_processing.mindepth = original_mindepth
+
+        self.assertEqual(cfg["ADVANCED"]["mindepth"], "1")
+        self.assertEqual(cfg["ADVANCED"]["maxhits"], "25")
+
+    def test_fastq_processing_requests_a_conservative_adaptive_worker_ramp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            libraries = [
+                _write_text(os.path.join(tmpdir, f"lib{index}.fastq"), "@r\n" + "A" * 21 + "\n+\n" + "I" * 21 + "\n")
+                for index in range(4)
+            ]
+            captured = {}
+
+            def fake_runner(_func, jobs, **kwargs):
+                captured.update(kwargs)
+                outputs = []
+                for _lib, output in jobs:
+                    os.makedirs(os.path.dirname(output), exist_ok=True)
+                    _write_text(output, ">seq_1|1\n" + "A" * 21 + "\n")
+                    outputs.append(output)
+                return outputs
+
+            with mock.patch.multiple(
+                rt,
+                create=True,
+                ncores=8,
+                libformat="Q",
+                parallel_lib_worker_cap=None,
+                run_dir=tmpdir,
+            ):
+                with mock.patch.object(library_processing, "libformat", "Q"):
+                    with mock.patch.dict(os.environ, {"PHASIS_LIB_WORKER_CAP": ""}, clear=False):
+                        with mock.patch.object(
+                            library_processing,
+                            "run_parallel_with_progress",
+                            side_effect=fake_runner,
+                        ):
+                            outputs = library_processing._process_input_libraries(libraries)
+
+            self.assertEqual(len(outputs), 4)
+            self.assertEqual(captured["initial_worker_cap"], 1)
+            self.assertEqual(captured["max_worker_cap"], 8)
+            self.assertEqual(captured["initial_chunk_size"], 1)
+            self.assertEqual(captured["max_chunk_size"], 8)
+            self.assertEqual(captured["recovery_success_slices"], 1)
+            self.assertEqual(captured["recovery_progress_fraction"], 0.0)
+            self.assertEqual(captured["recovery_growth_steps"], (1, 2, 4, 6, 8))
+
     def test_library_processing_compat_lookup_accepts_legacy_plain_fasta_key(self):
         cfg = configparser.ConfigParser()
         cfg.optionxform = str

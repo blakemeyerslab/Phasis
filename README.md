@@ -241,7 +241,7 @@ If `-class_cluster_files` is omitted, Phasis tries to infer the expected cluster
 | `-cores` | `0` uses all CPU cores visible to the process (including scheduler limits); `>0` sets an exact core count, capped by that allocation. |
 | `--fastq-chunk-unique-tags` | For `-libformat Q`, maximum unique tags held in memory before a temporary disk-backed aggregation chunk is written (default `250000`). |
 | `-maxhits` | Value passed as `-k` to HISAT2. |
-| `-mindepth` | Minimum depth for p-value computation. |
+| `-mindepth` | Minimum depth for p-value computation (default `1`). |
 | `-uniqueRatioCut` | Minimum proportion of uniquely mapped reads. |
 | `-max_complexity` | Maximum complexity filter. |
 | `-mismat` | Post-alignment mismatch filter while parsing alignments. |
@@ -264,10 +264,13 @@ export PHASIS_LIB_WORKER_CAP=1
 phasis ... -libformat Q
 ```
 
-FASTQ conversion defaults to one concurrent library to avoid compounding
-temporary disk I/O and per-worker chunk memory. Raise the cap only when the job
-has sufficient I/O and memory per library. This cap applies to library
-preparation; mapping remains scheduled from the requested `-cores` value.
+FASTQ conversion starts with one library worker, then increases after successful
+batches through `1 → 2 → 4 → 6 → 8`, up to a default cap of eight workers (or
+the available core count when lower). If a worker or pool fails, Phasis reduces
+parallelism and retries the current work. Set `PHASIS_LIB_WORKER_CAP` to choose
+a lower or higher maximum when the job has sufficient temporary-I/O bandwidth
+and memory per library. This cap applies to library preparation; mapping remains
+scheduled from the requested `-cores` value.
 
 ### Cleanup
 

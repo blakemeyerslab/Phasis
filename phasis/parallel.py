@@ -4,6 +4,10 @@ import phasis.runtime as rt
 from phasis.env import getenv
 
 
+FASTQ_DYNAMIC_LIBRARY_WORKER_CAP_DEFAULT = 8
+FASTQ_DYNAMIC_LIBRARY_WORKER_STEPS = (1, 2, 4, 6, 8)
+
+
 def _coerce_positive_int(value, default=None):
     try:
         if value is None or value == "":
@@ -116,9 +120,13 @@ def _resolve_lib_worker_cap(ncores_local: int) -> int:
         _coerce_positive_int(getenv("Phasis_LIB_WORKER_CAP"), None),
     )
     if configured is None:
-        # Streaming FASTQ conversion can still retain many valid unique tags.
-        # Keep it sequential unless the user explicitly accepts more per-lib RAM.
-        configured = 1 if str(getattr(rt, "libformat", "")).upper() == "Q" else int(max(1, ncores_local))
+        if str(getattr(rt, "libformat", "")).upper() == "Q":
+            # Q mode starts with one worker, then adaptively probes up to this
+            # cap after successful batches. A modest default avoids an abrupt
+            # memory and temporary-I/O spike on large libraries.
+            configured = FASTQ_DYNAMIC_LIBRARY_WORKER_CAP_DEFAULT
+        else:
+            configured = int(max(1, ncores_local))
     return int(max(1, min(ncores_local, configured)))
 
 
@@ -132,7 +140,7 @@ def resolve_library_worker_cap(ncores_local: int) -> tuple[int, str]:
     if configured is not None:
         return cap, "PHASIS_LIB_WORKER_CAP"
     if str(getattr(rt, "libformat", "")).upper() == "Q":
-        return cap, "conservative FASTQ default"
+        return cap, "adaptive FASTQ default (starts at 1)"
     return cap, "default"
 
 
@@ -221,10 +229,13 @@ def run_parallel_with_progress(
     maxtasksperchild=None, # Auto-tuned worker reuse; callers can still override explicitly
     initial_worker_cap=None,
     max_worker_cap=None,
+    initial_chunk_size=None,
+    max_chunk_size=None,
     adaptive_recovery=True,
     recovery_success_slices=2,
     recovery_progress_fraction=0.05,
     recovery_growth_factor=2.0,
+    recovery_growth_steps=None,
 ):
 
     """
@@ -235,8 +246,11 @@ def run_parallel_with_progress(
         smaller (chunk_size, nworkers): [proposed] -> 10 -> 5 -> 1; workers n->8->4->2->1.
       - Optional adaptive recovery can re-expand chunk_size/workers after a
         stretch of successful reduced-mode slices.
-      - Callers can start conservatively with `initial_worker_cap` while still
-        allowing recovery to grow toward `max_worker_cap`.
+      - Callers can start conservatively with `initial_worker_cap` and
+        `initial_chunk_size` while recovery grows toward their corresponding
+        maximums.
+      - Callers can optionally provide explicit recovery growth steps instead
+        of the default multiplicative growth rule.
       - maxtasksperchild is auto-tuned unless callers override it.
       - BLAS single-threaded to avoid hidden fan-out.
 
@@ -268,8 +282,23 @@ def run_parallel_with_progress(
     resolved_initial_worker_cap = _resolve_worker_cap(initial_worker_cap, ncores)
     resolved_initial_worker_cap = min(resolved_initial_worker_cap, resolved_max_worker_cap)
 
-    # Initial chunk size & workers
-    initial_chunk_size = _compute_initial_chunk_size(n_data, ncores, unit, min_chunk, batch_factor)
+    # Initial chunk size & workers. Keep the conventional behaviour unless a
+    # caller explicitly asks for a cautious starting batch (Q-mode FASTQ does).
+    default_chunk_size = _compute_initial_chunk_size(n_data, ncores, unit, min_chunk, batch_factor)
+    if max_chunk_size is None:
+        if unit == "lib":
+            max_chunk_size = min(n_data, resolved_max_worker_cap)
+        else:
+            max_chunk_size = default_chunk_size
+    else:
+        max_chunk_size = min(n_data, max(1, int(max_chunk_size)))
+
+    if initial_chunk_size is None:
+        initial_chunk_size = default_chunk_size
+    else:
+        initial_chunk_size = max(1, int(initial_chunk_size))
+    initial_chunk_size = min(n_data, initial_chunk_size, max_chunk_size)
+
     chunk_size = initial_chunk_size
     initial_nworkers = min(ncores, chunk_size, resolved_initial_worker_cap) or 1
     nworkers = initial_nworkers
@@ -289,9 +318,9 @@ def run_parallel_with_progress(
         while i < n_data:
             current_worker_target = min(ncores, chunk_size, resolved_max_worker_cap) or 1
             if adaptive_recovery and (
-                chunk_size < initial_chunk_size or nworkers < current_worker_target
+                chunk_size < max_chunk_size or nworkers < current_worker_target
             ):
-                if nworkers >= current_worker_target and chunk_size >= initial_chunk_size:
+                if nworkers >= current_worker_target and chunk_size >= max_chunk_size:
                     success_slices_since_failure = 0
                     items_since_failure = 0
                 else:
@@ -303,8 +332,9 @@ def run_parallel_with_progress(
                         prev_nworkers = nworkers
                         chunk_size = _grow_parallel_setting(
                             chunk_size,
-                            initial_chunk_size,
+                            max_chunk_size,
                             growth_factor=recovery_growth_factor,
+                            growth_steps=recovery_growth_steps,
                         )
                         worker_growth_target = min(
                             ncores,
@@ -318,6 +348,7 @@ def run_parallel_with_progress(
                                 nworkers,
                                 worker_growth_target,
                                 growth_factor=recovery_growth_factor,
+                                growth_steps=recovery_growth_steps,
                             ),
                         ) or 1
                         success_slices_since_failure = 0
@@ -353,6 +384,7 @@ def run_parallel_with_progress(
                     # Try streaming this chunk with nw workers
                     try:
                         buffered_results = {}
+                        worker_result_failure = False
                         with make_pool(
                             nw,
                             start_method=start_method,
@@ -369,6 +401,7 @@ def run_parallel_with_progress(
                             ):
                                 if isinstance(res, RuntimeError):
                                     slice_had_failure = True
+                                    worker_result_failure = True
                                     retry = safe_worker((func, arg))
                                     if isinstance(retry, RuntimeError):
                                         print(f"[ERROR] Serial retry failed for arg: {arg}\n{retry}")
@@ -394,6 +427,16 @@ def run_parallel_with_progress(
                         if nw < nworkers:
                             nworkers = nw
                             #print(f"[INFO] Lowering worker count to {nworkers}.")
+                        if worker_result_failure:
+                            previous_workers = nworkers
+                            previous_chunk_size = chunk_size
+                            nworkers = max(1, nworkers // 2)
+                            chunk_size = max(1, chunk_size // 2)
+                            if nworkers != previous_workers or chunk_size != previous_chunk_size:
+                                print(
+                                    "[WARN] Worker task failed; reducing ongoing parallelism to "
+                                    f"chunk_size={chunk_size}, workers={nworkers}."
+                                )
 
                         break  # worker_trials loop
                     except MemoryError as e:
@@ -470,11 +513,23 @@ def _compute_recovery_progress_items(n_data: int, recovery_progress_fraction: fl
     return max(1, int(n_data * fraction))
 
 
-def _grow_parallel_setting(current: int, target: int, *, growth_factor: float = 2.0) -> int:
+def _grow_parallel_setting(
+    current: int,
+    target: int,
+    *,
+    growth_factor: float = 2.0,
+    growth_steps=None,
+) -> int:
     current = int(max(1, current))
     target = int(max(1, target))
     if current >= target:
         return target
+    if growth_steps is not None:
+        try:
+            for step in sorted({int(value) for value in growth_steps if int(value) > current}):
+                return min(target, max(current + 1, step))
+        except (TypeError, ValueError):
+            pass
     try:
         grown = int(round(current * float(growth_factor)))
     except Exception:

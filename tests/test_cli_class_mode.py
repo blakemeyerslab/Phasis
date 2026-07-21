@@ -194,6 +194,24 @@ class CliReferenceIdModeTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             cli._validate_args(args)
 
+    def test_mindepth_defaults_to_one_and_is_stored_in_runtime(self):
+        parser = cli.build_parser()
+        args = parser.parse_args([])
+        self.assertEqual(args.mindepth, 1)
+
+        original_mindepth = getattr(rt, "mindepth", None)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                ref = _touch(os.path.join(tmpdir, "ref.fa"))
+                lib = _touch(os.path.join(tmpdir, "lib.tag"))
+                args = parser.parse_args(
+                    ["-libs", lib, "-reference", ref, "--outdir", os.path.join(tmpdir, "results")]
+                )
+                cli.configure_runtime(args)
+                self.assertEqual(rt.mindepth, 1)
+        finally:
+            rt.mindepth = original_mindepth
+
     def test_configure_runtime_stores_reference_id_mode(self):
         parser = cli.build_parser()
         with tempfile.TemporaryDirectory() as tmpdir:
