@@ -18,6 +18,8 @@ cluster_build_initial_worker_cap = None
 cluster_build_max_worker_cap = None
 cluster_scoring_initial_worker_cap = None
 cluster_scoring_max_worker_cap = None
+feature_assembly_worker_cap = None
+feature_assembly_batch_rows = None
 plot_staging = None
 plot_staging_mode = None
 plot_staging_root = None
@@ -43,6 +45,8 @@ _RUNTIME_KEYS = [
     "outdir","run_dir","memFile","clusters_scored_tsv","cleanup","cleanup_all",
     "cluster_build_initial_worker_cap","cluster_build_max_worker_cap",
     "cluster_scoring_initial_worker_cap","cluster_scoring_max_worker_cap",
+    "feature_assembly_worker_cap",
+    "feature_assembly_batch_rows",
     "plot_staging","plot_staging_mode","plot_staging_root",
     "legacy_classification","classification_overrides","locus_plot_mode",
     "compress_intermediates","samtools_path","samtools_version","parallel_lib_worker_cap","fastq_chunk_unique_tags",

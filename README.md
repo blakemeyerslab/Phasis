@@ -272,6 +272,29 @@ a lower or higher maximum when the job has sufficient temporary-I/O bandwidth
 and memory per library. This cap applies to library preparation; mapping remains
 scheduled from the requested `-cores` value.
 
+### Feature-assembly worker cap
+
+Feature assembly keeps each cluster intact but packs clusters from any chromosome
+into fixed-size, 100,000-row work batches. It starts with two concurrent batches
+and, after successful work, can expand through the standard recovery engine to
+70% of the allocated CPU cores (for example, 8 workers from a 12-core job).
+This prevents one enriched chromosome from dominating a worker and avoids an HPC
+memory kill before generic pool recovery can act. A caught worker failure reduces
+concurrency; later successful batches recover only to that hard cap. To choose a
+different cap or batch size for a measured workload:
+
+```bash
+export PHASIS_FEATURE_ASSEMBLY_WORKER_CAP=3
+export PHASIS_FEATURE_ASSEMBLY_BATCH_ROWS=50000
+phasis ...
+```
+
+The concurrency cap also limits the number of feature-batch DataFrames submitted
+to a pool at once, avoiding a large queued serialization spike. Lower
+`PHASIS_FEATURE_ASSEMBLY_BATCH_ROWS` if a single task is still memory-heavy; a
+cluster larger than that setting cannot be split without altering its features,
+and Phasis reports those exceptional clusters explicitly.
+
 ### Cleanup
 
 Use cleanup modes from a Phasis run root only:

@@ -5,6 +5,7 @@ from .. import state as st
 from .. import ids
 import os
 import re
+import multiprocessing
 import numpy as np
 import pandas as pd
 
@@ -23,6 +24,10 @@ from phasis.parallel import run_parallel_with_progress
 DCL_OVERHANG = 2          # canonical 2-nt 3' overhang used for opposite-strand duplex pairing
 WINDOW_MULTIPLIER = 10    # 10 cycles per window
 FEATURE_SCHEMA_VERSION = 19
+FEATURE_ASSEMBLY_INITIAL_WORKER_CAP = 2
+FEATURE_ASSEMBLY_DEFAULT_MAX_CPU_FRACTION_NUMERATOR = 7
+FEATURE_ASSEMBLY_DEFAULT_MAX_CPU_FRACTION_DENOMINATOR = 10
+FEATURE_ASSEMBLY_DEFAULT_BATCH_ROWS = 100_000
 HOWELL_AMBIGUITY_FRACTION = 0.90
 HOWELL_CROWDING_SCORE_GAP = 4.0
 ALTERNATIVE_MIN_SHARED_CYCLES = 3
@@ -188,6 +193,125 @@ def _get_memfile() -> str:
     return mem
 
 
+def _coerce_positive_int(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        value = int(value)
+        if value <= 0:
+            return default
+        return value
+    except Exception:
+        return default
+
+
+def _feature_assembly_ncores() -> int:
+    """Return the resolved Phasis core allocation, with a safe fallback."""
+    ncores = _coerce_positive_int(getattr(rt, "ncores", None), None)
+    if ncores is None:
+        ncores = multiprocessing.cpu_count()
+    return int(max(1, ncores))
+
+
+def _feature_assembly_worker_cap() -> int:
+    """Resolve the maximum feature-assembly concurrency for this allocation."""
+    ncores = _feature_assembly_ncores()
+    default_cap = max(
+        1,
+        (ncores * FEATURE_ASSEMBLY_DEFAULT_MAX_CPU_FRACTION_NUMERATOR)
+        // FEATURE_ASSEMBLY_DEFAULT_MAX_CPU_FRACTION_DENOMINATOR,
+    )
+    configured = _coerce_positive_int(
+        getattr(rt, "feature_assembly_worker_cap", None),
+        _coerce_positive_int(
+            getenv("Phasis_FEATURE_ASSEMBLY_WORKER_CAP"),
+            default_cap,
+        ),
+    )
+    return int(max(1, min(ncores, configured)))
+
+
+def _feature_assembly_batch_rows() -> int:
+    """Return the maximum input rows per indivisible feature-assembly task."""
+    return int(
+        _coerce_positive_int(
+            getattr(rt, "feature_assembly_batch_rows", None),
+            _coerce_positive_int(
+                getenv("Phasis_FEATURE_ASSEMBLY_BATCH_ROWS"),
+                FEATURE_ASSEMBLY_DEFAULT_BATCH_ROWS,
+            ),
+        )
+    )
+
+
+def _build_feature_assembly_batches(
+    clusters_data: pd.DataFrame,
+    *,
+    batch_rows: int,
+) -> tuple[list[pd.DataFrame], int]:
+    """Pack complete clusters into bounded-row work batches.
+
+    A feature calculation is intrinsically per cluster, so a cluster must never
+    be split between tasks. The former chromosome-sized work units could make a
+    single enriched chromosome consume most of a worker's RAM. This keeps that
+    cluster boundary while allowing batches to span chromosomes and stay near a
+    predictable input size. The returned oversized count identifies clusters
+    which cannot be made smaller without changing feature semantics.
+    """
+    target_rows = max(1, int(batch_rows))
+    batches: list[pd.DataFrame] = []
+    current_parts = []
+    current_rows = 0
+    oversized_clusters = 0
+
+    # ``indices`` holds integer row positions, avoiding a DataFrame copy for
+    # every cluster while preserving the prior chromosome -> cluster grouping.
+    cluster_indices = clusters_data.groupby(
+        ["chromosome", "clusterID"],
+        sort=False,
+    ).indices
+    for positions in cluster_indices.values():
+        cluster_rows = len(positions)
+        if current_parts and current_rows + cluster_rows > target_rows:
+            batches.append(clusters_data.iloc[np.concatenate(current_parts)].copy())
+            current_parts = []
+            current_rows = 0
+
+        current_parts.append(positions)
+        current_rows += cluster_rows
+        if cluster_rows > target_rows:
+            oversized_clusters += 1
+
+        # Flush a full batch immediately. An oversized cluster is therefore
+        # isolated rather than being combined with another cluster.
+        if current_rows >= target_rows:
+            batches.append(clusters_data.iloc[np.concatenate(current_parts)].copy())
+            current_parts = []
+            current_rows = 0
+
+    if current_parts:
+        batches.append(clusters_data.iloc[np.concatenate(current_parts)].copy())
+
+    return batches, oversized_clusters
+
+
+def _feature_assembly_parallel_kwargs(group_count: int) -> dict:
+    """Bound both workers and in-flight feature-batch DataFrames for this stage."""
+    max_worker_cap = _feature_assembly_worker_cap()
+    initial_worker_cap = min(FEATURE_ASSEMBLY_INITIAL_WORKER_CAP, max_worker_cap)
+    initial_task_window = max(1, min(int(group_count), initial_worker_cap))
+    max_task_window = max(1, min(int(group_count), max_worker_cap))
+    return {
+        "initial_worker_cap": initial_worker_cap,
+        "max_worker_cap": max_worker_cap,
+        "initial_chunk_size": initial_task_window,
+        "max_chunk_size": max_task_window,
+        # A caught worker failure drops to one worker; successful later batches
+        # can recover only to this hard cap, never to all requested CPU cores.
+        "adaptive_recovery": True,
+    }
+
+
 def ensure_win_score_lookup_ready() -> None:
     """
     Spawn-safe: ensure st.WIN_SCORE_LOOKUP is populated in *this* process.
@@ -277,9 +401,34 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
 
     clusters_data = clusters_data[required_cols].copy()
 
-    # Split per chromosome for parallel processing
-    chromosome_groups = [df for _, df in clusters_data.groupby('chromosome', sort=False)]
-    print(f"  - Found {len(chromosome_groups)} chromosome groups")
+    # Split into bounded batches of whole clusters. A chromosome can therefore
+    # use several tasks instead of forcing one potentially huge DataFrame into a
+    # worker, while small chromosomes are efficiently packed together.
+    batch_rows = _feature_assembly_batch_rows()
+    feature_batches, oversized_clusters = _build_feature_assembly_batches(
+        clusters_data,
+        batch_rows=batch_rows,
+    )
+    chromosome_count = clusters_data.groupby("chromosome", sort=False).ngroups
+    print(
+        f"  - Found {chromosome_count} chromosome groups; built "
+        f"{len(feature_batches)} feature batches of up to {batch_rows:,} input rows"
+    )
+    if oversized_clusters:
+        print(
+            "[WARN] "
+            f"{oversized_clusters} cluster(s) exceed the feature batch size and "
+            "must be processed intact."
+        )
+
+    feature_parallel_kwargs = _feature_assembly_parallel_kwargs(len(feature_batches))
+    print(
+        "  - Feature assembly starts with "
+        f"{feature_parallel_kwargs['initial_worker_cap']} concurrent batch(es) and "
+        f"can grow to {feature_parallel_kwargs['max_worker_cap']}; set "
+        "PHASIS_FEATURE_ASSEMBLY_WORKER_CAP or PHASIS_FEATURE_ASSEMBLY_BATCH_ROWS "
+        "to override."
+    )
 
     trace_enabled = _main_partner_trace_enabled()
     trace_outpath = _main_partner_trace_outpath(
@@ -291,11 +440,11 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
     # ---------- Parallel processing ----------
     results = run_parallel_with_progress(
         process_chromosome_features,
-        chromosome_groups,
+        feature_batches,
         desc="Assemble features",
         min_chunk=1,
-        adaptive_recovery=True,
-        unit="lib-chr"
+        unit="lib-chr",
+        **feature_parallel_kwargs,
     )
 
     # ---------- Flatten safely ----------
@@ -3889,7 +4038,7 @@ def compute_phasing_score_Howell_strict(aclust: pd.DataFrame):
 
 def process_chromosome_features(chromosome_df: pd.DataFrame):
     """
-    Build per-cluster feature rows (wobble + strict Howell).
+    Build per-cluster feature rows (wobble + strict Howell) for one work batch.
     Returns rows matching FEATURE_COLS order.
     Expected columns:
       ['clusterID','chromosome','strand','pos','len','abun','identifier','tag_seq','alib']
