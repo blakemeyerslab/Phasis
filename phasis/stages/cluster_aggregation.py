@@ -203,11 +203,20 @@ def aggregate_and_write_processed_clusters(
     )
     _raise_on_parallel_errors(all_clustlists)
 
+    parsed_row_count = sum(len(sublist) for sublist in all_clustlists)
+    print(
+        "[INFO] Consolidating "
+        f"{parsed_row_count:,} candidate-cluster records into one table and sorting "
+        "by cluster and genomic position. This uses one CPU core and may take several "
+        "minutes for large runs.",
+        flush=True,
+    )
     flat_clustlist = [item for sublist in all_clustlists for item in sublist]
 
     allClusters = pd.DataFrame(flat_clustlist, columns=PROCESSED_CLUSTER_COLUMNS)
     allClusters = allClusters.sort_values(by=["clusterID", "pos"])
 
+    print(f"[INFO] Writing consolidated processed clusters: {outfname}", flush=True)
     allClusters.to_csv(outfname, sep="\t", index=False, header=True)
 
     fp = finalize_text_artifact(cache, "PROCESSED", outfname, input_sig)
