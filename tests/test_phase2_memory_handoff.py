@@ -68,10 +68,10 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
                 return_value=phas_output,
             ) as build_phas,
             mock.patch.object(
-                phase2_pipeline.st_phas_clusters,
-                "load_phas_to_detect_output",
+                phase2_pipeline.st_winsel,
+                "select_scoring_windows_from_path",
                 return_value=pd.DataFrame(),
-            ) as load_phas,
+            ) as select_windows,
             mock.patch.object(phase2_pipeline, "phase2_basename", side_effect=logical_names),
         ):
             phase2_pipeline.run_phase2_pipeline(
@@ -79,7 +79,7 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
                 cfg=self._cfg(tmpdir),
             )
 
-        return raw_clusters, aggregate, build_phas, load_phas
+        return raw_clusters, aggregate, build_phas, select_windows
 
     def test_write_only_handoff_releases_raw_table_before_loading_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -87,7 +87,7 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
             with open(logical_output, "w", encoding="utf-8") as handle:
                 handle.write("identifier\n")
 
-            raw_clusters, aggregate, build_phas, load_phas = (
+            raw_clusters, aggregate, build_phas, select_windows = (
                 self._run_until_empty_phas_result(
                     tmpdir=tmpdir,
                     phas_output=logical_output,
@@ -105,30 +105,33 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
             concat_libs=False,
             return_dataframe=False,
         )
-        load_phas.assert_called_once_with(
+        select_windows.assert_called_once_with(
             logical_output,
-            columns=phase2_pipeline.PHASE2_RUNTIME_CLUSTER_COLUMNS,
+            window_len=0,
+            sliding=0,
+            minClusterLength=0,
+            memFile=mock.ANY,
         )
 
     def test_empty_write_only_result_exits_without_loading_phas_table(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            _, _, build_phas, load_phas = self._run_until_empty_phas_result(
+            _, _, build_phas, select_windows = self._run_until_empty_phas_result(
                 tmpdir=tmpdir,
                 phas_output=None,
             )
 
         self.assertEqual(build_phas.call_args.kwargs["return_dataframe"], False)
-        load_phas.assert_not_called()
+        select_windows.assert_not_called()
 
     def test_missing_returned_logical_path_exits_without_loading_phas_table(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             missing_output = os.path.join(tmpdir, "24_PHAS_to_detect.tab")
-            _, _, _, load_phas = self._run_until_empty_phas_result(
+            _, _, _, select_windows = self._run_until_empty_phas_result(
                 tmpdir=tmpdir,
                 phas_output=missing_output,
             )
 
-        load_phas.assert_not_called()
+        select_windows.assert_not_called()
 
     def test_compressed_phas_artifact_is_accepted_via_logical_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -139,14 +142,17 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
             with open(f"{logical_output}.gz", "wb") as handle:
                 handle.write(b"compressed fixture")
 
-            _, _, _, load_phas = self._run_until_empty_phas_result(
+            _, _, _, select_windows = self._run_until_empty_phas_result(
                 tmpdir=tmpdir,
                 phas_output=logical_output,
             )
 
-        load_phas.assert_called_once_with(
+        select_windows.assert_called_once_with(
             logical_output,
-            columns=phase2_pipeline.PHASE2_RUNTIME_CLUSTER_COLUMNS,
+            window_len=0,
+            sliding=0,
+            minClusterLength=0,
+            memFile=mock.ANY,
         )
 
     def test_compact_phase2_frame_keeps_required_columns_and_stable_categories(self):
@@ -178,7 +184,7 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
             ["002", "001"],
         )
 
-    def test_reloads_compact_phas_fields_only_when_locus_plots_need_them(self):
+    def test_streams_phas_fields_only_when_locus_plots_need_them(self):
         runtime_clusters = pd.DataFrame(
             {
                 "alib": ["libA", "libA"],
@@ -234,13 +240,12 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
                 mock.patch.object(
                     phase2_pipeline.st_phas_clusters,
                     "load_phas_to_detect_output",
-                    side_effect=[runtime_clusters.copy(), runtime_clusters.copy()],
                 ) as load_phas,
                 mock.patch.object(
                     phase2_pipeline.st_winsel,
-                    "select_scoring_windows",
+                    "select_scoring_windows_from_path",
                     return_value=pd.DataFrame({"cluster_id": ["cluster-1"]}),
-                ),
+                ) as select_windows,
                 mock.patch.object(
                     phase2_pipeline.st_winscore,
                     "compute_and_save_phasis_scores",
@@ -250,7 +255,7 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
                     phase2_pipeline.st_feat,
                     "features_to_detection",
                     return_value=pd.DataFrame({"cID": ["cluster-1"]}),
-                ),
+                ) as features_to_detection,
                 mock.patch.object(
                     phase2_pipeline.st_classify,
                     "gmm_classify",
@@ -261,6 +266,11 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
                     "apply_evidence_classification",
                     return_value=labeled,
                 ),
+                mock.patch.object(
+                    phase2_pipeline.st_locus_plots,
+                    "load_plot_clusters_for_labeled_calls",
+                    return_value=runtime_clusters.copy(),
+                ) as load_plot_clusters,
                 mock.patch.object(
                     phase2_pipeline.st_locus_plots,
                     "write_individual_phas_locus_plots",
@@ -276,15 +286,25 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
                     cfg=self._cfg(tmpdir),
                 )
 
-        expected_load = mock.call(
+        expected_window_selection = mock.call(
             logical_output,
-            columns=phase2_pipeline.PHASE2_RUNTIME_CLUSTER_COLUMNS,
+            window_len=0,
+            sliding=0,
+            minClusterLength=0,
+            memFile=mock.ANY,
         )
-        self.assertEqual(load_phas.call_args_list, [expected_load, expected_load])
+        self.assertEqual(select_windows.call_args, expected_window_selection)
+        features_to_detection.assert_called_once_with(
+            clusters_path=logical_output,
+            phase=24,
+            outdir=mock.ANY,
+            concat_libs=False,
+            memFile=mock.ANY,
+        )
+        load_plot_clusters.assert_called_once_with(logical_output, labeled)
+        load_phas.assert_not_called()
         plotted_clusters = write_plots.call_args.args[2]
-        self.assertTrue(
-            isinstance(plotted_clusters["clusterID"].dtype, pd.CategoricalDtype)
-        )
+        pd.testing.assert_frame_equal(plotted_clusters, runtime_clusters)
 
 
 if __name__ == "__main__":

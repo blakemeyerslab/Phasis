@@ -47,8 +47,9 @@ from phasis.stages import library_processing as st_library_processing
 
 
 # The completed PHAS table remains complete on disk for compatibility and
-# resume support. These are the only per-read fields required by the remaining
-# in-process Phase II stages: window selection, feature assembly, and plots.
+# resume support.  These constants remain available for API-compatible callers
+# which explicitly request an in-memory Phase II working table.  The pipeline
+# itself consumes the table through bounded disk-backed readers below.
 PHASE2_RUNTIME_CLUSTER_COLUMNS = (
     "alib",
     "clusterID",
@@ -273,8 +274,8 @@ def run_phase2_pipeline(
     gc.collect()
 
     # 4) Build PHAS clusters (handles empty input).  Use write-only mode so the
-    # raw candidate table can be released before the completed PHAS table is
-    # loaded for the downstream window/feature stages.
+    # raw candidate table can be released before downstream stages consume the
+    # completed PHAS table from bounded disk-backed batches.
     phas_output = st_phas_clusters.build_and_save_phas_clusters(
         allClusters,
         phase=int(cfg.phase) if str(cfg.phase).isdigit() else None,
@@ -284,27 +285,22 @@ def run_phase2_pipeline(
     )
 
     # The raw candidate table is not used after PHAS clusters have been built.
-    # Releasing it before loading the final table prevents a transient
-    # raw-plus-final, potentially multi-GB memory peak.
     del allClusters
     gc.collect()
 
-    clusters_data = _load_compact_phase2_clusters(phas_output)
-    if not clusters_data.empty:
-        print(
-            "[INFO] Retained "
-            f"{len(clusters_data.columns)} PHAS columns in memory for downstream work; "
-            "repeated IDs use categorical encoding."
-        )
-
-    # 5) If there are no clusters, short-circuit cleanly
-    if clusters_data is None or getattr(clusters_data, "empty", True):
+    # 5) If there are no PHAS rows, short-circuit cleanly.  Do not load the
+    # complete table merely to check this: the path-backed window stage streams
+    # its own small projection.
+    if not phas_output or not artifact_exists(phas_output):
         print("[INFO] No PHAS clusters to score; exiting classification early.")
         return
 
-    # 6) Select windows (explicit args; no legacy globals)
-    clusters_windows = st_winsel.select_scoring_windows(
-        clusters_data,
+    print("[INFO] Processing the PHAS table as fixed-size disk-backed batches.")
+
+    # 6) Select windows from the disk-backed PHAS table.  The streaming reader
+    # retains complete clusters while bounding each parse/task batch.
+    clusters_windows = st_winsel.select_scoring_windows_from_path(
+        phas_output,
         window_len=cfg.window_len,
         sliding=cfg.sliding,
         minClusterLength=cfg.minClusterLength,
@@ -325,18 +321,12 @@ def run_phase2_pipeline(
     gc.collect()
 
     features = st_feat.features_to_detection(
-        clusters_data,
+        clusters_path=phas_output,
         phase=int(cfg.phase) if str(cfg.phase).isdigit() else cfg.phase,
         outdir=cfg.outdir,
         concat_libs=cfg.concat_libs,
         memFile=cfg.memFile,
     )
-
-    # The complete per-read PHAS table is no longer needed during
-    # classification. Re-open its compact projection only just before plots,
-    # rather than carrying it alongside feature and labeled tables.
-    del clusters_data
-    gc.collect()
 
     # 8) Classify (stage returns labeled DF), then finalize outputs (output stage).
     # Phasis 2.8.1 keeps -classifier as a deprecated CLI compatibility flag, but
@@ -358,8 +348,11 @@ def run_phase2_pipeline(
         legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
         overrides_path=getattr(cfg, "classification_overrides", None),
     )
-    print("[INFO] Reloading compact PHAS fields for locus plots.")
-    plot_clusters_data = _load_compact_phase2_clusters(phas_output)
+    print("[INFO] Streaming PHAS rows required for locus plots.")
+    plot_clusters_data = st_locus_plots.load_plot_clusters_for_labeled_calls(
+        phas_output,
+        labeled,
+    )
     st_locus_plots.write_individual_phas_locus_plots(
         "GMM",
         labeled,

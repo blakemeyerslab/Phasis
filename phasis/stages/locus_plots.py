@@ -16,6 +16,7 @@ from matplotlib.legend_handler import HandlerTuple
 from matplotlib.ticker import FuncFormatter
 
 import phasis.runtime as rt
+from phasis.cache import resolve_artifact_path
 from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress
 from phasis.stages import feature_assembly as st_feat
@@ -77,6 +78,18 @@ PHASIRNA_EXPORT_COLUMNS = [
     "tag_seq",
     "hits",
 ]
+PLOT_CLUSTER_COLUMNS = [
+    "clusterID",
+    "identifier",
+    "alib",
+    "pos",
+    "abun",
+    "len",
+    "strand",
+    "tag_seq",
+    "hits",
+]
+PHASE2_STREAM_DEFAULT_CHUNK_ROWS = 100_000
 PHASE_PANEL_COLORS = {
     19: "#CC3299",
     20: "#CFB53B",
@@ -2964,6 +2977,123 @@ def _select_plot_calls(bucket_calls: pd.DataFrame) -> pd.DataFrame:
     return selected.drop(
         columns=[column for column in selected.columns if column.startswith("__plot_rank_")]
     ).reset_index(drop=True)
+
+
+def _phase2_stream_chunk_rows() -> int:
+    """Return a conservative CSV chunk size for disk-backed Phase II readers."""
+    configured = getattr(rt, "phase2_streaming_rows", None)
+    if configured is None:
+        configured = getenv("Phasis_PHASE2_STREAMING_ROWS")
+    try:
+        return max(1, int(configured))
+    except (TypeError, ValueError):
+        return PHASE2_STREAM_DEFAULT_CHUNK_ROWS
+
+
+def _selected_plot_source_keys(labeled_features: pd.DataFrame) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """Return the cluster and locus keys used by the existing plot task builder.
+
+    The current plot code prefers a ``(cID, alib)`` cluster and falls back to
+    ``(identifier, alib)`` only when that cluster is unavailable.  Keeping both
+    key sets during the bounded source scan is a safe superset: the existing
+    cid-first lookup below still decides which rows reach each plot.
+    """
+    final_classes = labeled_features.get(
+        "final_class", labeled_features.get("label", pd.Series(dtype=str))
+    ).astype(str)
+    cluster_keys: set[tuple[str, str]] = set()
+    identifier_keys: set[tuple[str, str]] = set()
+    for final_class in ("PHAS", "PHAS-like"):
+        bucket_calls = labeled_features.loc[final_classes == final_class].copy()
+        if bucket_calls.empty:
+            continue
+        selected = _select_plot_calls(bucket_calls)
+        for row in selected.itertuples(index=False):
+            cluster_keys.add(
+                (
+                    str(getattr(row, "cID")).strip(),
+                    str(getattr(row, "alib")).strip(),
+                )
+            )
+            identifier_keys.add(
+                (
+                    str(getattr(row, "identifier")).strip(),
+                    str(getattr(row, "alib")).strip(),
+                )
+            )
+    return cluster_keys, identifier_keys
+
+
+def load_plot_clusters_for_labeled_calls(
+    phas_path: str,
+    labeled_features: pd.DataFrame,
+    *,
+    chunk_rows: int | None = None,
+) -> pd.DataFrame:
+    """Read only PHAS rows which the plotting stage can consume.
+
+    Plotting runs after final classification and never changes call labels.  It
+    nevertheless recomputes detailed Howell traces, so every row of each
+    selected cluster must be retained.  This reader scans the disk-backed PHAS
+    table in bounded chunks and keeps the exact cid-first/fallback-locus source
+    candidates used by :func:`write_individual_phas_locus_plots`.
+    """
+    cluster_keys, identifier_keys = _selected_plot_source_keys(labeled_features)
+    if not cluster_keys and not identifier_keys:
+        return pd.DataFrame(columns=PLOT_CLUSTER_COLUMNS)
+
+    physical_path = resolve_artifact_path(phas_path)
+    if not physical_path:
+        raise FileNotFoundError(f"PHAS table for locus plots was not found: {phas_path}")
+
+    available = pd.read_csv(physical_path, sep="\t", nrows=0).columns
+    selected_columns = [column for column in PLOT_CLUSTER_COLUMNS if column in available]
+    required = {"clusterID", "identifier", "alib", "pos", "abun", "len", "strand", "tag_seq"}
+    missing = sorted(required.difference(selected_columns))
+    if missing:
+        raise ValueError(
+            "PHAS table is missing required columns for locus plots: "
+            + ", ".join(missing)
+        )
+
+    text_columns = {
+        column: str
+        for column in ("clusterID", "identifier", "alib", "strand", "tag_seq")
+        if column in selected_columns
+    }
+    chunksize = max(1, int(chunk_rows or _phase2_stream_chunk_rows()))
+    matched_chunks: list[pd.DataFrame] = []
+    reader = pd.read_csv(
+        physical_path,
+        sep="\t",
+        usecols=selected_columns,
+        dtype=text_columns,
+        keep_default_na=False,
+        chunksize=chunksize,
+    )
+    for chunk in reader:
+        cid_pairs = zip(
+            chunk["clusterID"].astype(str).str.strip(),
+            chunk["alib"].astype(str).str.strip(),
+        )
+        identifier_pairs = zip(
+            chunk["identifier"].astype(str).str.strip(),
+            chunk["alib"].astype(str).str.strip(),
+        )
+        keep = np.fromiter(
+            (
+                cid_key in cluster_keys or identifier_key in identifier_keys
+                for cid_key, identifier_key in zip(cid_pairs, identifier_pairs)
+            ),
+            dtype=bool,
+            count=len(chunk),
+        )
+        if keep.any():
+            matched_chunks.append(chunk.loc[keep].copy())
+
+    if not matched_chunks:
+        return pd.DataFrame(columns=selected_columns)
+    return pd.concat(matched_chunks, ignore_index=True)
 
 
 def _format_locus_title(alib_value: str, identifier_value: str, phase_value: int, display_class: str) -> str:

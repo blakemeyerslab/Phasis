@@ -17,6 +17,44 @@ def _serial_parallel_runner(func, data, **_kwargs):
 
 
 class LocusPlotHelperTests(unittest.TestCase):
+    def test_streamed_plot_source_keeps_called_cluster_and_identifier_fallback(self):
+        source = pd.DataFrame(
+            {
+                "clusterID": ["cid-1", "cid-1", "cid-2", "cid-3", "cid-4"],
+                "identifier": ["locus-1", "locus-1", "locus-1", "locus-2", "locus-3"],
+                "alib": ["libA", "libA", "libA", "libA", "libB"],
+                "pos": [100, 121, 142, 200, 300],
+                "abun": [10, 8, 7, 6, 5],
+                "len": [21, 21, 21, 21, 21],
+                "strand": ["w", "c", "w", "c", "w"],
+                "tag_seq": ["A", "B", "C", "D", "E"],
+                "hits": [1, 1, 1, 1, 1],
+            }
+        )
+        labeled = pd.DataFrame(
+            {
+                "identifier": ["locus-1", "locus-2", "locus-3"],
+                "alib": ["libA", "libA", "libB"],
+                "cID": ["cid-1", "missing-cid", "cid-4"],
+                "final_class": ["PHAS", "PHAS-like", "non-PHAS"],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            phas_path = os.path.join(tmpdir, "21_PHAS_to_detect.tab")
+            source.to_csv(phas_path, sep="\t", index=False)
+            streamed = locus_plots.load_plot_clusters_for_labeled_calls(
+                phas_path,
+                labeled,
+                chunk_rows=2,
+            )
+
+        # cid-1 is the direct source for locus-1; cid-2 is retained as the
+        # existing identifier fallback candidate.  locus-2 has no matching cID
+        # and must therefore retain its full identifier group (cid-3).
+        self.assertEqual(set(streamed["clusterID"]), {"cid-1", "cid-2", "cid-3"})
+        self.assertEqual(streamed.loc[streamed["clusterID"] == "cid-1", "pos"].tolist(), [100, 121])
+
     def test_build_howell_rows_clean_mode_includes_browser_style_non_in_phase_points(self):
         trace_rows = [
             {"anchor_position": 100, "window_start": 100, "window_end": 309, "score": 10.0, "best_register": 0},

@@ -10,6 +10,7 @@ import tempfile
 import gc
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 import phasis.runtime as rt
 from phasis.cache import (
@@ -30,6 +31,7 @@ FEATURE_ASSEMBLY_INITIAL_WORKER_CAP = 2
 FEATURE_ASSEMBLY_DEFAULT_MAX_CPU_FRACTION_NUMERATOR = 7
 FEATURE_ASSEMBLY_DEFAULT_MAX_CPU_FRACTION_DENOMINATOR = 10
 FEATURE_ASSEMBLY_DEFAULT_BATCH_ROWS = 100_000
+FEATURE_ASSEMBLY_STREAM_DEFAULT_CHUNK_ROWS = 100_000
 HOWELL_AMBIGUITY_FRACTION = 0.90
 HOWELL_CROWDING_SCORE_GAP = 4.0
 ALTERNATIVE_MIN_SHARED_CYCLES = 3
@@ -247,6 +249,25 @@ def _feature_assembly_batch_rows() -> int:
     )
 
 
+def _feature_assembly_stream_chunk_rows() -> int:
+    """Return the bounded reader chunk used for disk-backed PHAS inputs.
+
+    Phase II uses the same knob for its other disk-backed readers so an HPC
+    user can set one conservative row limit for all of them.  The feature
+    batch limit remains independent: a cluster is allowed to span several
+    reader chunks, but never several feature tasks.
+    """
+    configured = getattr(rt, "phase2_streaming_rows", None)
+    if configured is None:
+        configured = getenv("Phasis_PHASE2_STREAMING_ROWS")
+    return int(
+        _coerce_positive_int(
+            configured,
+            FEATURE_ASSEMBLY_STREAM_DEFAULT_CHUNK_ROWS,
+        )
+    )
+
+
 def _build_feature_assembly_batch_positions(
     clusters_data: pd.DataFrame,
     *,
@@ -289,6 +310,297 @@ def _build_feature_assembly_batch_positions(
         batch_positions.append(np.concatenate(current_parts))
 
     return batch_positions, oversized_clusters
+
+
+class _FeatureAssemblyStreamStats:
+    """Small mutable counters shared by the disk-backed batch iterator."""
+
+    def __init__(self) -> None:
+        self.source_rows = 0
+        self.cluster_groups = 0
+        self.batch_count = 0
+        self.oversized_clusters = 0
+        self.chromosomes: set[str] = set()
+        # ``DataFrameGroupBy.indices`` (used by the legacy in-memory path)
+        # orders groups by first-seen chromosome, then first-seen cluster
+        # within that chromosome.  Retain only this small ordering map so the
+        # streamed results can be put back into the exact same order later.
+        self.chromosome_order: dict[str, int] = {}
+        self.next_cluster_order: dict[str, int] = {}
+        self.cluster_order: dict[tuple[str, str], tuple[int, int]] = {}
+        self.cluster_order_by_id: dict[str, list[tuple[str, tuple[int, int]]]] = {}
+
+    def record_cluster_group(self, key: tuple[str, str]) -> None:
+        chromosome, cluster_id = (str(key[0]), str(key[1]))
+        self.cluster_groups += 1
+        self.chromosomes.add(chromosome)
+        chromosome_index = self.chromosome_order.setdefault(
+            chromosome,
+            len(self.chromosome_order),
+        )
+        cluster_index = self.next_cluster_order.get(chromosome, 0)
+        self.next_cluster_order[chromosome] = cluster_index + 1
+        order = (chromosome_index, cluster_index)
+        self.cluster_order[(chromosome, cluster_id)] = order
+        self.cluster_order_by_id.setdefault(cluster_id, []).append((chromosome, order))
+
+
+def _resolve_feature_assembly_stream_source(
+    clusters_path: str,
+    *,
+    required_cols: list[str],
+) -> str:
+    """Validate and resolve a PHAS TSV used by the disk-backed input path."""
+    physical_path = resolve_artifact_path(clusters_path) or str(clusters_path)
+    if not os.path.isfile(physical_path):
+        raise FileNotFoundError(
+            f"PHAS table for feature assembly was not found: {clusters_path}"
+        )
+
+    available = pd.read_csv(physical_path, sep="\t", nrows=0).columns
+    missing = [column for column in required_cols if column not in available]
+    if missing:
+        raise ValueError(
+            "PHAS table missing required feature-assembly columns: "
+            + ", ".join(missing)
+        )
+    return physical_path
+
+
+def _iter_contiguous_feature_clusters(
+    physical_path: str,
+    *,
+    required_cols: list[str],
+    reader_chunk_rows: int,
+    stats: _FeatureAssemblyStreamStats,
+):
+    """Yield complete, contiguous ``(chromosome, clusterID)`` input groups.
+
+    ``PHAS_to_detect`` is written group-major by the preceding phase.  Reading
+    in chunks is therefore safe as long as the final run in one parser chunk
+    is carried into the next.  We deliberately verify that invariant rather
+    than silently splitting a non-contiguous cluster, which could otherwise
+    change Howell scores and lose a valid call.
+    """
+    text_columns = {
+        column: str
+        for column in (
+            "clusterID",
+            "chromosome",
+            "strand",
+            "identifier",
+            "tag_seq",
+            "alib",
+        )
+        if column in required_cols
+    }
+    reader = pd.read_csv(
+        physical_path,
+        sep="\t",
+        usecols=required_cols,
+        dtype=text_columns,
+        keep_default_na=False,
+        chunksize=max(1, int(reader_chunk_rows)),
+    )
+
+    seen_groups: set[tuple[str, str]] = set()
+    seen_source_groups: set[tuple[str, str]] = set()
+    current_source_group: tuple[str, str] | None = None
+    carried_key: tuple[str, str] | None = None
+    carried_parts: list[pd.DataFrame] = []
+
+    def _reader_chunks():
+        try:
+            yield from reader
+        finally:
+            reader.close()
+
+    def _finish_carried_group():
+        nonlocal carried_key, carried_parts
+        if carried_key is None:
+            return None
+        if carried_key in seen_groups:
+            raise ValueError(
+                "PHAS table is not contiguous by (chromosome, clusterID); "
+                "disk-backed feature assembly would split a cluster. "
+                "Rebuild PHAS_to_detect with the current Phase II writer."
+            )
+        seen_groups.add(carried_key)
+        stats.record_cluster_group(carried_key)
+        if len(carried_parts) == 1:
+            completed = carried_parts[0]
+        else:
+            completed = pd.concat(carried_parts, ignore_index=True)
+        carried_key = None
+        carried_parts = []
+        return completed
+
+    for chunk in _reader_chunks():
+        if chunk.empty:
+            continue
+        # ``usecols`` follows source-file order, so restore the worker's
+        # established nine-column order explicitly.
+        chunk = chunk.loc[:, required_cols]
+        stats.source_rows += len(chunk)
+
+        chromosomes = chunk["chromosome"].to_numpy(dtype=object, copy=False)
+        cluster_ids = chunk["clusterID"].to_numpy(dtype=object, copy=False)
+        libraries = chunk["alib"].to_numpy(dtype=object, copy=False)
+        run_starts = np.empty(len(chunk), dtype=bool)
+        run_starts[0] = True
+        if len(chunk) > 1:
+            run_starts[1:] = (
+                chromosomes[1:] != chromosomes[:-1]
+            ) | (
+                cluster_ids[1:] != cluster_ids[:-1]
+            ) | (
+                libraries[1:] != libraries[:-1]
+            )
+        starts = np.flatnonzero(run_starts)
+
+        for run_index, start in enumerate(starts):
+            end = (
+                int(starts[run_index + 1])
+                if run_index + 1 < len(starts)
+                else len(chunk)
+            )
+            key = (str(chromosomes[start]), str(cluster_ids[start]))
+            source_group = (str(chromosomes[start]), str(libraries[start]))
+            if source_group != current_source_group:
+                if source_group in seen_source_groups:
+                    raise ValueError(
+                        "PHAS table is not contiguous by (chromosome, alib); "
+                        "disk-backed feature assembly cannot preserve legacy "
+                        "group order. Rebuild PHAS_to_detect with the current "
+                        "Phase II writer."
+                    )
+                seen_source_groups.add(source_group)
+                current_source_group = source_group
+            # A copied run prevents the parent from retaining the entire CSV
+            # parser chunk while a small tail is carried across a boundary.
+            part = chunk.iloc[int(start):int(end)].copy()
+            if carried_key is None:
+                carried_key = key
+                carried_parts = [part]
+            elif key == carried_key:
+                carried_parts.append(part)
+            else:
+                completed = _finish_carried_group()
+                if completed is not None:
+                    yield completed
+                carried_key = key
+                carried_parts = [part]
+
+    completed = _finish_carried_group()
+    if completed is not None:
+        yield completed
+
+
+def _iter_streamed_feature_assembly_batches(
+    physical_path: str,
+    *,
+    required_cols: list[str],
+    batch_rows: int,
+    reader_chunk_rows: int,
+    stats: _FeatureAssemblyStreamStats,
+):
+    """Pack complete streamed clusters into bounded feature-worker frames."""
+    target_rows = max(1, int(batch_rows))
+    batch_parts: list[pd.DataFrame] = []
+    batch_row_count = 0
+
+    def _finish_batch():
+        nonlocal batch_parts, batch_row_count
+        if not batch_parts:
+            return None
+        if len(batch_parts) == 1:
+            completed = batch_parts[0]
+        else:
+            completed = pd.concat(batch_parts, ignore_index=True)
+        batch_parts = []
+        batch_row_count = 0
+        stats.batch_count += 1
+        return completed
+
+    for cluster_frame in _iter_contiguous_feature_clusters(
+        physical_path,
+        required_cols=required_cols,
+        reader_chunk_rows=reader_chunk_rows,
+        stats=stats,
+    ):
+        cluster_rows = len(cluster_frame)
+        if cluster_rows > target_rows:
+            stats.oversized_clusters += 1
+
+        if batch_parts and batch_row_count + cluster_rows > target_rows:
+            completed = _finish_batch()
+            if completed is not None:
+                yield completed
+
+        batch_parts.append(cluster_frame)
+        batch_row_count += cluster_rows
+        # An oversized cluster is emitted by itself, just as the in-memory
+        # batch planner does, without changing its biological calculation.
+        if batch_row_count >= target_rows:
+            completed = _finish_batch()
+            if completed is not None:
+                yield completed
+
+    completed = _finish_batch()
+    if completed is not None:
+        yield completed
+
+
+def _restore_streamed_feature_order(
+    features: pd.DataFrame,
+    stats: _FeatureAssemblyStreamStats,
+) -> pd.DataFrame:
+    """Restore the legacy in-memory ``groupby.indices`` feature-row order.
+
+    The source writer is group-major by ``(chromosome, alib)``.  The historical
+    in-memory feature planner instead groups first by chromosome and then by
+    cluster ID, which can interleave libraries differently.  Feature rows are
+    much smaller than PHAS rows, so a stable sort here preserves the old public
+    TSV/API order without retaining or reordering the large input table.
+    """
+    if features.empty or not stats.cluster_order_by_id:
+        return features
+
+    chromosome_orders = []
+    cluster_orders = []
+    fallback_order = len(stats.cluster_order) + len(features)
+    for fallback_index, row in enumerate(features[["identifier", "cID"]].itertuples(index=False)):
+        cluster_id = str(row.cID).strip()
+        candidates = stats.cluster_order_by_id.get(cluster_id, [])
+        order = None
+        if len(candidates) == 1:
+            order = candidates[0][1]
+        elif candidates:
+            identifier_chromosome = str(row.identifier).split(":", 1)[0].strip()
+            matching = [
+                candidate_order
+                for chromosome, candidate_order in candidates
+                if chromosome == identifier_chromosome
+            ]
+            if len(matching) == 1:
+                order = matching[0]
+        if order is None:
+            chromosome_orders.append(fallback_order)
+            cluster_orders.append(fallback_index)
+        else:
+            chromosome_orders.append(int(order[0]))
+            cluster_orders.append(int(order[1]))
+
+    ordered = features.assign(
+        __phasis_stream_chromosome_order=chromosome_orders,
+        __phasis_stream_cluster_order=cluster_orders,
+    ).sort_values(
+        ["__phasis_stream_chromosome_order", "__phasis_stream_cluster_order"],
+        kind="mergesort",
+    )
+    return ordered.drop(
+        columns=["__phasis_stream_chromosome_order", "__phasis_stream_cluster_order"]
+    ).reset_index(drop=True)
 
 
 class _LazyFeatureAssemblyBatches:
@@ -506,11 +818,16 @@ def ensure_win_score_lookup_ready() -> None:
         # keep feature assembly robust; caller will fall back to defaults
         return
 
-def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None = None,outdir: str | None = None,concat_libs: bool | None = None,memFile: str | None = None,outfname: str | None = None,) -> pd.DataFrame:
+def features_to_detection(clusters_data: pd.DataFrame | None = None,*,clusters_path: str | None = None,phase: str | int | None = None,outdir: str | None = None,concat_libs: bool | None = None,memFile: str | None = None,outfname: str | None = None,) -> pd.DataFrame:
     """
     Assemble per-cluster feature set (parallel), write TSV, and memoize via md5.
     Uses legacy column names compatible with downstream classification.
     Expects process_chromosome_features() to return rows in FEATURE_COLS order.
+
+    ``clusters_data`` remains the legacy in-memory API.  Passing
+    ``clusters_path`` instead streams the PHAS TSV in bounded whole-cluster
+    batches, which is the Phase II path for tables too large to retain in one
+    DataFrame.  Supplying neither uses the standard PHAS-to-detect artifact.
     """
     print("### Step: assemble per-cluster features ###")
 
@@ -537,8 +854,14 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
         prefix = "concat_" if concat_libs else ""
         outfname = f"{prefix}{phase}_cluster_set_features.tsv"
 
+    if clusters_data is not None and clusters_path is not None:
+        raise ValueError("Pass either clusters_data or clusters_path, not both.")
+    if clusters_data is not None and not isinstance(clusters_data, pd.DataFrame):
+        raise TypeError("clusters_data must be a pandas DataFrame or None.")
+
     # Input signature: only reuse cached features when upstream inputs match.
-    phas_path = phase2_basename("PHAS_to_detect.tab")
+    default_phas_path = phase2_basename("PHAS_to_detect.tab")
+    phas_path = str(clusters_path or default_phas_path)
     scored_path = phase2_basename("clusters_scored.tsv")
 
     input_sig = stage_signature(
@@ -560,42 +883,68 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
 
     # ---------- Validate input ----------
     required_cols = ['clusterID', 'chromosome', 'strand', 'pos', 'len', 'abun', 'identifier', 'tag_seq', 'alib']
-    missing_in_input = [c for c in required_cols if c not in clusters_data.columns]
-    if missing_in_input:
-        raise ValueError(f"clusters_data missing required columns: {missing_in_input}")
-
-    # Split into bounded batches of whole clusters. A chromosome can therefore
-    # use several tasks instead of forcing one potentially huge DataFrame into a
-    # worker, while small chromosomes are efficiently packed together. Keep only
-    # positional batch plans in the parent; each copied input DataFrame is made
-    # lazily for the scheduler's current bounded window.
+    streaming_input = clusters_data is None
     batch_rows = _feature_assembly_batch_rows()
-    batch_positions, oversized_clusters = _build_feature_assembly_batch_positions(
-        clusters_data,
-        batch_rows=batch_rows,
-    )
-    feature_batches = _LazyFeatureAssemblyBatches(
-        clusters_data,
-        required_cols=required_cols,
-        batch_positions=batch_positions,
-    )
-    chromosome_count = clusters_data.groupby(
-        "chromosome",
-        sort=False,
-        observed=True,
-    ).ngroups
-    print(
-        f"  - Found {chromosome_count} chromosome groups; built "
-        f"{len(feature_batches)} feature batches of up to {batch_rows:,} input rows"
-    )
-    if oversized_clusters:
-        print(
-            "[WARN] "
-            f"{oversized_clusters} cluster(s) exceed the feature batch size and "
-            "must be processed intact."
+    feature_batches = None
+    batch_positions = None
+    stream_source_path = None
+    stream_stats = None
+    stream_reader_chunk_rows = None
+    if streaming_input:
+        stream_source_path = _resolve_feature_assembly_stream_source(
+            phas_path,
+            required_cols=required_cols,
         )
+        stream_stats = _FeatureAssemblyStreamStats()
+        stream_reader_chunk_rows = _feature_assembly_stream_chunk_rows()
+        # One staging window is no larger than the configured worker cap.  It
+        # gives later windows all available workers without ever retaining the
+        # complete PHAS table in the parent process.
+        feature_parallel_kwargs = _feature_assembly_parallel_kwargs(
+            _feature_assembly_worker_cap()
+        )
+        print(
+            "  - Streaming PHAS records from "
+            f"{os.path.basename(stream_source_path)} in {stream_reader_chunk_rows:,}-row reader chunks; "
+            f"building whole-cluster batches of up to {batch_rows:,} rows."
+        )
+    else:
+        missing_in_input = [c for c in required_cols if c not in clusters_data.columns]
+        if missing_in_input:
+            raise ValueError(f"clusters_data missing required columns: {missing_in_input}")
 
-    feature_parallel_kwargs = _feature_assembly_parallel_kwargs(len(feature_batches))
+        # Split into bounded batches of whole clusters. A chromosome can therefore
+        # use several tasks instead of forcing one potentially huge DataFrame into a
+        # worker, while small chromosomes are efficiently packed together. Keep only
+        # positional batch plans in the parent; each copied input DataFrame is made
+        # lazily for the scheduler's current bounded window.
+        batch_positions, oversized_clusters = _build_feature_assembly_batch_positions(
+            clusters_data,
+            batch_rows=batch_rows,
+        )
+        feature_batches = _LazyFeatureAssemblyBatches(
+            clusters_data,
+            required_cols=required_cols,
+            batch_positions=batch_positions,
+        )
+        chromosome_count = clusters_data.groupby(
+            "chromosome",
+            sort=False,
+            observed=True,
+        ).ngroups
+        print(
+            f"  - Found {chromosome_count} chromosome groups; built "
+            f"{len(feature_batches)} feature batches of up to {batch_rows:,} input rows"
+        )
+        if oversized_clusters:
+            print(
+                "[WARN] "
+                f"{oversized_clusters} cluster(s) exceed the feature batch size and "
+                "must be processed intact."
+            )
+
+        feature_parallel_kwargs = _feature_assembly_parallel_kwargs(len(feature_batches))
+
     print(
         "  - Feature assembly starts with "
         f"{feature_parallel_kwargs['initial_worker_cap']} concurrent batch(es) and "
@@ -628,6 +977,7 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
         trace_streamed_path = _feature_assembly_temp_path(trace_outpath, "stream")
 
     stream_writer = None
+    stream_progress = None
     try:
         with open(streamed_path, "w", encoding="utf-8", newline="") as feature_handle:
             trace_handle = None
@@ -647,26 +997,135 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
                     trace_handle=trace_handle,
                 )
 
-                run_parallel_with_progress(
-                    process_chromosome_features,
-                    feature_batches,
-                    desc="Assemble features",
-                    min_chunk=1,
-                    unit="lib-chr",
-                    on_result=stream_writer,
-                    return_results=False,
-                    **feature_parallel_kwargs,
-                )
+                if streaming_input:
+                    stream_batches = _iter_streamed_feature_assembly_batches(
+                        stream_source_path,
+                        required_cols=required_cols,
+                        batch_rows=batch_rows,
+                        reader_chunk_rows=stream_reader_chunk_rows,
+                        stats=stream_stats,
+                    )
+                    stream_window_size = max(
+                        1,
+                        int(feature_parallel_kwargs["initial_worker_cap"]),
+                    )
+                    stream_worker_cap = int(
+                        feature_parallel_kwargs["initial_worker_cap"]
+                    )
+                    stream_success_windows = 0
+                    stream_progress = tqdm(
+                        desc="Assemble streamed features",
+                        unit="batch",
+                    )
+                    while True:
+                        stream_window = []
+                        for _ in range(stream_window_size):
+                            try:
+                                stream_window.append(next(stream_batches))
+                            except StopIteration:
+                                break
+                        if not stream_window:
+                            break
+
+                        # Keep the cautious 2 -> 4 -> ... ramp across stream
+                        # windows.  A recovered pool failure is returned as
+                        # state and its reduced cap is carried into the next
+                        # window instead of being reset to the configured max.
+                        window_parallel_kwargs = _feature_assembly_parallel_kwargs(
+                            len(stream_window)
+                        )
+                        window_start_cap = min(
+                            int(stream_worker_cap),
+                            int(window_parallel_kwargs["max_worker_cap"]),
+                        )
+                        window_parallel_kwargs["initial_worker_cap"] = window_start_cap
+                        window_parallel_kwargs["max_worker_cap"] = window_start_cap
+                        window_parallel_kwargs["initial_chunk_size"] = min(
+                            window_start_cap,
+                            int(window_parallel_kwargs["max_chunk_size"]),
+                        )
+                        window_parallel_kwargs["max_chunk_size"] = window_parallel_kwargs[
+                            "initial_chunk_size"
+                        ]
+                        window_parallel_kwargs["adaptive_recovery"] = False
+                        window_parallel_kwargs["show_progress"] = False
+                        window_parallel_kwargs["return_state"] = True
+                        _, window_state = run_parallel_with_progress(
+                            process_chromosome_features,
+                            stream_window,
+                            desc="Assemble features",
+                            min_chunk=1,
+                            unit="lib-chr",
+                            on_result=stream_writer,
+                            return_results=False,
+                            **window_parallel_kwargs,
+                        )
+                        stream_progress.update(len(stream_window))
+                        stream_worker_cap = min(
+                            int(feature_parallel_kwargs["max_worker_cap"]),
+                            _coerce_positive_int(
+                                (window_state or {}).get("worker_cap"),
+                                window_start_cap,
+                            ),
+                        )
+                        if bool((window_state or {}).get("had_failures")):
+                            stream_success_windows = 0
+                        else:
+                            stream_success_windows += 1
+                            if stream_success_windows >= 2:
+                                next_worker_cap = min(
+                                    int(feature_parallel_kwargs["max_worker_cap"]),
+                                    max(stream_worker_cap + 1, stream_worker_cap * 2),
+                                )
+                                if next_worker_cap > stream_worker_cap:
+                                    print(
+                                        "[INFO] Re-expanding feature assembly to "
+                                        f"{next_worker_cap} concurrent batch(es)."
+                                    )
+                                    stream_worker_cap = next_worker_cap
+                                stream_success_windows = 0
+                        stream_window_size = max(1, int(stream_worker_cap))
+                        stream_window.clear()
+                        gc.collect()
+                    stream_progress.close()
+                    stream_progress = None
+                else:
+                    run_parallel_with_progress(
+                        process_chromosome_features,
+                        feature_batches,
+                        desc="Assemble features",
+                        min_chunk=1,
+                        unit="lib-chr",
+                        on_result=stream_writer,
+                        return_results=False,
+                        **feature_parallel_kwargs,
+                    )
             finally:
                 if trace_handle is not None:
                     trace_handle.close()
 
         # The scheduler no longer needs its positional plans or its local input
         # reference. Release them before loading the one returned feature table.
-        del feature_batches
-        del batch_positions
-        del clusters_data
+        if feature_batches is not None:
+            del feature_batches
+        if batch_positions is not None:
+            del batch_positions
+        if clusters_data is not None:
+            del clusters_data
         gc.collect()
+
+        if streaming_input and stream_stats is not None:
+            print(
+                f"  - Streamed {stream_stats.source_rows:,} PHAS rows across "
+                f"{stream_stats.cluster_groups:,} clusters into "
+                f"{stream_stats.batch_count:,} feature batches."
+            )
+            if stream_stats.oversized_clusters:
+                print(
+                    "[WARN] "
+                    f"{stream_stats.oversized_clusters} cluster(s) exceed the feature batch size and "
+                    "were processed intact."
+                )
 
         if stream_writer is not None and stream_writer.bad_chunks:
             print(
@@ -682,6 +1141,11 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
         # final DataFrame also keeps legacy TSV formatting stable across worker
         # batch boundaries.
         collected_features = _read_feature_frame(streamed_path)
+        if streaming_input and stream_stats is not None:
+            collected_features = _restore_streamed_feature_order(
+                collected_features,
+                stream_stats,
+            )
         collected_features.to_csv(
             normalized_path,
             sep="\t",
@@ -712,6 +1176,11 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
             print(f"  - Wrote {outfname} (md5: {fp})")
         return collected_features
     finally:
+        if stream_progress is not None:
+            try:
+                stream_progress.close()
+            except Exception:
+                pass
         for temporary_path in (
             streamed_path,
             normalized_path,

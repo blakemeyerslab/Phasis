@@ -308,6 +308,210 @@ class FeatureAssemblyParallelTests(unittest.TestCase):
         )
         self.assertEqual(produced_text, expected_frame.to_csv(sep="\t", index=False))
 
+    def test_disk_backed_input_matches_dataframe_path_across_chunk_boundaries(self):
+        columns = [
+            "clusterID",
+            "chromosome",
+            "strand",
+            "pos",
+            "len",
+            "abun",
+            "identifier",
+            "tag_seq",
+            "alib",
+        ]
+        rows = []
+        # The PHAS writer emits one chromosome/library group at a time.  This
+        # library-major order deliberately revisits a chromosome for libB: it
+        # proves the streamed result is restored to the legacy groupby.indices
+        # order (chromosome first, then cluster) before writing its TSV.
+        for library_index, library in enumerate(("libA", "libB")):
+            for chromosome_index in range(2):
+                chromosome = f"chr{chromosome_index + 1}"
+                for local_cluster_index in range(6):
+                    cluster_index = (
+                        (library_index * 12)
+                        + (chromosome_index * 6)
+                        + local_cluster_index
+                    )
+                    cluster_id = f"cluster-{cluster_index:02d}"
+                    for offset, strand in enumerate(("w", "c")):
+                        position = 1_000 + (cluster_index * 100) + (offset * 24)
+                        rows.append(
+                            [
+                                cluster_id,
+                                chromosome,
+                                strand,
+                                position,
+                                24,
+                                offset + 1,
+                                f"{chromosome}:{position}..{position + 24}",
+                                "ACGTACGTACGTACGTACGTACGT",
+                                library,
+                            ]
+                        )
+        clusters = pd.DataFrame(rows, columns=columns)
+
+        def serial_runner(captured):
+            def _run(func, groups, **kwargs):
+                captured.append(
+                    {
+                        "kwargs": dict(kwargs),
+                        "batches": [groups[index].copy() for index in range(len(groups))],
+                    }
+                )
+                for index in range(len(groups)):
+                    kwargs["on_result"](func(groups[index]))
+                if kwargs.get("return_state"):
+                    return (
+                        None,
+                        {
+                            "worker_cap": kwargs["max_worker_cap"],
+                            "chunk_size": kwargs["max_chunk_size"],
+                            "had_failures": False,
+                        },
+                    )
+                return None
+
+            return _run
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_logical = os.path.join(tmpdir, "24_PHAS_to_detect.tab")
+            clusters.to_csv(
+                f"{source_logical}.gz",
+                sep="\t",
+                index=False,
+                compression="gzip",
+            )
+            dataframe_output = os.path.join(tmpdir, "dataframe_features.tsv")
+            streamed_output = os.path.join(tmpdir, "streamed_features.tsv")
+            dataframe_calls = []
+            streamed_calls = []
+            with mock.patch.multiple(
+                rt,
+                phase=24,
+                ncores=12,
+                feature_assembly_worker_cap=None,
+                feature_assembly_batch_rows=2,
+                phase2_streaming_rows=3,
+                clusters_scored_tsv=None,
+                run_dir=tmpdir,
+                memFile=os.path.join(tmpdir, "phasis.mem"),
+                compress_intermediates=False,
+                create=True,
+            ), mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+                feature_assembly.st,
+                "WIN_SCORE_LOOKUP",
+                {},
+            ):
+                with mock.patch.object(
+                    feature_assembly,
+                    "run_parallel_with_progress",
+                    side_effect=serial_runner(dataframe_calls),
+                ):
+                    dataframe_result = feature_assembly.features_to_detection(
+                        clusters.copy(),
+                        phase=24,
+                        outdir=tmpdir,
+                        memFile=os.path.join(tmpdir, "phasis.mem"),
+                        outfname=dataframe_output,
+                    )
+                with mock.patch.object(
+                    feature_assembly,
+                    "run_parallel_with_progress",
+                    side_effect=serial_runner(streamed_calls),
+                ):
+                    streamed_result = feature_assembly.features_to_detection(
+                        clusters_path=source_logical,
+                        phase=24,
+                        outdir=tmpdir,
+                        memFile=os.path.join(tmpdir, "phasis.mem"),
+                        outfname=streamed_output,
+                    )
+
+            with open(dataframe_output, encoding="utf-8") as handle:
+                dataframe_text = handle.read()
+            with open(streamed_output, encoding="utf-8") as handle:
+                streamed_text = handle.read()
+
+        pd.testing.assert_frame_equal(
+            dataframe_result,
+            streamed_result,
+            check_dtype=False,
+        )
+        self.assertEqual(dataframe_text, streamed_text)
+        self.assertEqual(
+            [len(call["batches"]) for call in streamed_calls],
+            [2, 2, 4, 4, 8, 4],
+        )
+        self.assertEqual(
+            [call["kwargs"]["initial_worker_cap"] for call in streamed_calls],
+            [2, 2, 4, 4, 8, 8],
+        )
+        self.assertEqual(
+            [call["kwargs"]["max_worker_cap"] for call in streamed_calls],
+            [2, 2, 4, 4, 8, 8],
+        )
+        self.assertTrue(
+            all(call["kwargs"]["return_state"] for call in streamed_calls)
+        )
+        self.assertTrue(
+            all(not call["kwargs"]["show_progress"] for call in streamed_calls)
+        )
+
+        streamed_batches = [
+            batch
+            for call in streamed_calls
+            for batch in call["batches"]
+        ]
+        self.assertEqual([len(batch) for batch in streamed_batches], [2] * 24)
+        self.assertEqual(
+            {
+                (str(row.chromosome), str(row.clusterID))
+                for batch in streamed_batches
+                for row in batch[["chromosome", "clusterID"]].drop_duplicates().itertuples(index=False)
+            },
+            {
+                (str(row.chromosome), str(row.clusterID))
+                for row in clusters[["chromosome", "clusterID"]].drop_duplicates().itertuples(index=False)
+            },
+        )
+
+    def test_disk_backed_input_rejects_recurrent_chromosome_library_groups(self):
+        required = [
+            "clusterID",
+            "chromosome",
+            "strand",
+            "pos",
+            "len",
+            "abun",
+            "identifier",
+            "tag_seq",
+            "alib",
+        ]
+        clusters = pd.DataFrame(
+            [
+                ["cluster-1", "chr1", "w", 100, 24, 1, "chr1:100..124", "AAAA", "libA"],
+                ["cluster-2", "chr2", "w", 200, 24, 1, "chr2:200..224", "CCCC", "libA"],
+                ["cluster-3", "chr1", "c", 124, 24, 1, "chr1:124..148", "AAAT", "libA"],
+            ],
+            columns=required,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "24_PHAS_to_detect.tab")
+            clusters.to_csv(source_path, sep="\t", index=False)
+            stats = feature_assembly._FeatureAssemblyStreamStats()
+            with self.assertRaisesRegex(ValueError, "chromosome, alib"):
+                list(
+                    feature_assembly._iter_streamed_feature_assembly_batches(
+                        source_path,
+                        required_cols=required,
+                        batch_rows=10,
+                        reader_chunk_rows=2,
+                        stats=stats,
+                    )
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

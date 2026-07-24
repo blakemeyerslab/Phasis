@@ -236,6 +236,8 @@ def run_parallel_with_progress(
     recovery_progress_fraction=0.05,
     recovery_growth_factor=2.0,
     recovery_growth_steps=None,
+    show_progress=True,
+    return_state=False,
 ):
 
     """
@@ -257,10 +259,20 @@ def run_parallel_with_progress(
     Tips:
       * If results are large, pass an `on_result` consumer and set return_results=False.
       * Keep `chunksize=1` to avoid big internal queues in the pool.
+      * ``show_progress=False`` suppresses an inner progress bar when a caller
+        already reports an outer streaming stage.
+      * ``return_state=True`` additionally returns the final effective worker
+        and task-window caps, allowing a bounded streaming caller to carry a
+        reduction forward into its next source window.
     """
     n_data = len(data)
+    state = {
+        "worker_cap": 1,
+        "chunk_size": 1,
+        "had_failures": False,
+    }
     if n_data == 0:
-        return []
+        return ([], state) if return_state else []
     ncores = rt.ncores
     if rt.ncores is None or rt.ncores <= 0:
         ncores = multiprocessing.cpu_count()
@@ -312,9 +324,10 @@ def run_parallel_with_progress(
     # Decide whether to accumulate results or stream-only
     keep_results = (on_result is None) or return_results
     results = [] if keep_results else None
+    had_failures = False
 
     i = 0
-    with tqdm(total=n_data, desc=desc, unit=unit) as pbar:
+    with tqdm(total=n_data, desc=desc, unit=unit, disable=not bool(show_progress)) as pbar:
         while i < n_data:
             current_worker_target = min(ncores, chunk_size, resolved_max_worker_cap) or 1
             if adaptive_recovery and (
@@ -401,6 +414,7 @@ def run_parallel_with_progress(
                             ):
                                 if isinstance(res, RuntimeError):
                                     slice_had_failure = True
+                                    had_failures = True
                                     worker_result_failure = True
                                     retry = safe_worker((func, arg))
                                     if isinstance(retry, RuntimeError):
@@ -442,10 +456,12 @@ def run_parallel_with_progress(
                     except MemoryError as e:
                         last_exception = e
                         slice_had_failure = True
+                        had_failures = True
                         print(f"\n[WARN] MemoryError on slice [{start}:{end}] size={local_chunk_size}, nworkers={nw}. Trying smaller.\n")
                     except Exception as e:
                         last_exception = e
                         slice_had_failure = True
+                        had_failures = True
                         print(f"\n[WARN] Pool error on slice [{start}:{end}] size={local_chunk_size}, nworkers={nw}: {e}\nTrying smaller.\n")
 
                 if slice_completed:
@@ -459,6 +475,7 @@ def run_parallel_with_progress(
 
             # If pool attempts all failed for this slice, do serial for this slice
             if not slice_completed:
+                had_failures = True
                 print(f"[WARN] Running slice [{start}:{end}] serially after pool failures.")
                 indexed_chunk = list(enumerate(data[start:end], start=start))
                 serial_results = _run_serial_chunk(func, indexed_chunk)
@@ -481,7 +498,13 @@ def run_parallel_with_progress(
             i = end
             gc.collect()
 
-    return results if keep_results else None
+    state = {
+        "worker_cap": int(max(1, nworkers)),
+        "chunk_size": int(max(1, chunk_size)),
+        "had_failures": bool(had_failures),
+    }
+    result = results if keep_results else None
+    return (result, state) if return_state else result
 
 def _compute_initial_chunk_size(n_data: int, ncores_local: int, unit: str, min_chunk: int, batch_factor: float):
     #print(f"batch factor set to {batch_factor}")
