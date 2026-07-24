@@ -295,6 +295,30 @@ to a pool at once, avoiding a large queued serialization spike. Lower
 cluster larger than that setting cannot be split without altering its features,
 and Phasis reports those exceptional clusters explicitly.
 
+### Candidate-cluster aggregation
+
+At the beginning of Phase II, Phasis streams candidate-cluster records into
+fixed-size, disk-backed sorted runs. Parsing and sorting still use the normal
+library worker scheduler, then a bounded k-way merge writes the unchanged
+`{phase}_processed_clusters.tab` table. This removes the former peak caused by
+holding every library list, a flattened list, and a second sorted DataFrame in
+memory at the same time. The downstream Phase II API still requires one
+consolidated DataFrame, which Phasis loads only after the merge completes.
+
+The default is 100,000 records per active worker chunk and a 64-file merge fan-in.
+For a particularly memory-constrained or file-descriptor-constrained job:
+
+```bash
+export PHASIS_CLUSTER_AGGREGATION_CHUNK_ROWS=50000
+export PHASIS_CLUSTER_AGGREGATION_MERGE_FAN_IN=32
+phasis ...
+```
+
+Lowering the chunk size reduces aggregation RAM at the cost of extra temporary
+disk I/O; lowering the fan-in reduces simultaneously open spill files and may
+add another merge pass. Temporary spill directories are removed automatically;
+`phasis -cleanup` also removes remnants from an abrupt job termination.
+
 ### Cleanup
 
 Use cleanup modes from a Phasis run root only:

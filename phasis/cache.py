@@ -317,6 +317,7 @@ CLEANUP_PATTERNS = [
     "suffix:_scoredclusters",
     "suffix:processed_libraries",
     "contains:_windows_sl",
+    "prefix:.phasis_cluster_aggregation_",
 ]
 INDEX_ONLY_MEM_SECTIONS = ("BASIC",)
 INDEX_DIRNAME = "index"
