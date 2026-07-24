@@ -184,7 +184,10 @@ def select_scoring_windows(
 
     # --- Build lib‑chr groups ---
     grouping = ["chromosome"] + (["alib"] if "alib" in clusters_data.columns else [])
-    groups = [(k, df) for k, df in clusters_data.groupby(grouping, sort=False)]
+    groups = [
+        (k, df)
+        for k, df in clusters_data.groupby(grouping, sort=False, observed=True)
+    ]
     print(f"  - Found {len(groups)} group(s) by {grouping}")
 
     # --- Plan tasks with cache checks (existence-only resume) ---
@@ -352,7 +355,7 @@ def select_windows_for_chromosome(
     to_score: List[List[Any]] = []
     append = to_score.append  # micro-opt
 
-    for cID, aclust in df.groupby("clusterID", sort=False):
+    for cID, aclust in df.groupby("clusterID", sort=False, observed=True):
         if aclust.empty:
             continue
 

@@ -289,11 +289,40 @@ export PHASIS_FEATURE_ASSEMBLY_BATCH_ROWS=50000
 phasis ...
 ```
 
-The concurrency cap also limits the number of feature-batch DataFrames submitted
-to a pool at once, avoiding a large queued serialization spike. Lower
+Only the current bounded worker window is materialized and completed feature
+rows are streamed through a temporary table, rather than retaining every input
+batch and worker result in the parent process. Lower
 `PHASIS_FEATURE_ASSEMBLY_BATCH_ROWS` if a single task is still memory-heavy; a
 cluster larger than that setting cannot be split without altering its features,
 and Phasis reports those exceptional clusters explicitly.
+
+### PHAS-cluster batching
+
+After universal IDs are assigned, Phase II builds the per-read
+`{phase}_PHAS_to_detect.tab` table in fixed-size batches within each
+chromosome/library group. Batches start with two workers and can grow to 70% of
+the allocated cores after successful work (for example, eight workers from a
+12-core job). Completed batches are written in stable input order directly to a
+temporary table, so Phasis does not retain Python list payloads, all worker
+result DataFrames, or a final concatenation of them in memory.
+
+The default batch size is 100,000 input rows. For a memory-constrained job,
+reduce the row size and/or cap concurrency explicitly:
+
+```bash
+export PHASIS_PHAS_CLUSTER_BATCH_ROWS=50000
+export PHASIS_PHAS_CLUSTER_WORKER_CAP=3
+phasis ...
+```
+
+This does not mix or reorder chromosome/library groups; it only splits an
+unusually large group into consecutive row batches. Phase II releases the raw
+processed-cluster and loci tables before it reloads the finished PHAS table for
+the downstream stages. The on-disk PHAS table remains complete, but the private
+Phase II working copy reloads only the columns needed for windows, features,
+and locus plots and encodes repeated IDs compactly; it is released during
+classification and reloaded only for locus plots. Temporary remnants from an
+interrupted run are removed by `phasis -cleanup`.
 
 ### Candidate-cluster aggregation
 

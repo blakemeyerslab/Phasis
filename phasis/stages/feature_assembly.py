@@ -6,6 +6,8 @@ from .. import ids
 import os
 import re
 import multiprocessing
+import tempfile
+import gc
 import numpy as np
 import pandas as pd
 
@@ -118,6 +120,7 @@ FEATURE_COLS = ['identifier',
 
 # Numeric columns (all except id-like/text fields)
 NUMERIC_COLS = set(FEATURE_COLS) - {"identifier", "cID", "alib", "Howell_origin_class"}
+FEATURE_TEXT_COLS = ("identifier", "cID", "alib", "Howell_origin_class")
 
 
 def _truthy_env(value) -> bool:
@@ -244,6 +247,96 @@ def _feature_assembly_batch_rows() -> int:
     )
 
 
+def _build_feature_assembly_batch_positions(
+    clusters_data: pd.DataFrame,
+    *,
+    batch_rows: int,
+) -> tuple[list[np.ndarray], int]:
+    """Plan bounded whole-cluster batches without copying their DataFrames."""
+    target_rows = max(1, int(batch_rows))
+    batch_positions: list[np.ndarray] = []
+    current_parts = []
+    current_rows = 0
+    oversized_clusters = 0
+
+    # ``indices`` holds integer row positions, avoiding a DataFrame copy for
+    # every cluster while preserving the prior chromosome -> cluster grouping.
+    cluster_indices = clusters_data.groupby(
+        ["chromosome", "clusterID"],
+        sort=False,
+        observed=True,
+    ).indices
+    for positions in cluster_indices.values():
+        cluster_rows = len(positions)
+        if current_parts and current_rows + cluster_rows > target_rows:
+            batch_positions.append(np.concatenate(current_parts))
+            current_parts = []
+            current_rows = 0
+
+        current_parts.append(positions)
+        current_rows += cluster_rows
+        if cluster_rows > target_rows:
+            oversized_clusters += 1
+
+        # Flush a full batch immediately. An oversized cluster is therefore
+        # isolated rather than being combined with another cluster.
+        if current_rows >= target_rows:
+            batch_positions.append(np.concatenate(current_parts))
+            current_parts = []
+            current_rows = 0
+
+    if current_parts:
+        batch_positions.append(np.concatenate(current_parts))
+
+    return batch_positions, oversized_clusters
+
+
+class _LazyFeatureAssemblyBatches:
+    """Sequence-like feature batches that materializes only a runner slice.
+
+    ``run_parallel_with_progress`` accesses its input with ``len()`` and slices
+    it once per bounded scheduling window. Keeping only positional plans here
+    prevents the parent process from holding one copied DataFrame per batch.
+    The worker still receives the same independent, nine-column DataFrame that
+    the legacy eager batch builder produced.
+    """
+
+    def __init__(
+        self,
+        clusters_data: pd.DataFrame,
+        *,
+        required_cols: list[str],
+        batch_positions: list[np.ndarray],
+    ) -> None:
+        self._clusters_data = clusters_data
+        self._column_positions = [
+            int(clusters_data.columns.get_loc(column))
+            for column in required_cols
+        ]
+        self._batch_positions = batch_positions
+
+    def __len__(self) -> int:
+        return len(self._batch_positions)
+
+    def _materialize(self, index: int) -> pd.DataFrame:
+        index = int(index)
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("feature batch index out of range")
+        positions = self._batch_positions[index]
+        # One advanced positional selection gives a standalone, bounded task
+        # frame in the desired nine-column order.  Avoid selecting all source
+        # columns first, which would add a second batch-sized temporary copy.
+        return self._clusters_data.iloc[positions, self._column_positions]
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            return [self._materialize(item) for item in range(start, stop, step)]
+        return self._materialize(index)
+
+
 def _build_feature_assembly_batches(
     clusters_data: pd.DataFrame,
     *,
@@ -257,41 +350,15 @@ def _build_feature_assembly_batches(
     cluster boundary while allowing batches to span chromosomes and stay near a
     predictable input size. The returned oversized count identifies clusters
     which cannot be made smaller without changing feature semantics.
+
+    This eager compatibility helper remains available for callers and tests;
+    production feature assembly uses :class:`_LazyFeatureAssemblyBatches`.
     """
-    target_rows = max(1, int(batch_rows))
-    batches: list[pd.DataFrame] = []
-    current_parts = []
-    current_rows = 0
-    oversized_clusters = 0
-
-    # ``indices`` holds integer row positions, avoiding a DataFrame copy for
-    # every cluster while preserving the prior chromosome -> cluster grouping.
-    cluster_indices = clusters_data.groupby(
-        ["chromosome", "clusterID"],
-        sort=False,
-    ).indices
-    for positions in cluster_indices.values():
-        cluster_rows = len(positions)
-        if current_parts and current_rows + cluster_rows > target_rows:
-            batches.append(clusters_data.iloc[np.concatenate(current_parts)].copy())
-            current_parts = []
-            current_rows = 0
-
-        current_parts.append(positions)
-        current_rows += cluster_rows
-        if cluster_rows > target_rows:
-            oversized_clusters += 1
-
-        # Flush a full batch immediately. An oversized cluster is therefore
-        # isolated rather than being combined with another cluster.
-        if current_rows >= target_rows:
-            batches.append(clusters_data.iloc[np.concatenate(current_parts)].copy())
-            current_parts = []
-            current_rows = 0
-
-    if current_parts:
-        batches.append(clusters_data.iloc[np.concatenate(current_parts)].copy())
-
+    batch_positions, oversized_clusters = _build_feature_assembly_batch_positions(
+        clusters_data,
+        batch_rows=batch_rows,
+    )
+    batches = [clusters_data.iloc[positions].copy() for positions in batch_positions]
     return batches, oversized_clusters
 
 
@@ -310,6 +377,117 @@ def _feature_assembly_parallel_kwargs(group_count: int) -> dict:
         # can recover only to this hard cap, never to all requested CPU cores.
         "adaptive_recovery": True,
     }
+
+
+def _coerce_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Restore the legacy numeric schema after reading a feature TSV."""
+    for col in df.columns:
+        if col in NUMERIC_COLS:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Ensure exact column order if all expected fields are available. This is
+    # deliberately the same tolerant behavior used by the historical cache
+    # reader, which can still surface a useful warning for a manually supplied
+    # legacy file.
+    missing = [c for c in FEATURE_COLS if c not in df.columns]
+    if not missing:
+        return df[FEATURE_COLS]
+    print(f"[WARN] Existing file lacks expected columns: {missing}")
+    return df
+
+
+def _read_feature_frame(path: str) -> pd.DataFrame:
+    physical = resolve_artifact_path(path) or path
+    return _coerce_feature_frame(
+        pd.read_csv(
+            physical,
+            sep="\t",
+            # The default parser may round a decimal by one ULP.  This table is
+            # re-serialized after disk-backed streaming, so retain the exact
+            # binary float represented in the TSV to preserve legacy output
+            # bytes and avoid needless downstream classification jitter.
+            float_precision="round_trip",
+            # A freshly assembled table keeps these fields as strings. Pinning
+            # their dtype here avoids turning an all-numeric-looking cluster ID
+            # into an integer only because the streamed file was re-read.
+            dtype={column: object for column in FEATURE_TEXT_COLS},
+        )
+    )
+
+
+def _feature_assembly_temp_path(outpath: str, label: str, *, suffix: str = ".tsv") -> str:
+    """Create a sibling temporary path so final replacement stays atomic."""
+    absolute = os.path.abspath(str(outpath))
+    directory = os.path.dirname(absolute)
+    basename = os.path.basename(absolute)
+    os.makedirs(directory, exist_ok=True)
+    fd, path = tempfile.mkstemp(
+        prefix=f".phasis_feature_assembly_{basename}.{label}.",
+        suffix=suffix,
+        dir=directory,
+    )
+    os.close(fd)
+    return path
+
+
+class _FeatureResultStreamWriter:
+    """Write one ordered worker result without retaining previous results."""
+
+    def __init__(self, feature_handle, *, trace_handle=None) -> None:
+        self.feature_handle = feature_handle
+        self.trace_handle = trace_handle
+        self.streamed_rows = 0
+        self.bad_chunks = 0
+
+    def __call__(self, sub) -> None:
+        chunk_rows = None
+        chunk_trace_rows = None
+        if isinstance(sub, dict):
+            chunk_rows = sub.get("rows")
+            chunk_trace_rows = sub.get("debug_rows")
+        elif isinstance(sub, list):
+            chunk_rows = sub
+
+        if not isinstance(chunk_rows, list):
+            self.bad_chunks += 1
+            return
+
+        valid_rows = []
+        for row in chunk_rows:
+            if isinstance(row, (list, tuple)) and len(row) == len(FEATURE_COLS):
+                valid_rows.append(list(row))
+            else:
+                self.bad_chunks += 1
+        if valid_rows:
+            # This per-result DataFrame is bounded by one task; numeric
+            # coercion mirrors the historical final DataFrame before it is
+            # serialized to the stream.
+            _coerce_feature_frame(
+                pd.DataFrame(valid_rows, columns=FEATURE_COLS)
+            ).to_csv(
+                self.feature_handle,
+                sep="\t",
+                index=False,
+                header=(self.streamed_rows == 0),
+            )
+            self.streamed_rows += len(valid_rows)
+
+        if self.trace_handle is not None and isinstance(chunk_trace_rows, list):
+            valid_trace_rows = [
+                _coerce_trace_row(row)
+                for row in chunk_trace_rows
+                if isinstance(row, dict)
+            ]
+            if valid_trace_rows:
+                pd.DataFrame(
+                    valid_trace_rows,
+                    columns=MAIN_PARTNER_TRACE_COLS,
+                ).to_csv(
+                    self.trace_handle,
+                    sep="\t",
+                    index=False,
+                    header=False,
+                )
 
 
 def ensure_win_score_lookup_ready() -> None:
@@ -378,20 +556,7 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
     # ---------- Early cache check ----------
     if cache.hit(section, outfname, input_sig):
         print(f"  - Output up-to-date (hash+sig match). Skipping assembly: {outfname}")
-        df = pd.read_csv(resolve_artifact_path(outfname) or outfname, sep="	")
-
-        # Coerce numerics by legacy names only
-        for col in df.columns:
-            if col in NUMERIC_COLS:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        # Ensure exact column order if all present
-        missing = [c for c in FEATURE_COLS if c not in df.columns]
-        if not missing:
-            df = df[FEATURE_COLS]
-        else:
-            print(f"[WARN] Existing file lacks expected columns: {missing}")
-        return df
+        return _read_feature_frame(outfname)
 
     # ---------- Validate input ----------
     required_cols = ['clusterID', 'chromosome', 'strand', 'pos', 'len', 'abun', 'identifier', 'tag_seq', 'alib']
@@ -399,17 +564,26 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
     if missing_in_input:
         raise ValueError(f"clusters_data missing required columns: {missing_in_input}")
 
-    clusters_data = clusters_data[required_cols].copy()
-
     # Split into bounded batches of whole clusters. A chromosome can therefore
     # use several tasks instead of forcing one potentially huge DataFrame into a
-    # worker, while small chromosomes are efficiently packed together.
+    # worker, while small chromosomes are efficiently packed together. Keep only
+    # positional batch plans in the parent; each copied input DataFrame is made
+    # lazily for the scheduler's current bounded window.
     batch_rows = _feature_assembly_batch_rows()
-    feature_batches, oversized_clusters = _build_feature_assembly_batches(
+    batch_positions, oversized_clusters = _build_feature_assembly_batch_positions(
         clusters_data,
         batch_rows=batch_rows,
     )
-    chromosome_count = clusters_data.groupby("chromosome", sort=False).ngroups
+    feature_batches = _LazyFeatureAssemblyBatches(
+        clusters_data,
+        required_cols=required_cols,
+        batch_positions=batch_positions,
+    )
+    chromosome_count = clusters_data.groupby(
+        "chromosome",
+        sort=False,
+        observed=True,
+    ).ngroups
     print(
         f"  - Found {chromosome_count} chromosome groups; built "
         f"{len(feature_batches)} feature batches of up to {batch_rows:,} input rows"
@@ -437,66 +611,118 @@ def features_to_detection(clusters_data: pd.DataFrame,*,phase: str | int | None 
         concat_libs=bool(concat_libs),
     )
 
-    # ---------- Parallel processing ----------
-    results = run_parallel_with_progress(
-        process_chromosome_features,
-        feature_batches,
-        desc="Assemble features",
-        min_chunk=1,
-        unit="lib-chr",
-        **feature_parallel_kwargs,
+    # ---------- Parallel processing + bounded result streaming ----------
+    # Results are committed by the shared runner in input order. Stream each
+    # accepted work result to a TSV so neither a global ``results`` list nor a
+    # global flattened feature-row list is retained in RAM.
+    streamed_path = _feature_assembly_temp_path(outfname, "stream")
+    normalized_suffix = ".tsv.gz" if str(outfname).endswith(".gz") else ".tsv"
+    normalized_path = _feature_assembly_temp_path(
+        outfname,
+        "normalized",
+        suffix=normalized_suffix,
     )
-
-    # ---------- Flatten safely ----------
-    flat = []
-    trace_rows = []
-    bad_chunks = 0
-    for sub in results or []:
-        chunk_rows = None
-        chunk_trace_rows = None
-        if isinstance(sub, dict):
-            chunk_rows = sub.get("rows")
-            chunk_trace_rows = sub.get("debug_rows")
-        elif isinstance(sub, list):
-            chunk_rows = sub
-
-        if isinstance(chunk_rows, list):
-            for row in chunk_rows:
-                if isinstance(row, (list, tuple)) and len(row) == len(FEATURE_COLS):
-                    flat.append(list(row))
-                else:
-                    bad_chunks += 1
-            if trace_enabled and isinstance(chunk_trace_rows, list):
-                for row in chunk_trace_rows:
-                    if isinstance(row, dict):
-                        trace_rows.append(_coerce_trace_row(row))
-        else:
-            bad_chunks += 1
-
-    if bad_chunks:
-        print(f"[WARN] Skipped {bad_chunks} malformed/failed rows or chunks during feature assembly.")
-
-    if not flat:
-        raise RuntimeError("No features assembled; all chunks failed or returned empty results.")
-
-    # ---------- DataFrame materialization ----------
-    collected_features = pd.DataFrame(flat, columns=FEATURE_COLS)
-
-    # Numeric coercion on the newly built DF (legacy names)
-    for col in collected_features.columns:
-        if col in NUMERIC_COLS:
-            collected_features[col] = pd.to_numeric(collected_features[col], errors="coerce")
-    # ---------- Write + cache record ----------
-    collected_features.to_csv(outfname, sep="	", index=False)
+    trace_streamed_path = None
+    trace_final_path = None
     if trace_enabled and trace_outpath:
-        trace_frame = pd.DataFrame(trace_rows, columns=MAIN_PARTNER_TRACE_COLS)
-        trace_frame.to_csv(trace_outpath, sep="\t", index=False)
-        print(f"  - Wrote {trace_outpath}")
-    fp = finalize_text_artifact(cache, section, outfname, input_sig)
-    if fp:
-        print(f"  - Wrote {outfname} (md5: {fp})")
+        trace_streamed_path = _feature_assembly_temp_path(trace_outpath, "stream")
 
-    return collected_features
+    stream_writer = None
+    try:
+        with open(streamed_path, "w", encoding="utf-8", newline="") as feature_handle:
+            trace_handle = None
+            try:
+                if trace_streamed_path:
+                    trace_handle = open(trace_streamed_path, "w", encoding="utf-8", newline="")
+                    # Match the former empty-trace behavior: debug mode always
+                    # emits a header even if no feature batch produced a trace.
+                    pd.DataFrame(columns=MAIN_PARTNER_TRACE_COLS).to_csv(
+                        trace_handle,
+                        sep="\t",
+                        index=False,
+                    )
+
+                stream_writer = _FeatureResultStreamWriter(
+                    feature_handle,
+                    trace_handle=trace_handle,
+                )
+
+                run_parallel_with_progress(
+                    process_chromosome_features,
+                    feature_batches,
+                    desc="Assemble features",
+                    min_chunk=1,
+                    unit="lib-chr",
+                    on_result=stream_writer,
+                    return_results=False,
+                    **feature_parallel_kwargs,
+                )
+            finally:
+                if trace_handle is not None:
+                    trace_handle.close()
+
+        # The scheduler no longer needs its positional plans or its local input
+        # reference. Release them before loading the one returned feature table.
+        del feature_batches
+        del batch_positions
+        del clusters_data
+        gc.collect()
+
+        if stream_writer is not None and stream_writer.bad_chunks:
+            print(
+                "[WARN] Skipped "
+                f"{stream_writer.bad_chunks} malformed/failed rows or chunks during feature assembly."
+            )
+
+        if stream_writer is None or not stream_writer.streamed_rows:
+            raise RuntimeError("No features assembled; all chunks failed or returned empty results.")
+
+        # Read the finished stream once to preserve the old return-value API and
+        # its complete-table numeric dtype inference. Rewriting from this one
+        # final DataFrame also keeps legacy TSV formatting stable across worker
+        # batch boundaries.
+        collected_features = _read_feature_frame(streamed_path)
+        collected_features.to_csv(
+            normalized_path,
+            sep="\t",
+            index=False,
+            compression=("gzip" if str(outfname).endswith(".gz") else None),
+        )
+        os.replace(normalized_path, outfname)
+        normalized_path = None
+
+        if trace_streamed_path and trace_outpath:
+            if str(trace_outpath).endswith(".gz"):
+                trace_final_path = _feature_assembly_temp_path(
+                    trace_outpath,
+                    "normalized",
+                    suffix=".tsv.gz",
+                )
+                trace_frame = pd.read_csv(trace_streamed_path, sep="\t")
+                trace_frame.to_csv(trace_final_path, sep="\t", index=False, compression="gzip")
+                os.replace(trace_final_path, trace_outpath)
+                trace_final_path = None
+            else:
+                os.replace(trace_streamed_path, trace_outpath)
+            trace_streamed_path = None
+            print(f"  - Wrote {trace_outpath}")
+
+        fp = finalize_text_artifact(cache, section, outfname, input_sig)
+        if fp:
+            print(f"  - Wrote {outfname} (md5: {fp})")
+        return collected_features
+    finally:
+        for temporary_path in (
+            streamed_path,
+            normalized_path,
+            trace_streamed_path,
+            trace_final_path,
+        ):
+            if temporary_path and os.path.exists(temporary_path):
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    pass
 
 
 def _strand_masks(df: pd.DataFrame):
@@ -4066,7 +4292,7 @@ def process_chromosome_features(chromosome_df: pd.DataFrame):
 
     rows = []
     debug_rows = [] if _main_partner_trace_enabled() else None
-    for cID, aclust in df.groupby('clusterID', sort=False):
+    for cID, aclust in df.groupby('clusterID', sort=False, observed=True):
         if aclust.empty:
             continue
 

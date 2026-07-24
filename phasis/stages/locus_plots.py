@@ -3009,9 +3009,17 @@ def write_individual_phas_locus_plots(
     trimmed_clusters = clusters_data[cluster_keep_cols].copy()
     grouped_by_cid = {}
     grouped_by_identifier = {}
-    for (cid_value, alib_value), subdf in trimmed_clusters.groupby(["clusterID", "alib"], sort=False):
+    for (cid_value, alib_value), subdf in trimmed_clusters.groupby(
+        ["clusterID", "alib"],
+        sort=False,
+        observed=True,
+    ):
         grouped_by_cid[(str(cid_value).strip(), str(alib_value).strip())] = subdf.copy()
-    for (identifier_value, alib_value), subdf in trimmed_clusters.groupby(["identifier", "alib"], sort=False):
+    for (identifier_value, alib_value), subdf in trimmed_clusters.groupby(
+        ["identifier", "alib"],
+        sort=False,
+        observed=True,
+    ):
         grouped_by_identifier[(str(identifier_value).strip(), str(alib_value).strip())] = subdf.copy()
 
     for spec in bucket_specs:

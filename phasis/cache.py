@@ -318,6 +318,8 @@ CLEANUP_PATTERNS = [
     "suffix:processed_libraries",
     "contains:_windows_sl",
     "prefix:.phasis_cluster_aggregation_",
+    "prefix:.phasis_feature_assembly_",
+    "prefix:.phasis_phas_cluster_",
 ]
 INDEX_ONLY_MEM_SECTIONS = ("BASIC",)
 INDEX_DIRNAME = "index"

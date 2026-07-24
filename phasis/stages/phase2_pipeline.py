@@ -22,6 +22,7 @@ Design constraints:
 - minimal behavior drift: keeps the same early-exit behavior used in legacy run_phase2()
 """
 
+import gc
 import os
 from typing import Any, Optional, Sequence, Union
 
@@ -43,6 +44,65 @@ from phasis.stages import classify as st_classify
 from phasis.stages import locus_plots as st_locus_plots
 from phasis.stages import output as st_output
 from phasis.stages import library_processing as st_library_processing
+
+
+# The completed PHAS table remains complete on disk for compatibility and
+# resume support. These are the only per-read fields required by the remaining
+# in-process Phase II stages: window selection, feature assembly, and plots.
+PHASE2_RUNTIME_CLUSTER_COLUMNS = (
+    "alib",
+    "clusterID",
+    "chromosome",
+    "strand",
+    "pos",
+    "len",
+    "hits",
+    "abun",
+    "pval_corr_f",
+    "pval_corr_r",
+    "tag_seq",
+    "identifier",
+)
+
+# These repeat heavily across per-read rows. First-seen category order keeps
+# existing ``groupby(..., sort=False)`` task order stable while replacing
+# repeated Python strings with compact integer codes.
+PHASE2_RUNTIME_CATEGORICAL_COLUMNS = (
+    "alib",
+    "clusterID",
+    "chromosome",
+    "strand",
+    "identifier",
+)
+
+
+def _compact_phase2_cluster_frame(clusters_data: pd.DataFrame) -> pd.DataFrame:
+    """Compact repetitive PHAS identifiers without changing table values.
+
+    This is deliberately scoped to Phase II's private working frame; public
+    PHAS-table loader calls retain their usual dtypes.
+    """
+    for column in PHASE2_RUNTIME_CATEGORICAL_COLUMNS:
+        if column not in clusters_data.columns:
+            continue
+        values = clusters_data[column]
+        if isinstance(values.dtype, pd.CategoricalDtype):
+            continue
+        categories = pd.unique(values[values.notna()])
+        clusters_data[column] = pd.Categorical(values, categories=categories)
+    return clusters_data
+
+
+def _load_compact_phase2_clusters(phas_output: str | None) -> pd.DataFrame:
+    """Load only the PHAS fields needed by active Phase II consumers."""
+    if not phas_output or not artifact_exists(phas_output):
+        return pd.DataFrame()
+    return _compact_phase2_cluster_frame(
+        st_phas_clusters.load_phas_to_detect_output(
+            phas_output,
+            columns=PHASE2_RUNTIME_CLUSTER_COLUMNS,
+        )
+    )
 
 
 def _coerce_path_list(paths: Union[Sequence[str], str, None]) -> list[str]:
@@ -173,6 +233,10 @@ def run_phase2_pipeline(
 
     # Normalize for downstream grouping
     allClusters = _normalize_cluster_df(allClusters, is_concat=cfg.concat_libs)
+    # ``allClusters`` is the sole remaining consumer of the aggregator return
+    # value.  Drop this extra alias before Phase II builds additional tables.
+    del agg_df
+    gc.collect()
 
     # 2) ALWAYS emit loci table BEFORE merge (guarantees the input exists for merge)
     loci_table_df = st_cmerge.loci_table_from_clusters(allClusters)
@@ -202,13 +266,36 @@ def run_phase2_pipeline(
 
     print(f"[INFO] mergedClusterDict ready with {len(mcd)} universal IDs.")
 
-    # 4) Build PHAS clusters (handles empty input)
-    clusters_data = st_phas_clusters.build_and_save_phas_clusters(
+    # The loci table is only needed to construct the universal-ID mapping above.
+    # Releasing it before PHAS-cluster batching avoids an unnecessary large-table
+    # overlap with that stage.
+    del loci_table_df
+    gc.collect()
+
+    # 4) Build PHAS clusters (handles empty input).  Use write-only mode so the
+    # raw candidate table can be released before the completed PHAS table is
+    # loaded for the downstream window/feature stages.
+    phas_output = st_phas_clusters.build_and_save_phas_clusters(
         allClusters,
         phase=int(cfg.phase) if str(cfg.phase).isdigit() else None,
         memFile=cfg.memFile,
         concat_libs=cfg.concat_libs,
+        return_dataframe=False,
     )
+
+    # The raw candidate table is not used after PHAS clusters have been built.
+    # Releasing it before loading the final table prevents a transient
+    # raw-plus-final, potentially multi-GB memory peak.
+    del allClusters
+    gc.collect()
+
+    clusters_data = _load_compact_phase2_clusters(phas_output)
+    if not clusters_data.empty:
+        print(
+            "[INFO] Retained "
+            f"{len(clusters_data.columns)} PHAS columns in memory for downstream work; "
+            "repeated IDs use categorical encoding."
+        )
 
     # 5) If there are no clusters, short-circuit cleanly
     if clusters_data is None or getattr(clusters_data, "empty", True):
@@ -231,6 +318,12 @@ def run_phase2_pipeline(
     win_phasis_score = st_winscore.compute_and_save_phasis_scores(clusters_windows)
     set_win_score_lookup(win_phasis_score)
 
+    # Feature assembly uses the compact score lookup set above, not these full
+    # intermediate DataFrames.  Drop them before allocating feature batches.
+    del clusters_windows
+    del win_phasis_score
+    gc.collect()
+
     features = st_feat.features_to_detection(
         clusters_data,
         phase=int(cfg.phase) if str(cfg.phase).isdigit() else cfg.phase,
@@ -238,6 +331,12 @@ def run_phase2_pipeline(
         concat_libs=cfg.concat_libs,
         memFile=cfg.memFile,
     )
+
+    # The complete per-read PHAS table is no longer needed during
+    # classification. Re-open its compact projection only just before plots,
+    # rather than carrying it alongside feature and labeled tables.
+    del clusters_data
+    gc.collect()
 
     # 8) Classify (stage returns labeled DF), then finalize outputs (output stage).
     # Phasis 2.8.1 keeps -classifier as a deprecated CLI compatibility flag, but
@@ -249,19 +348,28 @@ def run_phase2_pipeline(
         max_complexity=float(cfg.max_complexity),
         n_clusters=int(getattr(cfg, "n_clusters", 2) or 2),
     )
+    # The classifier returns an independent labeled table.  Free feature rows
+    # before evidence classification creates its own labeled-table copy.
+    del features
+    gc.collect()
     labeled = st_classify.apply_evidence_classification(
         labeled,
         phase=cfg.phase,
         legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
         overrides_path=getattr(cfg, "classification_overrides", None),
     )
+    print("[INFO] Reloading compact PHAS fields for locus plots.")
+    plot_clusters_data = _load_compact_phase2_clusters(phas_output)
     st_locus_plots.write_individual_phas_locus_plots(
         "GMM",
         labeled,
-        clusters_data,
+        plot_clusters_data,
         job_outdir=cfg.outdir,
         job_phase=cfg.phase,
     )
+    # The locus-plot stage is the final consumer of the compact per-read table.
+    del plot_clusters_data
+    gc.collect()
     st_output.finalize_and_write_results(
         "GMM",
         labeled,
