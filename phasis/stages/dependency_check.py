@@ -24,9 +24,9 @@ def checkDependency():
     Validate required runtime dependencies (legacy-compatible behavior).
     Exits on failure.
     """
-    # Python version check (legacy says 3.10+)
-    py_ok = sys.version_info >= (3, 10)
-    _print_status("Python v3.10 or higher", py_ok)
+    # Keep the runtime guard aligned with the supported binary dependency stack.
+    py_ok = (3, 10) <= sys.version_info[:2] < (3, 13)
+    _print_status("Python v3.10 through v3.12", py_ok)
 
     # External tools used in current pipeline
     hisat_ok = _has_executable("hisat2")
@@ -46,7 +46,7 @@ def checkDependency():
     # and preserve names/prints exactly.
 
     if not py_ok:
-        print("Please use Python 3.10 or higher")
+        print("Please use Python 3.10 through 3.12")
         sys.exit()
 
     if not hisat_ok:

@@ -25,6 +25,9 @@ class VersioningTests(unittest.TestCase):
     def test_pyproject_and_readme_release_metadata_match(self):
         pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["version"], "2.8.2")
+        self.assertEqual(pyproject["project"]["requires-python"], ">=3.10,<3.13")
+        self.assertIn("numpy==1.26.4", pyproject["project"]["dependencies"])
+        self.assertIn("scikit-learn==1.3.2", pyproject["project"]["dependencies"])
         readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("**Version:** v2.8.2", readme_text)
         self.assertIn("**Updated:** 2026-07-28", readme_text)

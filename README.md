@@ -15,21 +15,21 @@ Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libra
 
 ### 1) Create an environment
 
-Conda is recommended:
+Conda is recommended. Create the compiled Python dependencies and required
+external tools in one explicit solve so the result does not depend on a user's
+global channel configuration:
 ```bash
-conda create -n phasis python=3.12 -y
+conda create -n phasis --override-channels -c conda-forge -c bioconda --strict-channel-priority \
+  python=3.12 "numpy=1.26.4" "scikit-learn=1.3.2" \
+  hisat2 "samtools>=1.10" -y
 conda activate phasis
-conda install "numpy=1.26.4" "scikit-learn=1.3.0" -y
 ```
 
-### 2) Install external tools
+This supported environment is Python 3.10 through 3.12. The exact NumPy and
+scikit-learn pins keep the GMM classifier reproducible; scikit-learn `1.3.2`
+is required for a portable Python 3.12 Conda installation.
 
-Phasis requires `hisat2` and `samtools` 1.10 or newer on your `PATH`:
-```bash
-conda install -c conda-forge -c bioconda hisat2 "samtools>=1.10" -y
-```
-
-### 3) Install Phasis
+### 2) Install Phasis
 
 From the Phasis repository root:
 ```bash
@@ -418,7 +418,7 @@ The default matching window uses genomic overlap with a +/-300 nt flank.
 
 ## Troubleshooting
 
-- Phasis currently tests against NumPy `1.26.4` and scikit-learn `1.3.0`.
+- Phasis currently tests against Python 3.10--3.12, NumPy `1.26.4`, and scikit-learn `1.3.2`.
 - If command-line examples produce no plots, check whether the run produced final *PHAS* or *PHAS*-like calls and whether `--plot_staging` copied staged plots back to `--outdir`.
 - If reference IDs are unexpected in outputs, use `--reference_id_mode preserve` for the next run.
 

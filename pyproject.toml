@@ -7,13 +7,13 @@ name = "phasis"
 version = "2.8.2"
 description = "PHAS locus detection and scoring pipeline"
 authors = [{ name = "Thales H Cherubino Ribeiro, Atul Kakrana, Blake C. Meyers" }]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 
 dependencies = [
   "numpy==1.26.4",
   "pandas",
   "scipy",
-  "scikit-learn==1.3.0",
+  "scikit-learn==1.3.2",
   "matplotlib",
   "seaborn",
   "tqdm",
