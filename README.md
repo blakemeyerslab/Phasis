@@ -15,9 +15,9 @@ Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libra
 
 ### 1) Create an environment
 
-Conda is recommended. Create the compiled Python dependencies and required
-external tools in one explicit solve so the result does not depend on a user's
-global channel configuration:
+Conda is recommended. The following command creates an environment containing
+the compiled Python dependencies and required external tools in one explicit
+solve, independent of global Conda channel configuration:
 ```bash
 conda create -n phasis --override-channels -c conda-forge -c bioconda --strict-channel-priority \
   python=3.12 "numpy=1.26.4" "scikit-learn=1.3.2" \
@@ -25,19 +25,19 @@ conda create -n phasis --override-channels -c conda-forge -c bioconda --strict-c
 conda activate phasis
 ```
 
-This supported environment is Python 3.10 through 3.12. The exact NumPy and
-scikit-learn pins keep the GMM classifier reproducible; scikit-learn `1.3.2`
-is required for a portable Python 3.12 Conda installation.
+Phasis supports Python versions 3.10 through 3.12. Exact NumPy and
+scikit-learn pins maintain reproducibility of the GMM classifier; scikit-learn
+`1.3.2` is required for a portable Python 3.12 Conda installation.
 
 ### 2) Install Phasis
 
-From the Phasis repository root:
+Install Phasis from the repository root:
 ```bash
 python -m pip install -U pip
 python -m pip install -e .
 ```
 
-Check that the command is available:
+Verify command availability:
 ```bash
 phasis -h
 ```
@@ -75,7 +75,7 @@ phasis -mindepth 1 -phase 24 -libformat T \
 
 ---
 
-## Quick Start With Your Own Data
+## Quick Start With Custom Data
 
 ### 21-*PHAS*
 ```bash
@@ -89,7 +89,8 @@ phasis -libs *.tag -libformat T -reference genome.fa -phase 24 -cores 0
 
 ### Pooled-library analysis
 
-By default, Phasis analyzes libraries individually. To pool all input libraries into one virtual library before candidate detection, add `--pool_libraries`:
+By default, Phasis analyzes libraries individually. Pooled-library analysis is
+enabled with `--pool_libraries`:
 
 ```bash
 phasis -libs *.tag -libformat T -reference genome.fa -phase 24 --pool_libraries
@@ -101,7 +102,7 @@ phasis -libs *.tag -libformat T -reference genome.fa -phase 24 --pool_libraries
 
 Phasis uses two locations:
 
-1. **Run directory**: the directory where you run `phasis`
+1. **Run directory**: the directory from which `phasis` is executed
    - Intermediate files
    - `index/` with the HISAT2 index
    - `processed_libraries/` with reusable processed libraries
@@ -113,7 +114,7 @@ Phasis uses two locations:
 
 Keeping 21-*PHAS* and 24-*PHAS* runs in the same run directory allows safe reuse of the index and processed libraries.
 
-Completed Phase II text intermediates are gzip-compressed by default to reduce disk usage in large runs. The cache still treats these as the same logical intermediates, so restart behavior is preserved. Add `--no_compress_intermediates` if you need the intermediate TSV/TAB files to remain plain text.
+Completed Phase II text intermediates are gzip-compressed by default to reduce disk usage in large runs. The cache still treats these as the same logical intermediates, so restart behavior is preserved. Use `--no_compress_intermediates` to retain intermediate TSV/TAB files in plain-text form.
 
 ---
 
@@ -127,7 +128,7 @@ Phasis accepts:
 
 The reference FASTA passed to `-reference` can also be plain text or gzip-compressed.
 
-For any supported input format, Phasis stores a processed `.fas.gz` copy under `processed_libraries/` so later runs can reuse it.
+For every supported input format, Phasis stores a processed `.fas.gz` copy under `processed_libraries/` for reuse by later runs.
 
 ### Run directly from FASTQ
 ```bash
@@ -157,15 +158,16 @@ temporary disk I/O. The default is 250,000 unique tags per chunk.
 
 Phasis requires `samtools` 1.10 or newer. At startup it resolves and validates
 one executable, prints its absolute path and version, and reuses that exact path
-for mapping and BAM parsing. If validation fails, activate the intended Conda
-environment and check `which samtools` and `samtools --version`.
+for mapping and BAM parsing. Validation failures usually indicate an unexpected
+active Conda environment or executable; `which samtools` and `samtools --version`
+report the resolved executable and version.
 
 ### Convert FASTA to tag-count
 ```bash
 python support_scripts/fastaToTag.py sample.fasta
 ```
 
-Then run Phasis:
+Example invocation:
 ```bash
 phasis -libs *.tag -reference genome.fa -libformat T
 ```
@@ -217,7 +219,9 @@ These plots are intended for manual inspection of candidate architecture, opposi
 
 ## Classifying Existing Candidate Clusters
 
-If you already have `*.candidate.clusters` files from a previous Phasis run or an alternative candidate-generation workflow, you can run only the classification/output stage:
+When `*.candidate.clusters` files are available from a previous Phasis run or
+an alternative candidate-generation workflow, Phasis can execute only the
+classification/output stage:
 
 ```bash
 phasis -mindepth 1 -phase 24 -libformat T \
@@ -257,7 +261,7 @@ If `-class_cluster_files` is omitted, Phasis tries to infer the expected cluster
 
 ### Library-processing worker cap
 
-Set `PHASIS_LIB_WORKER_CAP` to limit concurrent library conversion jobs:
+`PHASIS_LIB_WORKER_CAP` limits concurrent library-conversion jobs:
 
 ```bash
 export PHASIS_LIB_WORKER_CAP=1
@@ -267,9 +271,9 @@ phasis ... -libformat Q
 FASTQ conversion starts with one library worker, then increases after successful
 batches through `1 → 2 → 4 → 6 → 8`, up to a default cap of eight workers (or
 the available core count when lower). If a worker or pool fails, Phasis reduces
-parallelism and retries the current work. Set `PHASIS_LIB_WORKER_CAP` to choose
-a lower or higher maximum when the job has sufficient temporary-I/O bandwidth
-and memory per library. This cap applies to library preparation; mapping remains
+parallelism and retries the current work. The cap can be lowered or raised when
+the job has sufficient temporary-I/O bandwidth and memory per library. This cap
+applies to library preparation; mapping remains
 scheduled from the requested `-cores` value.
 
 ### Progress logging
@@ -286,8 +290,8 @@ and, after successful work, can expand through the standard recovery engine to
 70% of the allocated CPU cores (for example, 8 workers from a 12-core job).
 This prevents one enriched chromosome from dominating a worker and avoids an HPC
 memory kill before generic pool recovery can act. A caught worker failure reduces
-concurrency; later successful batches recover only to that hard cap. To choose a
-different cap or batch size for a measured workload:
+concurrency; later successful batches recover only to that hard cap. A different
+cap or batch size can be selected for a measured workload:
 
 ```bash
 export PHASIS_FEATURE_ASSEMBLY_WORKER_CAP=3
@@ -297,10 +301,10 @@ phasis ...
 
 Only the current bounded worker window is materialized and completed feature
 rows are streamed through a temporary table, rather than retaining every input
-batch and worker result in the parent process. Lower
-`PHASIS_FEATURE_ASSEMBLY_BATCH_ROWS` if a single task is still memory-heavy; a
-cluster larger than that setting cannot be split without altering its features,
-and Phasis reports those exceptional clusters explicitly.
+batch and worker result in the parent process. A lower
+`PHASIS_FEATURE_ASSEMBLY_BATCH_ROWS` value reduces the memory demand of each
+task; a cluster larger than that setting cannot be split without altering its
+features, and Phasis reports those exceptional clusters explicitly.
 
 ### PHAS-cluster batching
 
@@ -391,7 +395,8 @@ phasis ... --reference_id_mode numeric
 
 ## FASTA Headers: Non-Integer Chromosome IDs
 
-Very long or complex FASTA headers can increase memory use. If needed, replace genome headers with compact numeric IDs:
+Very long or complex FASTA headers can increase memory use. Compact numeric IDs
+can be generated when required:
 
 ```bash
 python support_scripts/replace_genome_headers.py genome.fa new_genome.fa equivalence.tsv
@@ -419,8 +424,8 @@ The default matching window uses genomic overlap with a +/-300 nt flank.
 ## Troubleshooting
 
 - Phasis currently tests against Python 3.10--3.12, NumPy `1.26.4`, and scikit-learn `1.3.2`.
-- If command-line examples produce no plots, check whether the run produced final *PHAS* or *PHAS*-like calls and whether `--plot_staging` copied staged plots back to `--outdir`.
-- If reference IDs are unexpected in outputs, use `--reference_id_mode preserve` for the next run.
+- When command-line examples produce no plots, confirm that the run produced final *PHAS* or *PHAS*-like calls and that `--plot_staging` copied staged plots back to `--outdir`.
+- `--reference_id_mode preserve` retains original reference IDs in subsequent runs.
 
 ---
 
