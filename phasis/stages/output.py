@@ -31,7 +31,7 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from matplotlib.patches import Rectangle
 
 try:
-    from tqdm import tqdm
+    from phasis.progress import tqdm
 except ImportError:
     tqdm = None
 

@@ -10,7 +10,7 @@ import tempfile
 import gc
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+from phasis.progress import tqdm
 
 import phasis.runtime as rt
 from phasis.cache import (

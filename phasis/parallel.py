@@ -1,5 +1,5 @@
 import os, multiprocessing, gc, traceback, sys, re, tempfile
-from tqdm import tqdm
+from phasis.progress import tqdm
 import phasis.runtime as rt
 from phasis.env import getenv
 

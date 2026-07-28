@@ -18,7 +18,7 @@ import sys
 from collections import Counter, defaultdict
 
 from scipy.stats import combine_pvalues, hypergeom, mannwhitneyu
-from tqdm import tqdm
+from phasis.progress import tqdm
 
 import phasis.runtime as rt
 from phasis.cache import (

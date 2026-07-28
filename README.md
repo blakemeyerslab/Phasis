@@ -1,7 +1,7 @@
 # Phasis - Phased sRNA Cluster Discovery and Annotation
 
-**Version:** v2.8.1
-**Updated:** 2026-07-03
+**Version:** v2.8.2
+**Updated:** 2026-07-28
 
 Phasis is a parallelized tool for large-scale analysis of small RNA (sRNA) libraries. It supports:
 
@@ -272,6 +272,12 @@ a lower or higher maximum when the job has sufficient temporary-I/O bandwidth
 and memory per library. This cap applies to library preparation; mapping remains
 scheduled from the requested `-cores` value.
 
+### Progress logging
+
+Normal progress bars are written to standard output. Warnings and errors remain
+on standard error, so scheduler stdout logs show progress without treating it as
+an error-log event.
+
 ### Feature-assembly worker cap
 
 Feature assembly keeps each cluster intact but packs clusters from any chromosome
@@ -316,12 +322,11 @@ phasis ...
 ```
 
 This does not mix or reorder chromosome/library groups; it only splits an
-unusually large group into consecutive row batches. Phase II releases the raw
-processed-cluster and loci tables before it reloads the finished PHAS table for
-the downstream stages. The on-disk PHAS table remains complete, but the private
-Phase II working copy reloads only the columns needed for windows, features,
-and locus plots and encodes repeated IDs compactly; it is released during
-classification and reloaded only for locus plots. Temporary remnants from an
+unusually large group into consecutive row batches. After PHAS clusters are
+written, downstream window selection and feature assembly read the complete
+on-disk table in fixed-size batches; locus plotting scans only rows needed for
+final PHAS or PHAS-like calls. Phase II therefore does not recreate a full
+per-read PHAS DataFrame after cluster construction. Temporary remnants from an
 interrupted run are removed by `phasis -cleanup`.
 
 ### Candidate-cluster aggregation
@@ -331,8 +336,9 @@ fixed-size, disk-backed sorted runs. Parsing and sorting still use the normal
 library worker scheduler, then a bounded k-way merge writes the unchanged
 `{phase}_processed_clusters.tab` table. This removes the former peak caused by
 holding every library list, a flattened list, and a second sorted DataFrame in
-memory at the same time. The downstream Phase II API still requires one
-consolidated DataFrame, which Phasis loads only after the merge completes.
+memory at the same time. The consolidated table is retained only while Phase II
+builds loci and PHAS clusters; post-PHAS stages use fixed-size disk-backed
+readers rather than loading a complete per-read PHAS table.
 
 The default is 100,000 records per active worker chunk and a 64-file merge fan-in.
 For a particularly memory-constrained or file-descriptor-constrained job:
