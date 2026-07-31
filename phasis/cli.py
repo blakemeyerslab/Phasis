@@ -114,7 +114,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--pool_libraries",
         dest="concat_libs",
         action="store_true",
-        help="Pool all input libraries into one virtual library before PHAS candidate detection",
+        help=(
+            "Pool all input libraries into one virtual library before PHAS "
+            "candidate detection; cross-library heatmaps are omitted"
+        ),
     )
     parser.add_argument(
         "--concat_libs",

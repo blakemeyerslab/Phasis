@@ -278,7 +278,7 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
                 mock.patch.object(
                     phase2_pipeline.st_output,
                     "finalize_and_write_results",
-                ),
+                ) as finalize_results,
                 mock.patch.object(phase2_pipeline, "phase2_basename", side_effect=logical_names),
             ):
                 phase2_pipeline.run_phase2_pipeline(
@@ -305,6 +305,13 @@ class Phase2MemorySafePhasHandoffTests(unittest.TestCase):
         load_phas.assert_not_called()
         plotted_clusters = write_plots.call_args.args[2]
         pd.testing.assert_frame_equal(plotted_clusters, runtime_clusters)
+        finalize_results.assert_called_once_with(
+            "GMM",
+            labeled,
+            job_outdir=mock.ANY,
+            job_phase="24",
+            job_concat_libs=False,
+        )
 
 
 if __name__ == "__main__":

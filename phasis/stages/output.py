@@ -286,10 +286,8 @@ def write_gff(phasis_result_df, gff_filename, *, feature_type: str | None = None
 
 def _filter_plot_df(phasis_result_df):
     df = phasis_result_df
-    if str(phase) == "24":
-        ids_with_phas = set(df.loc[df["label"] == "PHAS", "identifier"].unique())
-        df = df[df["identifier"].isin(ids_with_phas)].copy()
-    return df
+    ids_with_phas = set(df.loc[df["label"] == "PHAS", "identifier"].unique())
+    return df[df["identifier"].isin(ids_with_phas)].copy()
 
 
 def _empty_plot_placeholder(outfile, message):
@@ -529,21 +527,12 @@ def plot_report_heat_map(phasis_result_df, plot_type):
     # Keep full library columns (even if no PHAS in some libs)
     all_libs = sorted(list(phasis_result_df["alib"].unique()))
 
-    # For phase==24: drop loci (rows) that have no PHAS call in any library
-    df = phasis_result_df
-    if str(phase) == "24":
-        ids_with_phas = set(df.loc[df["label"] == "PHAS", "identifier"].unique())
-        df = df[df["identifier"].isin(ids_with_phas)].copy()
-
-        if df.empty:
-            # Nothing to plot; write a small placeholder PDF to avoid errors
-            f, ax = plt.subplots(figsize=(6, 2))
-            ax.axis("off")
-            ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
-            primary_path = _join_outdir(outdir, f"{phase}_PHAS.pdf")
-            _savefig(f, primary_path, dpi=300)
-            plt.close(f)
-            return
+    # Keep a locus row only when at least one library calls it PHAS. Retain
+    # all records for those loci so their cross-library non-PHAS cells remain.
+    df = _filter_plot_df(phasis_result_df)
+    if df.empty:
+        primary_path = _join_outdir(outdir, f"{phase}_PHAS.pdf")
+        return _empty_plot_placeholder(primary_path, f"No {phase}-PHAS loci detected.")
 
     data = pd.DataFrame(
         data=0.0,
@@ -557,7 +546,7 @@ def plot_report_heat_map(phasis_result_df, plot_type):
     for i in it:
         tempRows = df[df["identifier"] == i]
         for j in data.columns:
-            # Default: Not detected (0) for 21; for 24 keep-row, missing cells should appear as non-PHAS cluster (1)
+            # Default: Not detected (0) for 21; for 24, missing cells appear as non-PHAS clusters (1).
             k = 1.0 if str(phase) == "24" else 0.0
             subSetData = tempRows[tempRows["alib"] == j]
             if not subSetData.empty:
@@ -666,20 +655,10 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
     # Keep full library columns (even if no PHAS in some libs)
     all_libs = sorted(list(phasis_result_df["alib"].unique()))
 
-    # For phase==24: drop loci (rows) that have no PHAS call in any library
-    df = phasis_result_df
-    if str(phase) == "24":
-        ids_with_phas = set(df.loc[df["label"] == "PHAS", "identifier"].unique())
-        df = df[df["identifier"].isin(ids_with_phas)].copy()
-
-        if df.empty:
-            f, ax = plt.subplots(figsize=(6, 2))
-            ax.axis("off")
-            ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
-            primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS.pdf")
-            _savefig(f, primary_path, dpi=300)
-            plt.close(f)
-            return None
+    df = _filter_plot_df(phasis_result_df)
+    if df.empty:
+        primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS.pdf")
+        return _empty_plot_placeholder(primary_path, f"No {phase}-PHAS loci detected.")
 
     data = pd.DataFrame(
         data=0.0,
@@ -782,20 +761,10 @@ def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
     # Keep full library columns
     all_libs = sorted(list(phasis_result_df["alib"].unique()))
 
-    # For phase==24: drop loci (rows) that have no PHAS call in any library
-    df = phasis_result_df
-    if str(phase) == "24":
-        ids_with_phas = set(df.loc[df["label"] == "PHAS", "identifier"].unique())
-        df = df[df["identifier"].isin(ids_with_phas)].copy()
-
-        if df.empty:
-            f, ax = plt.subplots(figsize=(6, 2))
-            ax.axis("off")
-            ax.text(0.01, 0.5, _format_phas_plot_text("No 24-PHAS loci detected."), fontsize=12)
-            primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS_and_nonPHAS.pdf")
-            _savefig(f, primary_path, dpi=300)
-            plt.close(f)
-            return None
+    df = _filter_plot_df(phasis_result_df)
+    if df.empty:
+        primary_path = _join_outdir(outdir, f"{phase}_Abundance_PHAS_and_nonPHAS.pdf")
+        return _empty_plot_placeholder(primary_path, f"No {phase}-PHAS loci detected.")
 
     data_phas = pd.DataFrame(
         data=0.0,
@@ -947,11 +916,19 @@ def _plot_wrapper(job):
     return fn(df, mname)
 
 
-def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_outdir: str | None = None, job_phase: str | int | None = None):
+def finalize_and_write_results(
+    method_name: str,
+    features: pd.DataFrame,
+    *,
+    job_outdir: str | None = None,
+    job_phase: str | int | None = None,
+    job_concat_libs: bool | None = None,
+):
     
     """
     Build result dataframe (all clusters + filtered PHAS),
-    write standardized outputs, run 3 tree plots in parallel, and write GFF.
+    write standardized outputs and GFF, and run cross-library heatmaps when
+    libraries were analyzed individually.
     """
     # Resolve config (prefer explicit args; fallback to runtime)
     global outdir, phase
@@ -1117,22 +1094,30 @@ def finalize_and_write_results(method_name: str, features: pd.DataFrame, *, job_
     phas_like_compact_calls.to_csv(phas_like_calls_out, sep="\t", index=False)
     evidence_df.loc[phas_like_mask].to_csv(phas_like_evidence_out, sep="\t", index=False)
 
-    # --- Run the 4 plots in parallel (each on a core) ---
-    plot_jobs = [
-        (plot_report_heat_map, all_df, method_name, outdir, phase),
-        (plot_phasAbundance_heat_map, all_df, method_name, outdir, phase),
-        (plot_totalAbundance_heat_map, all_df, method_name, outdir, phase),
-        (plot_howell_score_heat_maps, all_df, method_name, outdir, phase),
-    ]
-    plot_pool = make_pool(min(4, cpu_count()), kind="plot")
-    try:
-        plot_pool.map(_plot_wrapper, plot_jobs)
-        plot_pool.close()
-        plot_pool.join()
-    except Exception:
-        plot_pool.terminate()
-        plot_pool.join()
-        raise
+    concat_local = (
+        bool(job_concat_libs)
+        if job_concat_libs is not None
+        else bool(getattr(rt, "concat_libs", False))
+    )
+    if concat_local:
+        print("[INFO] Skipping cross-library heatmaps in pooled-library mode.")
+    else:
+        # Run the four cross-library heatmaps in parallel (each on a core).
+        plot_jobs = [
+            (plot_report_heat_map, all_df, method_name, outdir, phase),
+            (plot_phasAbundance_heat_map, all_df, method_name, outdir, phase),
+            (plot_totalAbundance_heat_map, all_df, method_name, outdir, phase),
+            (plot_howell_score_heat_maps, all_df, method_name, outdir, phase),
+        ]
+        plot_pool = make_pool(min(4, cpu_count()), kind="plot")
+        try:
+            plot_pool.map(_plot_wrapper, plot_jobs)
+            plot_pool.close()
+            plot_pool.join()
+        except Exception:
+            plot_pool.terminate()
+            plot_pool.join()
+            raise
     _print_final_detection_summary(
         phas_df,
         wrote_line=(

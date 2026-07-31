@@ -96,6 +96,10 @@ enabled with `--pool_libraries`:
 phasis -libs *.tag -libformat T -reference genome.fa -phase 24 --pool_libraries
 ```
 
+Cross-library heatmaps are intentionally omitted in pooled-library mode because
+the pooled input represents a single virtual library. Per-locus diagnostic plots
+and all tabular and annotation outputs are still generated.
+
 ---
 
 ## How Phasis Writes Files
@@ -184,10 +188,10 @@ For each phase, Phasis writes the main outputs to `--outdir`.
 | `{phase}_classification_evidence.tsv` | Register-resolved evidence table for *PHAS*, *PHAS*-like, and non-*PHAS* interpretations. |
 | `{phase}_all_clusters.tsv` | Full table of evaluated clusters, including calls that did not pass final reporting. |
 | `{phase}_PHAS.gff` | Genome annotation file for detected *PHAS* loci. |
-| `{phase}_PHAS.pdf` | Heatmap summarizing *PHAS* classification across libraries. |
-| `{phase}_Abundance_PHAS.pdf` | Abundance heatmap for final *PHAS* loci. |
-| `{phase}_Abundance_PHAS_and_nonPHAS.pdf` | Combined abundance heatmap for *PHAS* and non-*PHAS* signal. |
-| `{phase}_Howell_scores.pdf` | Heatmaps of Peak Howell score and strict Peak Howell score. |
+| `{phase}_PHAS.pdf` | Individual-library heatmap summarizing *PHAS* classification; includes only loci called in at least one library. |
+| `{phase}_Abundance_PHAS.pdf` | Individual-library abundance heatmap for loci called as *PHAS* at least once. |
+| `{phase}_Abundance_PHAS_and_nonPHAS.pdf` | Individual-library abundance heatmap combining *PHAS* and non-*PHAS* signal at loci called at least once. |
+| `{phase}_Howell_scores.pdf` | Individual-library Howell-score heatmaps for loci called as *PHAS* at least once. |
 | `{phase}_PHAS_locus_plots/` | Per-locus diagnostic plots showing abundance context and score/register context. |
 | `{phase}_phasiRNAs.tsv` | Per-locus phased-register phasiRNA table for final *PHAS* loci. |
 | `{phase}_PHAS_like/` | Self-contained *PHAS*-like calls, evidence, GFF, phasiRNAs, and diagnostic locus plots. |

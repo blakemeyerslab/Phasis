@@ -368,4 +368,5 @@ def run_phase2_pipeline(
         labeled,
         job_outdir=cfg.outdir,
         job_phase=cfg.phase,
+        job_concat_libs=cfg.concat_libs,
     )
