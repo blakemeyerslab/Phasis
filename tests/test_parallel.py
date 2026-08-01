@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from functools import partial
 from unittest import mock
 
 from phasis import parallel
@@ -295,6 +296,20 @@ class AdaptiveParallelTests(unittest.TestCase):
         self.assertEqual(results, list(range(12)))
         self.assertEqual(attempts[6], 2)
         self.assertEqual(worker_counts, [1, 1, 2, 2, 4, 2])
+
+
+class SafeWorkerTests(unittest.TestCase):
+    def test_partial_reports_the_underlying_function_error(self):
+        def reject_chromosome(chromosome, *, reason):
+            raise ValueError(f"{reason}: {chromosome}")
+
+        result = parallel.safe_worker(
+            (partial(reject_chromosome, reason="invalid chromosome"), "chr1")
+        )
+
+        self.assertIsInstance(result, RuntimeError)
+        self.assertIn("Error in reject_chromosome", str(result))
+        self.assertIn("ValueError: invalid chromosome: chr1", str(result))
 
 
 if __name__ == "__main__":

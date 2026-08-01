@@ -674,7 +674,9 @@ def safe_worker(args):
         return func(arg)
     except Exception as e:
         import traceback  # allowed here (small, unavoidable for nice trace)
-        return RuntimeError(f"Error in {func.__name__} with arg={arg}: {e}\n{traceback.format_exc()}")
+        named_callable = getattr(func, "func", func)
+        func_name = getattr(named_callable, "__name__", type(named_callable).__name__)
+        return RuntimeError(f"Error in {func_name} with arg={arg}: {e}\n{traceback.format_exc()}")
 
 
 

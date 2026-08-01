@@ -49,7 +49,7 @@ def chromosome_clusters_to_candidate_loci(
         lociTablelist.append([
             str(cid).replace("\t", "").strip(),
             0,
-            int(achr),
+            str(achr).strip(),
             int(s),
             int(e),
         ])
@@ -108,6 +108,10 @@ def loci_table_from_clusters(
         min_chunk=1,
         unit="lib-chr",
     )
+
+    worker_errors = [result for result in lociTablelist if isinstance(result, RuntimeError)]
+    if worker_errors:
+        raise worker_errors[0]
 
     lociTablelist = [item for sublist in lociTablelist for item in sublist]
 
