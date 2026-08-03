@@ -413,6 +413,46 @@ This writes:
 
 ---
 
+## Combining PHASIS Result Directories
+
+`phasis-compare` combines the *PHAS* calls from two completed result directories,
+for example a pooled and a non-pooled analysis:
+
+```bash
+phasis-compare 21_results_pooled 21_results_nonpooled \
+  --outdir 21_results_combined
+```
+
+Only loci classified as *PHAS* are included. By default, loci match when their
+genomic intervals overlap directly on the same chromosome
+(`--overlap-buffer 0`). `--prefer auto` is the default: it keeps the non-pooled
+record for a shared locus when one input is pooled, while preserving distinct
+finer non-pooled loci that overlap one broader pooled call. The preference can
+be overridden with `--prefer a` or `--prefer b`; input names in reports can be
+set with `--label-a` and `--label-b`.
+
+The output directory contains PHASIS-style non-plot tables
+(`{phase}_calls.tsv`, `{phase}_all_clusters.tsv`,
+`{phase}_classification_evidence.tsv`, `{phase}_phasiRNAs.tsv`, and
+`{phase}_PHAS.gff`) for the deduplicated union. Audit tables report combined,
+shared, run-A-only, run-B-only, source-locus mapping, and overlap-pair records.
+`comparison_summary.txt` and `comparison_manifest.json` record the counts,
+inputs, and comparison settings.
+
+Companion tables retain all rows associated with each selected representative
+locus from that same source run; unrelated rejected candidates are not copied.
+
+A non-empty output directory is refused unless `--force` is given; `--force`
+overwrites only known comparison outputs.
+
+From a source checkout, the equivalent wrapper is:
+
+```bash
+python support_scripts/compare_phasis_results.py DIR_A DIR_B --outdir combined_results
+```
+
+---
+
 ## Comparing *PHAS* Loci Between Runs
 
 Use `phasMatch.py` to compare genomic overlap between two *PHAS* result tables:

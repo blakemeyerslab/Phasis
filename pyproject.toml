@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 phasis = "phasis.cli:main"
+phasis-compare = "phasis.result_comparison:main"
 
 [tool.setuptools]
 packages = ["phasis", "phasis.stages"]
