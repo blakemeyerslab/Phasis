@@ -22,6 +22,7 @@ outdir = None
 memFile = default_memfile_path()
 
 MAPPING_SECTION = "MAPPING"
+MAPPING_CACHE_SCHEMA_VERSION = 2
 MAPPING_IO_MAXTASKSPERCHILD = 64
 MAPPING_PPBALANCE_MAXTASKSPERCHILD = 8
 
@@ -177,17 +178,12 @@ def _inspect_mapping_cache_job(job):
     artifact_fp = compute_md5_str(artifact_path) or "" if artifact_path and os.path.isfile(artifact_path) else ""
     bam_fp = compute_md5_str(bam_path) or "" if os.path.isfile(bam_path) else ""
 
-    legacy_sam_path = _legacy_sam_output_for_fas(fas_path)
-    legacy_sam_fp = compute_md5_str(legacy_sam_path) or "" if os.path.isfile(legacy_sam_path) else ""
-
     return {
         "fas_path": fas_path,
         "bam_path": bam_path,
         "artifact_path": artifact_path,
         "artifact_fp": artifact_fp,
         "bam_fp": bam_fp,
-        "legacy_sam_path": legacy_sam_path,
-        "legacy_sam_fp": legacy_sam_fp,
         "input_sig": _mapping_input_signature(fas_path, genoIndex),
     }
 
@@ -221,10 +217,6 @@ def _ensure_sections(cfg):
 
 def _bam_output_for_fas(fas_path):
     return f"{fas_path.rpartition('.')[0]}.bam"
-
-
-def _legacy_sam_output_for_fas(fas_path):
-    return f"{fas_path.rpartition('.')[0]}.sam"
 
 
 def _summary_output_for_fas(fas_path):
@@ -271,6 +263,7 @@ def _mapping_input_signature(fas_path, genoIndex):
         files=sig_files,
         params={
             "stage": "mapping",
+            "cache_schema": MAPPING_CACHE_SCHEMA_VERSION,
             "maxhits": maxhits,
             "reference_id_mode": getattr(rt, "reference_id_mode", None)
             or ("numeric" if str(runtype).upper() == "G" else "preserve"),
@@ -330,37 +323,6 @@ def _record_compat_map_fp(cfg, bam_path, fphex):
     if prev == fphex:
         return False
     cfg["MAPS"][bam_path] = fphex
-    return True
-
-
-def _legacy_map_cache_hit(cfg, bam_path):
-    prev = (cfg["MAPS"].get(bam_path) or "").strip()
-    if not prev:
-        return False
-    if not os.path.isfile(bam_path):
-        return False
-    cur = compute_md5_str(bam_path) or ""
-    if not cur:
-        return False
-    return prev == cur
-
-
-def _legacy_sam_ready_for_upgrade(cfg, artifact_path, sam_path):
-    if not artifact_path or not os.path.isfile(artifact_path):
-        return False
-    if not os.path.isfile(sam_path):
-        return False
-
-    fas_prev = (cfg["FASTAS"].get(artifact_path) or "").strip()
-    fas_cur = compute_md5_str(artifact_path) or ""
-    if not fas_prev or not fas_cur or fas_prev != fas_cur:
-        return False
-
-    sam_prev = (cfg["MAPS"].get(sam_path) or "").strip()
-    sam_cur = compute_md5_str(sam_path) or ""
-    if not sam_prev or not sam_cur or sam_prev != sam_cur:
-        return False
-
     return True
 
 
@@ -481,28 +443,6 @@ def mapper(aninput):
     return abam_final
 
 
-def _convert_legacy_sam_to_bam(aninput):
-    sam_path, bam_path, nspread, reference = aninput
-    nspread = str(nspread)
-
-    retcode = subprocess.call(
-        [runtime_samtools_path(), "view", "-@", str(nspread), "-b", "-T", reference, "-F", "4", "-o", bam_path, sam_path],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if retcode != 0:
-        print(f"Error: Legacy SAM -> BAM conversion failed for '{sam_path}'.")
-        sys.exit()
-
-    if os.path.exists(sam_path):
-        try:
-            os.remove(sam_path)
-        except OSError:
-            pass
-
-    return bam_path
-
-
 def mapprocess(
     libs,
     genoIndex,
@@ -539,7 +479,6 @@ def mapprocess(
     bam_expected = [_bam_output_for_fas(fas) for fas in fas_inputs]
 
     libs_to_map = []
-    legacy_sams_to_upgrade = []
     compat_dirty = False
     materialized_fastas = []
 
@@ -554,8 +493,6 @@ def mapprocess(
         artifact_path = inspect.get("artifact_path")
         artifact_fp = inspect.get("artifact_fp", "")
         bam_fp = inspect.get("bam_fp", "")
-        legacy_sam_path = inspect.get("legacy_sam_path")
-        legacy_sam_fp = inspect.get("legacy_sam_fp", "")
         input_sig = inspect.get("input_sig") or _mapping_input_signature(fas_path, genoIndex)
 
         compat_dirty = _record_compat_fasta_fp(config, artifact_path, artifact_fp) or compat_dirty
@@ -567,57 +504,12 @@ def mapprocess(
             compat_dirty = _record_compat_map_fp(config, bam_path, bam_fp) or compat_dirty
             continue
 
-        prev_legacy_bam_fp = (config["MAPS"].get(bam_path) or "").strip()
-        if bam_fp and prev_legacy_bam_fp and prev_legacy_bam_fp == bam_fp:
-            print(f"Legacy cache matches for mapped library: {fas_path}")
-            cache.record(
-                MAPPING_SECTION,
-                bam_path,
-                input_sig,
-                output_fp=bam_fp,
-                wait_stable=False,
-            )
-            compat_dirty = _record_compat_map_fp(config, bam_path, bam_fp) or compat_dirty
-            continue
-
-        reference_path = getattr(rt, "reference", None)
-        prev_legacy_artifact_fp = _compat_fasta_fp(config, artifact_path or fas_path)
-        prev_legacy_sam_fp = (config["MAPS"].get(legacy_sam_path) or "").strip() if legacy_sam_path else ""
-        legacy_upgrade_ready = (
-            bool(reference_path and os.path.isfile(reference_path))
-            and bool(artifact_path and artifact_fp and prev_legacy_artifact_fp == artifact_fp)
-            and bool(legacy_sam_path and legacy_sam_fp and prev_legacy_sam_fp == legacy_sam_fp)
-        )
-        if legacy_upgrade_ready:
-            legacy_sams_to_upgrade.append((fas_path, legacy_sam_path, bam_path, input_sig))
-            continue
-
+        # [MAPS] and legacy SAM hashes lack mapper-parameter and index
+        # provenance. Keep writing them for compatibility, but never let them
+        # override a modern signature miss or bless an unversioned artifact.
         libs_to_map.append((fas_path, bam_path, input_sig))
 
     libs_mapped = []
-
-    if legacy_sams_to_upgrade:
-        print(
-            "Legacy SAMs to upgrade to BAM: %s"
-            % ", ".join([item[1] for item in legacy_sams_to_upgrade])
-        )
-        nproc, nspread = optimize(ncores_local, len(legacy_sams_to_upgrade))
-        rawinputs = [
-            (sam_path, bam_path, nspread, getattr(rt, "reference", None))
-            for _, sam_path, bam_path, _ in legacy_sams_to_upgrade
-        ]
-        PPBalance(
-            _convert_legacy_sam_to_bam,
-            rawinputs,
-            n_workers=nproc,
-            maxtasksperchild=MAPPING_PPBALANCE_MAXTASKSPERCHILD,
-        )
-        upgraded_paths = [bam_path for _, _, bam_path, _ in legacy_sams_to_upgrade]
-        _stabilize_outputs(upgraded_paths)
-        for _, _, bam_path, input_sig in legacy_sams_to_upgrade:
-            cache.record(MAPPING_SECTION, bam_path, input_sig)
-            compat_dirty = _record_compat_map_md5(config, bam_path) or compat_dirty
-            libs_mapped.append(bam_path)
 
     if libs_to_map:
         print("Libraries to be mapped: %s" % (", ".join([item[0] for item in libs_to_map])))
@@ -663,8 +555,7 @@ def mapprocess(
                 desc="Cleaning temporary FASTAs",
             )
     else:
-        if not legacy_sams_to_upgrade:
-            print("\nNo new libraries to map this time")
+        print("\nNo new libraries to map this time")
 
     if compat_dirty:
         cache.flush()

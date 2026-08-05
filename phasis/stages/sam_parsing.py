@@ -11,7 +11,7 @@ from typing import Iterable, List, Sequence, Tuple
 
 import phasis.runtime as rt
 from phasis.parallel import run_parallel_with_progress
-from phasis.cache import MemCache, compute_md5_str, default_memfile_path, getmd5, sig_key, stage_signature
+from phasis.cache import MemCache, compute_md5_str, default_memfile_path, sig_key, stage_signature
 from phasis.samtools import runtime_samtools_path
 
 
@@ -66,28 +66,6 @@ def updatedsets(config: configparser.ConfigParser) -> List[str]:
         pass
 
     return updated
-
-
-def _cached_file_matches(config: configparser.ConfigParser, section: str, path: str) -> bool:
-    """
-    Reuse cache only when:
-      - section exists
-      - key exists with a non-empty stored hash
-      - file exists on disk
-      - current hash matches stored hash
-    """
-    if not config.has_section(section):
-        return False
-
-    prev = (config[section].get(path) or "").strip()
-    if not prev:
-        return False
-
-    if not os.path.isfile(path):
-        return False
-
-    _, cur = getmd5(path)
-    return bool(cur and cur == prev)
 
 
 def _alignment_path_for_lib(alib: str) -> str:
@@ -154,12 +132,27 @@ def libstoset(alist: Iterable[Tuple[str, str]], akey: str) -> None:
 
 
 SAM_PARSING_SECTION = "SAM_PARSING"
+SAM_PARSING_CACHE_SCHEMA_VERSION = 2
 
 
 def _ensure_sections(cfg: configparser.ConfigParser) -> None:
-    for section in (SAM_PARSING_SECTION, "PARSED", "COUNTERS"):
+    for section in (SAM_PARSING_SECTION, "PARSED", "COUNTERS", "ADVANCED"):
         if not cfg.has_section(section):
             cfg.add_section(section)
+
+
+def _record_parser_parameter_metadata(config: configparser.ConfigParser) -> bool:
+    """Update legacy display metadata only after parser cache evaluation."""
+    changed = False
+    for key, value in (
+        ("maxhits", getattr(rt, "maxhits", None)),
+        ("mismat", getattr(rt, "mismat", None)),
+    ):
+        desired = "" if value is None else str(value)
+        if config["ADVANCED"].get(key) != desired:
+            config["ADVANCED"][key] = desired
+            changed = True
+    return changed
 
 
 def _parser_output_paths_for_lib(alib: str, phase: str) -> Tuple[str, str]:
@@ -180,6 +173,7 @@ def _parser_input_signature(
         files=[alignment_path],
         params={
             "stage": "sam_parsing",
+            "cache_schema": SAM_PARSING_CACHE_SCHEMA_VERSION,
             "phase": phase,
             "maxhits": maxhits,
             "mismat": mismat,
@@ -187,16 +181,6 @@ def _parser_input_signature(
             "norm_factor": norm_factor,
         },
     )
-
-
-def _legacy_parser_cache_hit(
-    config: configparser.ConfigParser,
-    dict_path: str,
-    count_path: str,
-) -> bool:
-    dict_ok = _cached_file_matches(config, "PARSED", dict_path)
-    count_ok = _cached_file_matches(config, "COUNTERS", count_path)
-    return bool(dict_ok and count_ok)
 
 
 def _record_compat_md5(
@@ -435,33 +419,9 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
                 compat_dirty = _record_compat_fp(config, "COUNTERS", count_path, count_fp) or compat_dirty
                 continue
 
-            legacy_dict_fp = (config["PARSED"].get(dict_path) or "").strip()
-            legacy_count_fp = (config["COUNTERS"].get(count_path) or "").strip()
-            legacy_hit = bool(
-                dict_fp
-                and count_fp
-                and legacy_dict_fp == dict_fp
-                and legacy_count_fp == count_fp
-            )
-            if legacy_hit:
-                print(f"Legacy cache matches for parsed library {alib.rpartition('.')[0]}")
-                cache.record(
-                    SAM_PARSING_SECTION,
-                    dict_path,
-                    input_sig,
-                    output_fp=dict_fp,
-                    wait_stable=False,
-                )
-                cache.record(
-                    SAM_PARSING_SECTION,
-                    count_path,
-                    input_sig,
-                    output_fp=count_fp,
-                    wait_stable=False,
-                )
-                compat_dirty = _record_compat_fp(config, "PARSED", dict_path, dict_fp) or compat_dirty
-                compat_dirty = _record_compat_fp(config, "COUNTERS", count_path, count_fp) or compat_dirty
-                continue
+            # [PARSED]/[COUNTERS] contain output hashes only. They remain
+            # write-only compatibility records because they cannot establish
+            # BAM, parser-parameter, or cache-schema provenance.
 
         print(f"Added {alignment_path} to libs_to_parse")
         parse_jobs.append((alignment_path, dict_path, count_path, input_sig))
@@ -491,7 +451,8 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
             if dict_sig != count_sig:
                 raise RuntimeError(f"Signature mismatch between paired parser outputs: {dp} / {cp}")
 
-    if compat_dirty:
+    metadata_dirty = _record_parser_parameter_metadata(config)
+    if compat_dirty or metadata_dirty:
         cache.flush()
 
     return _load_parsed_outputs(dict_paths, count_paths, load_dicts=load_dicts)

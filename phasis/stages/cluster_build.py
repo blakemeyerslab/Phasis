@@ -51,6 +51,7 @@ def _flush_prev_cluster(prev_merged, clustid, clustlen_cutoff, clustdict_long):
 
 
 CLUSTER_BUILD_SECTION = "CLUSTER_BUILD"
+CLUSTER_BUILD_CACHE_SCHEMA_VERSION = 2
 CLUSTER_BUILD_DEFAULT_INITIAL_WORKER_CAP = 20
 CLUSTER_BUILD_BATCH_LIMIT_MAX = 96
 CLUSTER_BUILD_RECOVERY_SUCCESS_SLICES = 2
@@ -137,6 +138,7 @@ def _cluster_build_input_signature(count_path: str, *, phase: int, clustbuffer: 
         files=[count_path],
         params={
             "stage": "cluster_build",
+            "cache_schema": CLUSTER_BUILD_CACHE_SCHEMA_VERSION,
             "phase": int(phase),
             "clustbuffer": int(clustbuffer),
         },
@@ -216,10 +218,9 @@ def inspect_cluster_cache_entry(args):
 
     status values:
       - "stage_hit": centralized cache entry is reusable
-      - "legacy_hit": legacy [CLUSTERED] entry matches current file
       - "rebuild": output should be recomputed
     """
-    akey, lclust_path, input_sig, prev_stage_fp, prev_stage_sig, prev_compat_fp = args
+    akey, lclust_path, input_sig, prev_stage_fp, prev_stage_sig, _prev_compat_fp = args
     lclust_real = os.path.realpath(lclust_path)
 
     if not os.path.isfile(lclust_real):
@@ -239,9 +240,8 @@ def inspect_cluster_cache_entry(args):
     ):
         return (akey, lclust_real, "stage_hit", current_md5)
 
-    if prev_compat_fp and prev_compat_fp == current_md5:
-        return (akey, lclust_real, "legacy_hit", current_md5)
-
+    # [CLUSTERED] is an output-only hash with no count-file or parameter
+    # provenance. It must not satisfy a centralized signature miss.
     return (akey, lclust_real, "rebuild", current_md5)
 
 
@@ -599,34 +599,6 @@ def clusterprocess(libs_poscountdict, clustfolder):
             current_md5 = str(current_md5 or "")
 
             if status == "stage_hit":
-                _prune_old_clustered_entries(cfg, os.path.basename(inspected_path), inspected_path)
-                compat_dirty = (
-                    _record_compat_cluster_md5(cfg, inspected_path, md5hex=current_md5) or compat_dirty
-                )
-                results.append((akey, inspected_path, None))
-                processed_akeys.append(akey)
-                source_scanned += 1
-                source_cache_hits += 1
-                total_cache_hits += 1
-                _maybe_report_cluster_scan_progress(
-                    source_label,
-                    source_scanned,
-                    source_total,
-                    source_cache_hits,
-                    source_queued,
-                )
-                continue
-
-            if status == "legacy_hit":
-                print(f"Legacy cache matches for clustered library-chr {akey}")
-                if input_sig is not None:
-                    cache.record(
-                        CLUSTER_BUILD_SECTION,
-                        inspected_path,
-                        input_sig,
-                        output_fp=current_md5,
-                        wait_stable=False,
-                    )
                 _prune_old_clustered_entries(cfg, os.path.basename(inspected_path), inspected_path)
                 compat_dirty = (
                     _record_compat_cluster_md5(cfg, inspected_path, md5hex=current_md5) or compat_dirty

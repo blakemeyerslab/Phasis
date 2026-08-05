@@ -8,9 +8,11 @@ from unittest import mock
 
 from phasis import libprep
 from phasis import runtime as rt
-from phasis.cache import compute_md5_str
+from phasis.cache import compute_md5_str, sig_key
+from phasis.stages import cluster_build
 from phasis.stages import library_processing
 from phasis.stages import mapping
+from phasis.stages import sam_parsing
 
 
 def _serial_parallel_runner(func, data, **_kwargs):
@@ -276,6 +278,35 @@ class LibraryProcessingCacheTests(unittest.TestCase):
 
 
 class MappingCacheTests(unittest.TestCase):
+    def test_cluster_build_modern_signature_miss_cannot_fall_back_to_legacy_hash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lclust_path = _write_text(os.path.join(tmpdir, "libA.chr1.lclust"), "cluster\n")
+            current_fp = compute_md5_str(lclust_path)
+
+            modern_miss = cluster_build.inspect_cluster_cache_entry(
+                (
+                    "libA.chr1",
+                    lclust_path,
+                    "new-input-signature",
+                    current_fp,
+                    "old-input-signature",
+                    current_fp,
+                )
+            )
+            legacy_only = cluster_build.inspect_cluster_cache_entry(
+                (
+                    "libA.chr1",
+                    lclust_path,
+                    "new-input-signature",
+                    "",
+                    "",
+                    current_fp,
+                )
+            )
+
+            self.assertEqual(modern_miss[2], "rebuild")
+            self.assertEqual(legacy_only[2], "rebuild")
+
     def test_mapping_compat_lookup_accepts_legacy_plain_fasta_key(self):
         cfg = configparser.ConfigParser()
         cfg.optionxform = str
@@ -301,6 +332,7 @@ class MappingCacheTests(unittest.TestCase):
                 memFile=mem_path,
                 mismat=0,
                 runtype="G",
+                reference_id_mode="numeric",
                 maxhits=25,
                 clustbuffer=150,
                 phase=21,
@@ -336,6 +368,154 @@ class MappingCacheTests(unittest.TestCase):
             cfg = _load_memcfg(mem_path)
             self.assertEqual(cfg["FASTAS"].get(f"{gz_only_fas}.gz"), compute_md5_str(f"{gz_only_fas}.gz"))
             self.assertEqual(cfg["FASTAS"].get(plain_fas), compute_md5_str(plain_fas))
+
+    def test_maxhits_change_remaps_and_reparses_despite_matching_legacy_hashes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem_path = os.path.join(tmpdir, "phasis.mem")
+            fas_path = _write_text(os.path.join(tmpdir, "libA.fas"), ">seq_1|3\nAAAA\n")
+            reference_path = _write_text(os.path.join(tmpdir, "ref.fa"), ">chr1\nAAAA\n")
+            geno_index = os.path.join(tmpdir, "index", "ref")
+
+            def fake_parser(aninput):
+                alignment_path, _maxhits_local, _mismat_local = aninput
+                stem = alignment_path.rpartition(".")[0]
+                dict_path = f"{stem}_21.dict"
+                count_path = f"{stem}_21.count"
+                with open(dict_path, "wb") as handle:
+                    handle.write(b"DICT\n")
+                with open(count_path, "wb") as handle:
+                    handle.write(b"COUNT\n")
+                return dict_path, count_path
+
+            runtime_patch = mock.patch.multiple(
+                rt,
+                create=True,
+                run_dir=tmpdir,
+                outdir=tmpdir,
+                memFile=mem_path,
+                mismat=0,
+                runtype="G",
+                reference_id_mode="numeric",
+                maxhits=25,
+                clustbuffer=150,
+                phase=21,
+                norm=False,
+                norm_factor=1_000_000.0,
+                reference=reference_path,
+            )
+            with runtime_patch:
+                with mock.patch.object(
+                    mapping,
+                    "run_parallel_with_progress",
+                    side_effect=_serial_parallel_runner,
+                ):
+                    with mock.patch.object(mapping, "PPBalance", side_effect=_serial_ppbalance):
+                        with mock.patch.object(mapping, "optimize", return_value=(1, 1)):
+                            with mock.patch.object(mapping, "mapper", side_effect=_fake_mapper) as mapper_mock:
+                                with mock.patch.object(
+                                    sam_parsing,
+                                    "run_parallel_with_progress",
+                                    side_effect=_serial_parallel_runner,
+                                ):
+                                    with mock.patch.object(
+                                        sam_parsing,
+                                        "samparser_streaming",
+                                        side_effect=fake_parser,
+                                    ) as parser_mock:
+                                        first_maps = mapping.mapprocess(
+                                            [fas_path],
+                                            genoIndex=geno_index,
+                                            ncores_local=1,
+                                        )
+                                        sam_parsing.parserprocess([fas_path])
+
+                                        expected_bam = mapping._bam_output_for_fas(fas_path)
+                                        dict_path, count_path = sam_parsing._parser_output_paths_for_lib(
+                                            fas_path,
+                                            "21",
+                                        )
+                                        first_cfg = _load_memcfg(mem_path)
+                                        first_mapping_sig = first_cfg[mapping.MAPPING_SECTION][sig_key(expected_bam)]
+                                        first_dict_sig = first_cfg[sam_parsing.SAM_PARSING_SECTION][sig_key(dict_path)]
+                                        first_count_sig = first_cfg[sam_parsing.SAM_PARSING_SECTION][sig_key(count_path)]
+                                        first_mapping_fp = first_cfg[mapping.MAPPING_SECTION][expected_bam]
+                                        first_dict_fp = first_cfg[sam_parsing.SAM_PARSING_SECTION][dict_path]
+                                        first_count_fp = first_cfg[sam_parsing.SAM_PARSING_SECTION][count_path]
+
+                                        rt.maxhits = 50
+
+                                        second_maps = mapping.mapprocess(
+                                            [fas_path],
+                                            genoIndex=geno_index,
+                                            ncores_local=1,
+                                        )
+                                        sam_parsing.parserprocess([fas_path])
+
+                                        second_cfg = _load_memcfg(mem_path)
+                                        second_mapping_sig = second_cfg[mapping.MAPPING_SECTION][sig_key(expected_bam)]
+                                        second_dict_sig = second_cfg[sam_parsing.SAM_PARSING_SECTION][sig_key(dict_path)]
+                                        second_count_sig = second_cfg[sam_parsing.SAM_PARSING_SECTION][sig_key(count_path)]
+                                        second_mapping_fp = second_cfg[mapping.MAPPING_SECTION][expected_bam]
+                                        second_dict_fp = second_cfg[sam_parsing.SAM_PARSING_SECTION][dict_path]
+                                        second_count_fp = second_cfg[sam_parsing.SAM_PARSING_SECTION][count_path]
+
+                                        third_maps = mapping.mapprocess(
+                                            [fas_path],
+                                            genoIndex=geno_index,
+                                            ncores_local=1,
+                                        )
+                                        sam_parsing.parserprocess([fas_path])
+
+                                        third_hit_cfg = _load_memcfg(mem_path)
+                                        third_mapping_sig = third_hit_cfg[mapping.MAPPING_SECTION][sig_key(expected_bam)]
+                                        third_dict_sig = third_hit_cfg[sam_parsing.SAM_PARSING_SECTION][sig_key(dict_path)]
+                                        third_count_sig = third_hit_cfg[sam_parsing.SAM_PARSING_SECTION][sig_key(count_path)]
+
+                                        rt.mismat = 1
+                                        sam_parsing.parserprocess([fas_path])
+                                        sam_parsing.parserprocess([fas_path])
+
+            self.assertEqual(first_maps, [expected_bam])
+            self.assertEqual(second_maps, [expected_bam])
+            self.assertEqual(third_maps, [])
+            self.assertEqual(mapper_mock.call_count, 2)
+            self.assertEqual(parser_mock.call_count, 3)
+            self.assertNotEqual(first_mapping_sig, second_mapping_sig)
+            self.assertNotEqual(first_dict_sig, second_dict_sig)
+            self.assertNotEqual(first_count_sig, second_count_sig)
+            self.assertEqual(first_mapping_fp, first_cfg["MAPS"][expected_bam])
+            self.assertEqual(first_dict_fp, first_cfg["PARSED"][dict_path])
+            self.assertEqual(first_count_fp, first_cfg["COUNTERS"][count_path])
+            self.assertEqual(second_mapping_fp, first_mapping_fp)
+            self.assertEqual(second_dict_fp, first_dict_fp)
+            self.assertEqual(second_count_fp, first_count_fp)
+            self.assertEqual(
+                [call.args[0][3] for call in mapper_mock.call_args_list],
+                [25, 50],
+            )
+            self.assertEqual(
+                [call.args[0][1] for call in parser_mock.call_args_list],
+                [25, 50, 50],
+            )
+            self.assertEqual(third_mapping_sig, second_mapping_sig)
+            self.assertEqual(third_dict_sig, second_dict_sig)
+            self.assertEqual(third_count_sig, second_count_sig)
+
+            final_cfg = _load_memcfg(mem_path)
+            self.assertEqual(
+                final_cfg[mapping.MAPPING_SECTION][sig_key(expected_bam)],
+                second_mapping_sig,
+            )
+            self.assertNotEqual(
+                final_cfg[sam_parsing.SAM_PARSING_SECTION][sig_key(dict_path)],
+                second_dict_sig,
+            )
+            self.assertEqual(
+                final_cfg[sam_parsing.SAM_PARSING_SECTION][sig_key(count_path)],
+                final_cfg[sam_parsing.SAM_PARSING_SECTION][sig_key(dict_path)],
+            )
+            self.assertEqual(final_cfg["ADVANCED"]["maxhits"], "50")
+            self.assertEqual(final_cfg["ADVANCED"]["mismat"], "1")
 
 
 if __name__ == "__main__":

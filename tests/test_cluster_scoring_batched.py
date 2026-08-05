@@ -109,6 +109,101 @@ class ClusterScoringBatchedNestdictTests(unittest.TestCase):
         self.assertIn("Using per-library batched parser loading", log)
         self.assertIn("Loading nestdict for library", log)
 
+    def test_changed_nestdict_cannot_be_hidden_by_legacy_output_hashes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            akey, lclust_path, dict_path = _make_minimal_scoring_inputs(tmpdir)
+            scored_dir = os.path.join(tmpdir, "scored")
+            mem_file = os.path.join(tmpdir, "phasis.mem")
+            lib_path = os.path.join(tmpdir, "libA.fas")
+            with open(lib_path, "w", encoding="utf-8") as handle:
+                handle.write(">dummy\nTAG\n")
+
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                runtime_patch = mock.patch.multiple(
+                    rt,
+                    phase=21,
+                    mismat=0,
+                    maxhits=25,
+                    clustbuffer=300,
+                    uniqueRatioCut=0.0,
+                    memFile=mem_file,
+                    ncores=1,
+                    create=True,
+                )
+                with runtime_patch:
+                    with mock.patch.object(
+                        cluster_scoring,
+                        "run_parallel_with_progress",
+                        side_effect=_serial_parallel_runner,
+                    ):
+                        cluster_scoring.scoringprocess(
+                            [lib_path],
+                            [(akey, lclust_path)],
+                            [dict_path],
+                            tmpdir,
+                            force_rescore=True,
+                            verify_outputs=False,
+                            scored_dir=scored_dir,
+                            concat_mode=False,
+                        )
+                        candidate_path = os.path.join(tmpdir, "libA.21-PHAS.candidate.clusters")
+                        with open(candidate_path, "r", encoding="utf-8") as handle:
+                            first_candidate_text = handle.read()
+                        first_cluster_count = first_candidate_text.count(">cluster")
+
+                        with open(dict_path, "rb") as handle:
+                            changed_nestdict = pickle.load(handle)
+                        changed_nestdict["unrelated-key"] = []
+                        _write_pickle(dict_path, changed_nestdict)
+
+                        original_clustassemble = cluster_scoring.clustassemble
+                        with mock.patch.object(
+                            cluster_scoring,
+                            "clustassemble",
+                            wraps=original_clustassemble,
+                        ) as clustassemble_mock:
+                            outputs = cluster_scoring.scoringprocess(
+                                [lib_path],
+                                [(akey, lclust_path)],
+                                [dict_path],
+                                tmpdir,
+                                force_rescore=False,
+                                verify_outputs=True,
+                                scored_dir=scored_dir,
+                                concat_mode=False,
+                            )
+                        with open(candidate_path, "r", encoding="utf-8") as handle:
+                            second_candidate_text = handle.read()
+                        second_cluster_count = second_candidate_text.count(">cluster")
+
+                        with mock.patch.object(
+                            cluster_scoring,
+                            "clustassemble",
+                            side_effect=AssertionError("unchanged third run should be a cache hit"),
+                        ) as cached_clustassemble_mock:
+                            cached_outputs = cluster_scoring.scoringprocess(
+                                [lib_path],
+                                [(akey, lclust_path)],
+                                [dict_path],
+                                tmpdir,
+                                force_rescore=False,
+                                verify_outputs=True,
+                                scored_dir=scored_dir,
+                                concat_mode=False,
+                            )
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual(outputs, ["libA.21-PHAS.candidate.clusters"])
+            self.assertGreater(clustassemble_mock.call_count, 0)
+            self.assertGreater(first_cluster_count, 0)
+            self.assertEqual(second_cluster_count, first_cluster_count)
+            self.assertEqual(second_candidate_text, first_candidate_text)
+            self.assertEqual(cached_outputs, outputs)
+            self.assertEqual(cached_clustassemble_mock.call_count, 0)
+
 
 class ClusterScoringChunkBookkeepingTests(unittest.TestCase):
     def _write_chunks(self, tmpdir: str, phase: int = 24, count: int = 3):

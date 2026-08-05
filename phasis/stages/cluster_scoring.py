@@ -49,6 +49,7 @@ scoredClustFolder = None
 
 
 CLUSTER_SCORING_SECTION = "CLUSTER_SCORING"
+CLUSTER_SCORING_CACHE_SCHEMA_VERSION = 2
 CLUSTER_SCORING_DEFAULT_INITIAL_WORKER_CAP = 20
 CLUSTER_SCORING_BATCH_LIMIT = 256
 CLUSTER_SCORING_HASH_MAXTASKSPERCHILD = 64
@@ -675,6 +676,7 @@ def _cluster_scoring_stage_signature(
         file_manifest=file_manifest,
         params={
             "stage": "cluster_scoring",
+            "cache_schema": CLUSTER_SCORING_CACHE_SCHEMA_VERSION,
             "phase": int(phase),
             "uniqueRatioCut": float(unique_ratio_cut),
             "concat_mode": bool(concat_mode),
@@ -1203,7 +1205,9 @@ def clustwrite(akey, clustlist, scored_clust_folder=None):
     #print("writting clusters")
     target_folder = scored_clust_folder if scored_clust_folder else scoredClustFolder
     outfile = "%s/%s.sRNA_%s.cluster" % (target_folder,akey,phase)
-    fh_out  = open(outfile,'a')
+    # Each worker receives the complete cluster set for one akey. Rewriting the
+    # chunk prevents cache-invalidated rescoring from appending duplicate rows.
+    fh_out  = open(outfile,'w')
     for aclust in clustlist:
         #print(f"aclust is {aclust}")
         aid,taglist = aclust
@@ -1434,6 +1438,9 @@ def scoringprocess(
         max_worker_cap=max_worker_cap,
     )
 
+    # In-memory nestdict inputs cannot currently produce a complete stage
+    # signature. Treat that as unproven provenance and recompute conservatively.
+    stage_cache_miss = stage_sig is None
     if stage_sig is not None and not force_rescore and not purge_existing:
         stage_hits = []
         all_stage_hits = True
@@ -1452,6 +1459,11 @@ def scoringprocess(
                 cache.flush()
             print(f"cluster files are {stage_hits}")
             return stage_hits
+
+        # A centralized signature miss is authoritative. Output-only legacy
+        # hashes and unchanged .lclust files cannot prove that nestdict inputs,
+        # scoring parameters, or the scoring schema are still equivalent.
+        stage_cache_miss = True
 
     verified_outputs = {}
     if verify_outputs and not force_rescore and expected_outfiles:
@@ -1499,7 +1511,13 @@ def scoringprocess(
     all_outputs_verified = bool(expected_outfiles) and all(
         verified_outputs.get(outf, False) for _, outf in expected_outfiles
     )
-    if all_outputs_verified and not changed_inputs_global and not force_rescore and not purge_existing:
+    if (
+        all_outputs_verified
+        and not changed_inputs_global
+        and not stage_cache_miss
+        and not force_rescore
+        and not purge_existing
+    ):
         print(
             "[scan] Candidate outputs verified and all .lclust inputs are unchanged; "
             "batch scoring work will be skipped.",
@@ -1515,7 +1533,7 @@ def scoringprocess(
     scoredClustFolder = scored_dir if scored_dir else base_scored
     os.makedirs(scoredClustFolder, exist_ok=True)
 
-    if purge_existing and os.path.isdir(scoredClustFolder):
+    if (purge_existing or force_rescore or stage_cache_miss) and os.path.isdir(scoredClustFolder):
         # Purge only .cluster files; keep the folder
         for fn in os.listdir(scoredClustFolder):
             if fn.endswith(f".sRNA_{phase}.cluster"):
@@ -1549,7 +1567,7 @@ def scoringprocess(
 
     # Track md5 updates + libs that need re-assembly
     libs_marked_stale = set()
-    if purge_existing or force_rescore:
+    if purge_existing or force_rescore or stage_cache_miss:
         libs_marked_stale.update(alib for (alib, _) in expected_outfiles)
 
     def _process_scoring_batch(batch, nestdict_for_batch, label, progress_desc):
@@ -1590,7 +1608,13 @@ def scoringprocess(
                     changed_inputs.add(akey)
 
         # If outputs are OK and there are no changed inputs, we can skip scoring
-        if batch_outputs_ok and not changed_inputs and not force_rescore and not purge_existing:
+        if (
+            batch_outputs_ok
+            and not changed_inputs
+            and not stage_cache_miss
+            and not force_rescore
+            and not purge_existing
+        ):
             print(
                 f"[scan] {label}: candidate outputs verified and inputs unchanged; skipping scoring.",
                 flush=True,
@@ -1697,7 +1721,13 @@ def scoringprocess(
         gc.collect()
 
     # -------------------- Process batches ------------------------------------
-    skip_all_scoring = all_outputs_verified and not changed_inputs_global and not force_rescore and not purge_existing
+    skip_all_scoring = (
+        all_outputs_verified
+        and not changed_inputs_global
+        and not stage_cache_miss
+        and not force_rescore
+        and not purge_existing
+    )
 
     if skip_all_scoring:
         print("[scan] Skipping cluster scoring batches after cache/output preflight.", flush=True)

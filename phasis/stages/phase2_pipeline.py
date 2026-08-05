@@ -329,7 +329,7 @@ def run_phase2_pipeline(
     )
 
     # 8) Classify (stage returns labeled DF), then finalize outputs (output stage).
-    # Phasis 2.8.2 keeps -classifier as a deprecated CLI compatibility flag, but
+    # Phasis 2.8.3 keeps -classifier as a deprecated CLI compatibility flag, but
     # GMM is the only active classifier.
     labeled = st_classify.gmm_classify(
         features,
