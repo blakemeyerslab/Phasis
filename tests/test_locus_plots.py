@@ -69,6 +69,38 @@ class LocusPlotHelperTests(unittest.TestCase):
         self.assertIn("other", {row["phase_relation"] for row in debug_rows})
         self.assertIn("other", {row["phase_relation"] for row in clean_rows})
 
+    def test_build_howell_rows_does_not_plot_zero_score_hpsp(self):
+        trace_rows = [
+            {"anchor_position": 291, "window_start": 82, "window_end": 291, "score": 0.0, "best_register": 0},
+            {"anchor_position": 270, "window_start": 61, "window_end": 270, "score": 0.0, "best_register": 0},
+        ]
+
+        rows, _, _ = locus_plots._build_howell_rows(trace_rows, 21, "c")
+
+        self.assertEqual(len(rows), len(trace_rows))
+        self.assertFalse(any(row["is_hpsp"] for row in rows))
+        self.assertFalse(
+            any(
+                row["edgecolor"] == locus_plots.HPSP_RED
+                or row["facecolor"] == locus_plots.HPSP_RED
+                for row in rows
+            )
+        )
+
+    def test_build_howell_rows_keeps_positive_minus_strand_hpsp(self):
+        trace_rows = [
+            {"anchor_position": 291, "window_start": 82, "window_end": 291, "score": 8.0, "best_register": 0},
+            {"anchor_position": 270, "window_start": 61, "window_end": 270, "score": 0.0, "best_register": 0},
+        ]
+
+        rows, _, _ = locus_plots._build_howell_rows(trace_rows, 21, "c")
+        hpsp_rows = [row for row in rows if row["is_hpsp"]]
+
+        self.assertEqual(len(hpsp_rows), 1)
+        self.assertEqual(hpsp_rows[0]["y"], -8.0)
+        self.assertEqual(hpsp_rows[0]["edgecolor"], locus_plots.HPSP_RED)
+        self.assertEqual(hpsp_rows[0]["facecolor"], locus_plots.HPSP_RED)
+
     def test_plot_legend_uses_browser_style_non_in_phase_label(self):
         groups = locus_plots._build_plot_legend_groups(24, plot_mode="clean")
         labels = [item.get_label() for item in groups["howell"]]

@@ -906,7 +906,9 @@ def _build_howell_rows(
         plot_position = float(anchor_position)
         score_value = float(row.get("score", 0.0) or 0.0)
         relation = str(row.get("phase_relation", "other") or "other")
-        is_hpsp = bool(row.get("is_hpsp", False))
+        # A zero-score tie has no meaningful Howell peak.  Keep the trace point
+        # as context, but do not present it as an HPSP.
+        is_hpsp = bool(row.get("is_hpsp", False)) and score_value > 0.0
         is_main_unit_member = (strand_local, anchor_position) in main_unit_positions
         edgecolor = HPSP_RED if is_hpsp else phase_color
         facecolor = "none"
