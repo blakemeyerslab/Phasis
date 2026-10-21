@@ -96,6 +96,25 @@ class ExternalBamTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Incomplete'):
             self.run_import([r],aligner='bwa-aln')
 
+    def test_bwa_boundary_xa_rejected_preserves_valid_hit_and_multiplicity(self):
+        r=self.record(nh=None);r.set_tag('X0',2);r.set_tag('XA','1,+190,24M,0;')
+        nest,_,m=self.run_import([r],aligner='bwa-aln')
+        self.assertEqual(m['rejected_out_of_bounds_alignments'],1)
+        self.assertEqual(m['accepted_alignment_records'],1)
+        self.assertEqual(m['accepted_abundance'],7)
+        self.assertEqual(nest['lib-1'][0][1][0][2],2)
+
+    def test_boundary_primary_rejected(self):
+        nest,counts,m=self.run_import([self.record(start=190)])
+        self.assertFalse(nest);self.assertFalse(counts)
+        self.assertEqual(m['rejected_out_of_bounds_alignments'],1)
+        self.assertEqual(m.get('accepted_sequences',0),0)
+
+    def test_match_ending_at_reference_boundary_is_valid(self):
+        _,_,m=self.run_import([self.record(start=176)])
+        self.assertEqual(m['accepted_alignment_records'],1)
+        self.assertEqual(m.get('rejected_out_of_bounds_alignments',0),0)
+
     def test_bwa_reverse_xa_uses_original_orientation(self):
         self.ref.write_text('>1\n'+'A'*40+'T'*24+'A'*136+'\n')
         Path(str(self.ref)+'.fai').unlink();pysam.faidx(str(self.ref))

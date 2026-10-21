@@ -175,7 +175,10 @@ def accepted_placements(placements, original_sequence, fasta, metrics):
             metrics['rejected_cigar_alignments'] += 1
             continue
         if start < 0 or start + len(original_sequence) > fasta.get_reference_length(chrom):
-            raise ValueError(f'Alignment out of reference bounds: {chrom}:{start}')
+            # Reject evidence crossing a contig boundary, retaining other valid
+            # placements and the original reported-hit denominator.
+            metrics['rejected_out_of_bounds_alignments'] += 1
+            continue
         seq = reverse_complement(original_sequence) if reverse else original_sequence
         ref = fasta.fetch(chrom, start, start + len(seq)).upper()
         if nm not in (None, 0) or seq != ref or set(seq) - set('ACGT'):

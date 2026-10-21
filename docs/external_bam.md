@@ -75,6 +75,12 @@ are excluded. Accepted sequence is checked against the indexed FASTA; NM, when
 present, must also be zero. Ambiguous bases are rejected. Thus acceptance does
 not depend on aligner-specific MAPQ or on the order of optional SAM tags.
 
+Placements extending beyond a reference contig are excluded and counted as
+`rejected_out_of_bounds_alignments`; they cannot supply full-length reference
+evidence. Other valid placements for the read are retained with the original
+reported multiplicity. In the full maize run, BWA XA alternatives exposed this
+boundary case. No clipping, coordinate wrapping, or hit-count reduction is used.
+
 Only flags 0, 16, 256 and 272 supply evidence, matching native single-end flag
 handling. Secondary alignments count as alternative placements; supplementary,
 QC-failed and duplicate-flagged records do not. Paired-end mapped input fails.
