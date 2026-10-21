@@ -19,6 +19,9 @@ dependencies = [
   "tqdm",
 ]
 
+[project.optional-dependencies]
+bam = ["pysam>=0.23,<0.24"]
+
 [project.scripts]
 phasis = "phasis.cli:main"
 phasis-compare = "phasis.result_comparison:main"
