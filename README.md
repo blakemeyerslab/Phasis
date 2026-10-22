@@ -236,6 +236,64 @@ phasis -mindepth 1 -phase 24 -libformat T \
 
 If `-class_cluster_files` is omitted, Phasis tries to infer the expected cluster files from `-libs`, `-phase`, and the current run directory.
 
+### Candidates From Bowtie 1 or BWA Alignments
+
+Phasis can import **collapsed, single-end sRNA BAMs** from Bowtie 1 or
+BWA-backtrack (`bwa aln` / `bwa samse`, not BWA-MEM). The adapter reuses native
+Phasis clustering and scoring, then passes candidates to `-steps class`.
+HISAT2 remains the default mapper for normal Phasis runs. External imports are
+currently **individual-library only** and accept **full-length exact matches**.
+
+Install the optional BAM dependency from your Phasis checkout:
+
+```bash
+python -m pip install -e '.[bam]'
+```
+
+With an existing `sample.bam`, matching indexed `genome.fa`, and the original
+collapsed library `sample.fas`, use a fresh working directory for each aligner:
+
+```bash
+data_dir=/absolute/path/to/inputs
+samtools faidx "$data_dir/genome.fa"
+mkdir bowtie1_run
+cd bowtie1_run
+
+python -m phasis.external_bam \
+  --bam "$data_dir/sample.bam" --aligner bowtie1 --library sample \
+  --qname-map "$data_dir/sample.qnames.tsv" \
+  --reference "$data_dir/genome.fa" --phase 24 --cores 4 \
+  --output-dir candidates/sample
+
+phasis -steps class -phase 24 -libformat F -cores 4 \
+  -reference "$data_dir/genome.fa" --reference_id_mode preserve \
+  -libs "$data_dir/sample.fas" \
+  -class_cluster_files candidates/sample/sample.24-PHAS.candidate.clusters \
+  --outdir results
+```
+
+For BWA-backtrack, use `--aligner bwa-aln` and a separate working directory.
+The `--library` ID must match the original FASTA basename (`sample.fas` above).
+The QNAME-map TSV contains `qname`, `sequence`, and `abundance` columns: original
+read names, original-orientation sequences, and positive integer counts.
+Alternatively, use `--abundance-in-qname` **only** when every read name encodes
+its true abundance as a terminal `|count`. The adapter does not create the
+original library FASTA; retain it for classification.
+
+| Required constraint | Why it matters |
+| --- | --- |
+| One record per distinct input sequence, with its original abundance. | Treating collapsed tags as abundance 1 changes depth and phasing evidence. |
+| Retain all reported placements, including secondary alignments and BWA `XA`/`X0` tags; no MAPQ or primary-only filtering. | Missing alternatives can make repetitive tags appear unique and alter scores. |
+| Bowtie 1 reporting `-k` and BWA `samse -n` must be at least the importer `--maxhits` (default 25). | Native filtering keeps **fewer than** 25 reported placements, not up to 25. Incomplete Bowtie reporting cannot be detected reliably from the BAM alone. |
+| Zero mismatches; no clipping, gaps, or splicing. | Accepted positions must represent the complete sRNA sequence for register scoring. The adapter checks the sequence against the FASTA. |
+| Same genome assembly, matching contig names/lengths and coordinate provenance. | A chromosome-name map is not liftover; an incompatible assembly invalidates locus comparisons. |
+| New import directories and separate calling workspaces for each aligner. | Prevents stale candidates or caches from contaminating the comparison. |
+
+Read the [external-BAM guide](docs/external_bam.md) for Bowtie 1/BWA alignment
+commands, abundance-map examples, validation outputs and resource requirements.
+Aligners can report different placements even under these restrictions; equal
+parameters do not guarantee identical calls or benchmark metrics.
+
 ---
 
 ## Common Options

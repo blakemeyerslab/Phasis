@@ -1,11 +1,17 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
-import pysam
-from phasis.external_bam import import_bam, cigar_is_full_match
+from unittest.mock import patch
+try:
+    import pysam
+except ImportError:
+    pysam = None
+from phasis.external_bam import import_bam, cigar_is_full_match, main
 
 
+@unittest.skipIf(pysam is None, 'Install Phasis[bam] to test the optional BAM importer')
 class ExternalBamTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -74,6 +80,66 @@ class ExternalBamTests(unittest.TestCase):
         _,_,m=self.run_import([self.record(),self.record()])
         self.assertEqual(m['accepted_alignment_records'],1)
         self.assertEqual(m['duplicate_alignment_records'],1)
+
+    def test_equivalent_cigars_not_double_counted(self):
+        for aligner in ('hisat2', 'bowtie1'):
+            with self.subTest(aligner=aligner):
+                _, _, m = self.run_import([
+                    self.record(cigar='24M'), self.record(cigar='24='),
+                    self.record(cigar='12M12=')], aligner=aligner)
+                self.assertEqual(m['accepted_alignment_records'], 1)
+                self.assertEqual(m['accepted_alignment_weighted_abundance'], 7)
+                self.assertEqual(m['duplicate_alignment_records'], 2)
+
+    def test_equivalent_bwa_xa_not_double_counted(self):
+        r = self.record(nh=None)
+        r.set_tag('X0', 1)
+        r.set_tag('XA', '1,+1,24=,0;')
+        _, _, m = self.run_import([r], aligner='bwa-aln')
+        self.assertEqual(m['accepted_alignment_records'], 1)
+
+    def test_invalid_chromosome_maps_fail(self):
+        mapping = self.root / 'chromosomes.tsv'
+        for content in ('old_id\tclean_id\n1\tother\n1\t1\n',
+                        'old_id\tclean_id\n1\t\n', 'wrong\theader\n1\t1\n'):
+            with self.subTest(content=content):
+                mapping.write_text(content)
+                with self.assertRaisesRegex(ValueError, '[Cc]hromosome mapping'):
+                    self.run_import([self.record()], chrom_map=mapping)
+
+    def test_explicit_chromosome_map(self):
+        mapping = self.root / 'chromosomes.tsv'
+        mapping.write_text('old_id\tclean_id\nChr1\t1\n')
+        self.header = pysam.AlignmentHeader.from_dict({'SQ': [{'SN': 'Chr1', 'LN': 200}]})
+        _, _, m = self.run_import([self.record()], chrom_map=mapping)
+        self.assertEqual(m['accepted_alignment_records'], 1)
+
+    def test_empty_qname_map_entry_fails(self):
+        with self.assertRaisesRegex(ValueError, 'Invalid/duplicate QNAME'):
+            self.run_import([self.record()], mapping=[('', 'A' * 24, 7)])
+
+    def test_main_resolves_scratch_and_restores_workers_after_failure(self):
+        from phasis.stages import cluster_build, cluster_scoring
+        self.run_import([self.record()])
+        scratch = self.root / 'scratch'
+        scratch.mkdir()
+        output = self.root / 'work'
+        original_cwd = Path.cwd()
+        build_runner = cluster_build.run_parallel_with_progress
+        scoring_runner = cluster_scoring.run_parallel_with_progress
+        with patch('phasis.cli.configure_runtime'), \
+             patch('phasis.runtime.save_snapshot'), \
+             patch('phasis.parallel.coreReserve', return_value=1), \
+             patch('phasis.external_bam.import_bam', side_effect=RuntimeError('test stop')) as importer:
+            with self.assertRaisesRegex(RuntimeError, 'test stop'):
+                main(['--bam', str(self.root / 'input.bam'), '--reference', str(self.ref),
+                      '--library', 'sample', '--aligner', 'hisat2', '--abundance-in-qname',
+                      '--output-dir', str(output), '--scratch', os.path.relpath(scratch)])
+        self.assertEqual(importer.call_args.kwargs['scratch'], str(scratch.resolve()))
+        self.assertEqual(Path.cwd(), original_cwd)
+        self.assertIs(cluster_build.run_parallel_with_progress, build_runner)
+        self.assertIs(cluster_scoring.run_parallel_with_progress, scoring_runner)
+        self.assertFalse((output / 'IMPORT_SUCCESS.json').exists())
 
     def test_supplementary_excluded(self):
         _,_,m=self.run_import([self.record(),self.record(flag=2048,start=40)])

@@ -43,7 +43,7 @@ def load_qname_map(path):
         for row in reader:
             name, seq = row['qname'], row['sequence'].upper()
             abundance = int(row['abundance'])
-            if name in result or abundance < 1 or not re.fullmatch('[ACGTN]+', seq):
+            if not name or name in result or abundance < 1 or not re.fullmatch('[ACGTN]+', seq):
                 raise ValueError(f'Invalid/duplicate QNAME mapping: {name}')
             result[name] = (seq, abundance)
     return result
@@ -89,8 +89,14 @@ def reference_translation(header, fasta, map_path=None):
     mapping = {}
     if map_path:
         with open(map_path) as handle:
-            for row in csv.DictReader(handle, delimiter='\t'):
-                mapping[row['old_id']] = row['clean_id']
+            reader = csv.DictReader(handle, delimiter='\t')
+            if not {'old_id', 'clean_id'} <= set(reader.fieldnames or []):
+                raise ValueError('Chromosome mapping needs old_id and clean_id columns')
+            for row in reader:
+                old, clean = row['old_id'], row['clean_id']
+                if not old or not clean or old in mapping:
+                    raise ValueError(f'Invalid/duplicate chromosome mapping: {old}')
+                mapping[old] = clean
     lengths = dict(zip(fasta.references, fasta.lengths))
     translated = {}
     for name, length in zip(header.references, header.lengths):
@@ -104,6 +110,15 @@ def reference_translation(header, fasta, map_path=None):
     if not translated:
         raise ValueError('BAM has no reference dictionary')
     return translated
+
+
+def placement_cigar(cigar):
+    """Unify equivalent ungapped CIGARs before counting reported placements."""
+    tokens = re.findall(r'(\d+)([MIDNSHP=X])', cigar or '')
+    length = sum(int(n) for n, _ in tokens)
+    if cigar_is_full_match(cigar or '', length):
+        return f'{length}M'
+    return cigar
 
 
 def expand_group(records, aligner, translation, maxhits, metrics):
@@ -138,7 +153,8 @@ def expand_group(records, aligner, translation, maxhits, metrics):
     for r in allowed:
         if r.reference_name not in translation:
             raise ValueError(f'Unknown BAM reference: {r.reference_name}')
-        key = (translation[r.reference_name], r.reference_start, r.is_reverse, r.cigarstring)
+        key = (translation[r.reference_name], r.reference_start, r.is_reverse,
+               placement_cigar(r.cigarstring))
         nm = int(r.get_tag('NM')) if r.has_tag('NM') else None
         if key in placements:
             if placements[key] != nm:
@@ -155,7 +171,8 @@ def expand_group(records, aligner, translation, maxhits, metrics):
                 chrom, signed, cigar, distance = fields
                 if not re.fullmatch(r'[+-][1-9][0-9]*', signed):
                     raise ValueError(f'Invalid XA position: {signed}')
-                key = (translation[chrom], abs(int(signed)) - 1, signed[0] == '-', cigar)
+                key = (translation[chrom], abs(int(signed)) - 1, signed[0] == '-',
+                       placement_cigar(cigar))
                 nm = int(distance)
                 if key in placements and placements[key] != nm:
                     raise ValueError('Conflicting XA/record evidence')
@@ -351,6 +368,10 @@ def main(argv=None):
         raise ValueError('Library ID must be a safe basename')
     if args.cores < 1:
         raise ValueError('--cores must be positive')
+    if args.scratch:
+        args.scratch = str(Path(args.scratch).resolve())
+        if not Path(args.scratch).is_dir():
+            raise ValueError('--scratch must be an existing directory')
     paths = {name:str(Path(getattr(args,name)).resolve()) for name in ('bam','reference')}
     for name in ('qname_map','chrom_map'):
         if getattr(args,name): paths[name] = str(Path(getattr(args,name)).resolve())
@@ -364,13 +385,15 @@ def main(argv=None):
     from phasis.cli import build_parser as native_parser, configure_runtime
     from phasis.parallel import coreReserve
     from phasis.stages import cluster_build, cluster_scoring, folder_setup
-    cluster_build.run_parallel_with_progress = strict_parallel
-    cluster_scoring.run_parallel_with_progress = strict_parallel
     manifest['phasis_version'] = __version__
     manifest['adapter_sha256'] = sha256(__file__)
     (out/'import_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     previous = Path.cwd()
+    previous_build_runner = cluster_build.run_parallel_with_progress
+    previous_scoring_runner = cluster_scoring.run_parallel_with_progress
     try:
+        cluster_build.run_parallel_with_progress = strict_parallel
+        cluster_scoring.run_parallel_with_progress = strict_parallel
         os.chdir(out)
         native = native_parser().parse_args(['-libs', paths['bam'], '-reference', paths['reference'],
                     '-phase', str(args.phase), '-cores', str(args.cores), '-mindepth', str(args.mindepth),
@@ -426,6 +449,8 @@ def main(argv=None):
         (out/'IMPORT_SUCCESS.json').write_text(json.dumps(report,indent=2)+'\n')
     finally:
         os.chdir(previous)
+        cluster_build.run_parallel_with_progress = previous_build_runner
+        cluster_scoring.run_parallel_with_progress = previous_scoring_runner
     return 0
 
 

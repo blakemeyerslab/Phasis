@@ -6,8 +6,10 @@ imports collapsed, single-end short-RNA BAM evidence and calls the existing
 It does not replace Phasis clustering, filtering, window statistics or scoring.
 Calling remains the normal `phasis -steps class` operation. No pooling is done.
 
-Install Phasis from this branch and the optional `pysam` dependency (tested with
-pysam 0.23.3, Python 3.11.9). BAM sorting is performed in private temporary files;
+Install Phasis and the optional `pysam` dependency with
+`python -m pip install -e '.[bam]'` from the repository checkout (tested with
+pysam 0.23.3, Python 3.11.9 on Hive and Python 3.12.1 locally).
+BAM sorting is performed in private temporary files;
 input BAMs may be coordinate sorted, query-name sorted or unsorted and need no
 index. A matching FASTA with a `.fai` is required. Create it once with
 `samtools faidx reference.fa`. Output directories must be new/empty. Input BAM,
@@ -65,6 +67,10 @@ name stripping is performed. SAM zero-based internal positions become native
 one-based LEFTMOST positions, including reverse-strand reads; the native
 scoring stage handles its own phase offsets. Normalized reverse SEQ is the
 reverse complement of the original read, as required by SAM.
+Empty mapping IDs and duplicate source-ID rows also fail rather than silently
+overwriting a translation. Name/length checks and matching accepted read
+sequences are not proof of assembly identity: retain the reference checksum and
+source assembly metadata.
 
 ## Strict alignment contract
 
@@ -85,6 +91,8 @@ Only flags 0, 16, 256 and 272 supply evidence, matching native single-end flag
 handling. Secondary alignments count as alternative placements; supplementary,
 QC-failed and duplicate-flagged records do not. Paired-end mapped input fails.
 Repeated identical placements are deduplicated; conflicting duplicate tags fail.
+Equivalent all-match CIGARs such as `24M`, `24=` and `12M12M` describe one
+placement, not additional genomic hits.
 Each collapsed tag's abundance is retained at each accepted placement, matching
 native Phasis evidence, without multiplying the distinct-tag denominator.
 
@@ -110,10 +118,11 @@ Choose `--aligner` explicitly:
   being misclassified as unique. X0 at/above the cutoff is rejected even when
   the repetitive read has no XA list.
 
-When importing non-exact raw BAMs, reported multiplicity is evaluated before
-mismatch/CIGAR filtering, matching the native parser's reported-hit convention.
-The controlled comparison avoids this complication by generating exact-only
-alignments in all arms. A BAM with incomplete reporting cannot establish the
+Reported multiplicity is evaluated before mismatch/CIGAR filtering, matching
+the native parser's reported-hit convention. Generate exact-only alignments
+using the recipes below: arbitrary non-exact BAMs are not a validated input
+contract, particularly when BWA XA includes suboptimal hits outside X0.
+A BAM with incomplete reporting cannot establish the
 true genomic multiplicity of a read; do not prefilter it before import.
 
 ## Alignment generation for the controlled comparison
@@ -139,6 +148,40 @@ large enough to recover every retained placement. Aligners still have different
 search implementations. Equal downstream filters do not prove equal sensitivity;
 compare observed mapping evidence rather than assuming equivalence.
 
+### Bowtie 1 recipe
+
+Start with a collapsed FASTA (`sample.fas`) containing the original sequences
+and names, and a QNAME map recording their original abundances. A FASTA record
+is one distinct sequence, not one copy per read. Keep this FASTA for `-libs`
+when classifying candidates; its basename must match `--library sample`.
+
+```bash
+bowtie-build genome.fa genome_bt1
+bowtie -f -v 0 -k 25 --best --strata -S -p 4 \
+  genome_bt1 sample.fas sample.bowtie1.sam
+samtools view -b -o sample.bowtie1.bam sample.bowtie1.sam
+```
+
+### BWA-backtrack recipe
+
+Use the same collapsed sequences and QNAMEs in `sample.fastq`. If starting
+from FASTA, use an audited FASTA-to-FASTQ conversion, keeping names/sequences
+unchanged and assigning constant dummy qualities. These qualities do not affect
+accepted exact evidence with the no-trimming settings below.
+
+```bash
+bwa index genome.fa
+bwa aln -n 0 -o 0 -e 0 -l 1024 -N -q 0 -t 4 \
+  genome.fa sample.fastq > sample.sai
+bwa samse -n 25 genome.fa sample.sai sample.fastq > sample.bwa-aln.sam
+samtools view -b -o sample.bwa-aln.bam sample.bwa-aln.sam
+```
+
+Do not strip optional tags or filter either BAM to primary/unique reads. Retain
+the generation commands and tool versions alongside each BAM. If changing the
+importer `--maxhits`, change the mapper reporting limit too. This does not change
+the adapter's restriction to exact, full-length, single-end alignments.
+
 Primary documentation:
 - https://daehwankimlab.github.io/hisat2/manual/
 - https://bowtie-bio.sourceforge.net/manual.shtml
@@ -159,6 +202,12 @@ and the native nested dictionaries still consume memory proportional to tag
 counts/retained evidence; set compute resources accordingly. Processing one
 library per import limits peak memory. Failed imports intentionally retain their
 work directory for diagnosis and do not write an IMPORT_SUCCESS marker.
+Use `--scratch /path/to/existing/node-local-directory` for sort temporary files
+on HPC systems; final artifacts remain in `--output-dir`. Sorting uses up to
+256 MiB per sorting thread, in addition to the native dictionaries and maps.
+The adapter's tab-separated `.sum` is an import audit, not the legacy native
+summary layout; abundance-normalization scripts must explicitly select the
+appropriate denominator from `alignment_metrics.json`.
 
 Unit tests: `python -m unittest discover -s tests -p test_external_bam.py -v`.
 The experiment additionally tests actual HISAT2/Bowtie/BWA binaries on a synthetic
