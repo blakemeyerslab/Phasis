@@ -21,6 +21,7 @@ import pandas as pd
 
 import phasis.runtime as rt
 from phasis.parallel import make_pool
+from phasis.plot_style import portable_plot_fonts
 from phasis import ids as st_ids
 
 import matplotlib.pyplot as plt
@@ -290,6 +291,7 @@ def _filter_plot_df(phasis_result_df):
     return df[df["identifier"].isin(ids_with_phas)].copy()
 
 
+@portable_plot_fonts
 def _empty_plot_placeholder(outfile, message):
     f, ax = plt.subplots(figsize=(6, 2))
     ax.axis("off")
@@ -471,6 +473,7 @@ def _add_score_colorbar(fig, ax, cmap, norm, max_value, colorbar_label, side="le
     return cbar
 
 
+@portable_plot_fonts
 def plot_howell_score_heat_maps(phasis_result_df, plot_type):
     print("#### Plotting Howell score heatmaps ######")
 
@@ -519,6 +522,7 @@ def plot_howell_score_heat_maps(phasis_result_df, plot_type):
     plt.close(fig)
     return None
 
+@portable_plot_fonts
 def plot_report_heat_map(phasis_result_df, plot_type):
     print("#### Plotting heatmap ######")
 
@@ -647,6 +651,7 @@ def plot_report_heat_map(phasis_result_df, plot_type):
     plt.close(fig)
     return
 
+@portable_plot_fonts
 def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
     print("#### Plotting phasAbundance heatmap ######")
 
@@ -753,6 +758,7 @@ def plot_phasAbundance_heat_map(phasis_result_df, plot_type):
     plt.close(fig)
     return None
 
+@portable_plot_fonts
 def plot_totalAbundance_heat_map(phasis_result_df, plot_type):
     print("#### Plotting PHAS and non-PHAS Heatmaps ######")
 

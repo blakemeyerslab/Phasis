@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
 import pandas as pd
+import matplotlib as mpl
+from matplotlib import font_manager
 
 from phasis.stages import output
 
@@ -92,6 +95,34 @@ def _minimal_feature_frame() -> pd.DataFrame:
 
 
 class HeatmapRowSelectionTests(unittest.TestCase):
+    def test_all_heatmaps_render_with_bundled_fonts_despite_custom_rc(self):
+        font_root = Path(mpl.get_data_path()).resolve()
+        fonts = [font for font in font_manager.fontManager.ttflist
+                 if Path(font.fname).resolve().is_relative_to(font_root)]
+        self.assertTrue(fonts)
+        font_manager.fontManager._findfont_cached.cache_clear()
+        try:
+            with tempfile.TemporaryDirectory() as outdir, \
+                 mock.patch.object(font_manager.fontManager, "ttflist", fonts), \
+                 mock.patch.object(output, "phase", 21), mock.patch.object(output, "outdir", outdir), \
+                 mpl.rc_context({"font.family": "PhasisMissingTestFont", "font.weight": "semibold",
+                                 "axes.titleweight": "semibold", "axes.labelweight": "semibold",
+                                 "text.usetex": True, "mathtext.fontset": "custom"}), \
+                 self.assertNoLogs("matplotlib", level="WARNING"):
+                for render in (output.plot_report_heat_map, output.plot_phasAbundance_heat_map,
+                               output.plot_totalAbundance_heat_map, output.plot_howell_score_heat_maps):
+                    render(_heatmap_frame(), "GMM")
+                plots = list(Path(outdir).glob("*.pdf"))
+                self.assertEqual(len(plots), 4)
+                for path in plots:
+                    self.assertTrue(path.read_bytes().startswith(b"%PDF-"))
+                    self.assertGreater(path.stat().st_size, 1000)
+                self.assertEqual(mpl.rcParams["font.family"], ["PhasisMissingTestFont"])
+                self.assertEqual(mpl.rcParams["font.weight"], "semibold")
+                self.assertTrue(mpl.rcParams["text.usetex"])
+        finally:
+            font_manager.fontManager._findfont_cached.cache_clear()
+
     def test_filter_keeps_complete_locus_rows_only_when_called_at_least_once(self):
         filtered = output._filter_plot_df(_heatmap_frame())
 

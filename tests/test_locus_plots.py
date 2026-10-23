@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
 import numpy as np
 import pandas as pd
-from matplotlib import pyplot as plt
+import matplotlib as mpl
+from matplotlib import font_manager, pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from phasis.stages import locus_plots
 
@@ -162,14 +165,73 @@ class LocusPlotHelperTests(unittest.TestCase):
                 plot_mode="clean",
             )
             labels = [text.get_text() for text in fig.texts]
+            header_weights = [
+                text.get_fontweight() for text in fig.texts
+                if text.get_text() in ("Abundance context", "Score context")
+            ]
             legend_titles = [legend.get_title().get_text() for legend in fig.legends]
         finally:
             plt.close(fig)
 
         self.assertIn("Abundance context", labels)
         self.assertIn("Score context", labels)
+        self.assertEqual(header_weights, ["bold", "bold"])
         self.assertNotIn("Abundance panel", legend_titles)
         self.assertNotIn("Score panel", legend_titles)
+
+    def test_locus_pdf_renders_with_bundled_fonts_without_font_warnings(self):
+        font_root = Path(mpl.get_data_path()).resolve()
+        bundled_fonts = [
+            font for font in font_manager.fontManager.ttflist
+            if Path(font.fname).resolve().is_relative_to(font_root)
+        ]
+        self.assertTrue(bundled_fonts)
+        real_savefig = plt.Figure.savefig
+
+        def draw_and_save(fig, *args, **kwargs):
+            # Exercise the raster renderer used for locus PNGs as well as PDF,
+            # without writing an extra image file.
+            FigureCanvasAgg(fig).draw()
+            return real_savefig(fig, *args, **kwargs)
+
+        # Exclude optional system fonts and cached font lookups for this test only.
+        font_manager.fontManager._findfont_cached.cache_clear()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir, \
+                 mock.patch.object(font_manager.fontManager, "ttflist", bundled_fonts), \
+                 mock.patch.object(plt.Figure, "savefig", new=draw_and_save), \
+                 mpl.rc_context({"font.family": "PhasisMissingTestFont", "font.weight": "semibold",
+                                 "text.usetex": True, "pdf.use14corefonts": True}), \
+                 self.assertNoLogs("matplotlib", level="WARNING"):
+                for phase in (21, 24):
+                    for mode in ("clean", "debug"):
+                        with self.subTest(phase=phase, mode=mode):
+                            path = Path(tmpdir) / f"{phase}_{mode}.pdf"
+                            task = {
+                                "plot_path": str(path), "phase": phase,
+                                "title_text": rf"Test locus | {phase}-$\it{{PHAS}}$",
+                                "final_class": "PHAS", "xmin": 100, "xmax": 300,
+                                "xpad": 10, "abun_ylim": 12, "score_ylim": 20,
+                                "Howell_exact_support_score": 15,
+                                "abundance_rows": [
+                                    {"x": 100, "y": 10, "facecolor": "#444444", "edgecolor": "#444444"},
+                                    {"x": 124, "y": -6, "facecolor": "none", "edgecolor": "#444444"},
+                                ],
+                                "howell_rows": [
+                                    {"x": 100, "y": 15, "size": 20, "facecolor": "#FF7F00",
+                                     "edgecolor": "#FF7F00", "linewidth": 1, "alpha": 1},
+                                ],
+                            }
+                            with mock.patch.object(locus_plots.rt, "locus_plot_mode", mode, create=True):
+                                self.assertEqual(locus_plots._write_single_locus_plot(task), str(path))
+                            self.assertTrue(path.read_bytes().startswith(b"%PDF-"))
+                            self.assertGreater(path.stat().st_size, 1000)
+                            self.assertEqual(mpl.rcParams["font.family"], ["PhasisMissingTestFont"])
+                            self.assertEqual(mpl.rcParams["font.weight"], "semibold")
+                            self.assertTrue(mpl.rcParams["text.usetex"])
+        finally:
+            font_manager.fontManager._findfont_cached.cache_clear()
+            plt.close("all")
 
     def test_build_plot_legend_groups_can_include_grouped_alternative_entries(self):
         alt_groups = [

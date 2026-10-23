@@ -19,6 +19,7 @@ import phasis.runtime as rt
 from phasis.cache import resolve_artifact_path
 from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress
+from phasis.plot_style import portable_plot_fonts
 from phasis.stages import feature_assembly as st_feat
 
 MAX_LOCUS_PLOT_WORKERS = 10
@@ -1145,7 +1146,7 @@ def _add_grouped_legends(
         ha="left",
         va="bottom",
         fontsize=7.5,
-        fontweight="semibold",
+        fontweight="bold",
         color="#333333",
     )
     fig.text(
@@ -1155,7 +1156,7 @@ def _add_grouped_legends(
         ha="left",
         va="bottom",
         fontsize=7.5,
-        fontweight="semibold",
+        fontweight="bold",
         color="#333333",
     )
     fig.add_artist(
@@ -2699,6 +2700,7 @@ def _analyze_single_locus(task: dict) -> dict:
     }
 
 
+@portable_plot_fonts
 def _write_placeholder_plot(plot_path: str, title_text: str, message_text: str) -> str:
     fig, ax = plt.subplots(figsize=(8.0, 3.0))
     ax.axis("off")
@@ -2709,6 +2711,7 @@ def _write_placeholder_plot(plot_path: str, title_text: str, message_text: str) 
     return plot_path
 
 
+@portable_plot_fonts
 def _write_single_locus_plot(task: dict) -> str:
     plot_path = task["plot_path"]
     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
