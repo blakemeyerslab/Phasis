@@ -10,7 +10,6 @@ IMPORTANT:
 
 import os
 import re
-import warnings
 from typing import Optional
 
 import numpy as np
@@ -26,6 +25,9 @@ GMM_FEATURE_COLS = [
     "ratio_abund_len_phase",
     "phasis_score",
 ]
+GMM_INIT_PARAMS = "random_from_data"
+GMM_RANDOM_STATE = 0
+GMM_N_INIT = 1
 FINAL_CLASS_VALUES = {"PHAS", "PHAS-like", "non-PHAS"}
 NON_PHAS = "non-PHAS"
 PHAS = "PHAS"
@@ -334,24 +336,20 @@ def gmm_classify(
     scaler = preprocessing.MinMaxScaler()
     X_scaled = scaler.fit_transform(X)
 
-    gmm = GaussianMixture(n_components=n_clusters, random_state=0)
-    try:
-        cluster_labels = gmm.fit_predict(X_scaled)
-    except AttributeError as exc:
-        if "'NoneType' object has no attribute 'split'" not in str(exc):
-            raise
-        warnings.warn(
-            "GMM k-means initialization failed while inspecting BLAS thread pools; "
-            "retrying with deterministic random_from_data initialization.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        gmm = GaussianMixture(
-            n_components=n_clusters,
-            random_state=0,
-            init_params="random_from_data",
-        )
-        cluster_labels = gmm.fit_predict(X_scaled)
+    # Keep initialization independent of environment-specific BLAS failures.
+    print(
+        f"[INFO] GMM initialization: {GMM_INIT_PARAMS}; "
+        f"random_state={GMM_RANDOM_STATE}; n_init={GMM_N_INIT}; "
+        f"components={n_clusters}.",
+        flush=True,
+    )
+    gmm = GaussianMixture(
+        n_components=n_clusters,
+        random_state=GMM_RANDOM_STATE,
+        init_params=GMM_INIT_PARAMS,
+        n_init=GMM_N_INIT,
+    )
+    cluster_labels = gmm.fit_predict(X_scaled)
 
     tmp = pd.DataFrame(
         {"cluster": cluster_labels, "phasis_score": features["phasis_score"].values}

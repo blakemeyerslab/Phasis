@@ -10,6 +10,7 @@ from phasis import runtime as rt
 import phasis.cache as cache
 import phasis.index_integrity as index_integrity
 from phasis.cache import compute_md5_str, default_memfile_path, read_mem_verbose
+from phasis.progress import tqdm
 
 
 # Stage-local globals
@@ -102,11 +103,21 @@ def _archive_file_to_gz(path):
         return None
 
     tmp_path = f"{gz_path}.tmp"
+    size = os.path.getsize(path)
+    started = time.monotonic()
+    print(
+        f"Compressing cleaned reference FASTA: {path} -> {gz_path} "
+        "(gzip level 9, single worker; progress measures uncompressed bytes).",
+        flush=True,
+    )
 
     try:
         with open(path, "rb") as src, open(tmp_path, "wb") as raw_dst:
             with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0) as dst:
-                shutil.copyfileobj(src, dst)
+                with tqdm(total=size, desc="Compressing cleaned reference", unit="B", unit_scale=True) as progress:
+                    while chunk := src.read(1024 * 1024):
+                        dst.write(chunk)
+                        progress.update(len(chunk))
         os.replace(tmp_path, gz_path)
         os.remove(path)
     finally:
@@ -116,6 +127,7 @@ def _archive_file_to_gz(path):
             except OSError:
                 pass
 
+    print(f"Cleaned reference compression complete ({time.monotonic() - started:.1f}s).", flush=True)
     return gz_path
 
 
@@ -279,7 +291,13 @@ def indexBuilder(reference, ncores):
         print("Script will exit now")
         sys.exit()
 
-    print("Generating fingerprint for HiSat2 index")
+    print("Generating fingerprint for HiSat2 index", flush=True)
+    print(
+        "Sampling reference and index marker bytes (64 KiB at start, middle, "
+        "and end of each large file; not hashing the full index).",
+        flush=True,
+    )
+    fingerprint_started = time.monotonic()
     try:
         refHash, indexHash, _index_marker = index_integrity.compute_index_fingerprints(
             reference=reference,
@@ -294,6 +312,7 @@ def indexBuilder(reference, ncores):
         print("Script will exit")
         sys.exit()
 
+    print(f"Fingerprints complete ({time.monotonic() - fingerprint_started:.1f}s); saving index metadata.", flush=True)
     cache.write_mem_basic(
         memFile,
         ref_hash=refHash,

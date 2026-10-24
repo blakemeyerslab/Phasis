@@ -138,6 +138,23 @@ flag is needed.
 
 Consult `phasis -h` for the available options and defaults.
 
+### Classification Reproducibility
+
+The upcoming v2.8.4 build explicitly uses GMM initialization
+`init_params="random_from_data"`, `random_state=0`, and `n_init=1`, and prints
+these settings. This fixes the policy previously used only after a specific
+BLAS/thread-pool initialization failure; that error no longer silently selects
+a different classifier starting point. Runs that previously used normal k-means
+initialization can therefore produce different calls. This policy reproduced
+the historical four-library maize example, not yet every manuscript dataset.
+
+A fixed seed controls random initialization, not all numerical variation.
+For reproducible comparisons retain identical inputs, candidate ordering,
+parameters, software commit, and dependency versions (including NumPy, SciPy,
+scikit-learn and the BLAS implementation). Different numerical environments or
+input ordering can still affect fitted mixtures, particularly borderline calls.
+Do not assume universal cross-platform identity from the seed alone.
+
 ## HPC and Resource Tuning
 
 Start by setting `-cores` to your job's CPU allocation. More workers can mean

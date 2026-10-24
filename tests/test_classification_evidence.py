@@ -77,7 +77,7 @@ def _base_feature_row(**overrides):
 
 
 class EvidenceClassificationTests(unittest.TestCase):
-    def test_gmm_classifier_retries_threadpoolctl_initialization_failure(self):
+    def test_gmm_classifier_uses_fixed_initialization_without_retry(self):
         calls = []
 
         class FakeGaussianMixture:
@@ -85,8 +85,6 @@ class EvidenceClassificationTests(unittest.TestCase):
                 calls.append(kwargs)
 
             def fit_predict(self, X):
-                if len(calls) == 1:
-                    raise AttributeError("'NoneType' object has no attribute 'split'")
                 return np.array([0, 1])
 
         features = pd.DataFrame(
@@ -96,16 +94,38 @@ class EvidenceClassificationTests(unittest.TestCase):
             ]
         )
         with mock.patch.object(classify, "GaussianMixture", FakeGaussianMixture):
-            with self.assertWarnsRegex(RuntimeWarning, "retrying with deterministic"):
-                out = classify.gmm_classify(
-                    features,
-                    phasisScoreCutoff=0.0,
-                    min_Howell_score=0.0,
-                    max_complexity=1.0,
-                )
+            out = classify.gmm_classify(
+                features,
+                phasisScoreCutoff=0.0,
+                min_Howell_score=0.0,
+                max_complexity=1.0,
+            )
 
-        self.assertEqual(calls[1]["init_params"], "random_from_data")
+        self.assertEqual(calls, [{"n_components": 2, "random_state": 0,
+                                  "init_params": "random_from_data", "n_init": 1}])
         self.assertEqual(list(out["label"]), ["non-PHAS", "PHAS"])
+
+    def test_gmm_initialization_error_is_not_retried_with_another_policy(self):
+        features = pd.DataFrame([_base_feature_row(), _base_feature_row(phasis_score=10)])
+        with mock.patch.object(classify, "GaussianMixture") as factory:
+            factory.return_value.fit_predict.side_effect = AttributeError("'NoneType' object has no attribute 'split'")
+            with self.assertRaisesRegex(AttributeError, "NoneType"):
+                classify.gmm_classify(features, 0, 0, 1)
+        factory.assert_called_once()
+
+    def test_gmm_fixed_initialization_repeats_for_identical_features(self):
+        rng = np.random.RandomState(12)
+        features = pd.DataFrame([
+            _base_feature_row(phasis_score=score + rng.uniform(0, 5),
+                              complexity=complexity + rng.uniform(0, 0.01),
+                              strand_bias=rng.uniform(0.5, 1),
+                              log_clust_len_norm_counts=rng.uniform(1, 2),
+                              ratio_abund_len_phase=rng.uniform(2, 6))
+            for score, complexity in [(10, 0.3)] * 20 + [(280, 0.02)] * 20
+        ])
+        first = classify.gmm_classify(features, 0, 0, 1)
+        second = classify.gmm_classify(features, 0, 0, 1)
+        pd.testing.assert_frame_equal(first, second)
 
     def test_classifier_non_phas_stays_non_phas(self):
         features = pd.DataFrame([_base_feature_row(label="non-PHAS")])

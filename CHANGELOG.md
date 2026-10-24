@@ -20,6 +20,14 @@ will be created only after maintainer testing and approval.
 
 ### Fixed
 
+- Explicit GMM initialization (`random_from_data`, seed 0, one initialization)
+  replaces the environment-dependent k-means/fallback choice. This preserves
+  the historical fallback policy validated on the four-library maize example;
+  calls can differ from prior normal k-means runs. Broader validation remains
+  required before release.
+- Reference preparation now distinguishes sampled fingerprinting from whole
+  cleaned-FASTA compression, with elapsed times and byte-based compression
+  progress. Compression level is unchanged.
 - Replaced semibold legend headings with bold and scoped all Phasis plotting
   entry points to Matplotlib's bundled DejaVu Sans fonts and math text, avoiding
   reliance on optional system fonts or external TeX. Caller settings are
@@ -31,9 +39,10 @@ will be created only after maintainer testing and approval.
 
 - Reorganized the README from installation and an executable example to output
   interpretation and advanced workflows; added generic Bowtie 1/BWA tutorials.
-- Clarified the relationship and independent version histories of the original
-  PHASIS and the completely rewritten Phasis 2.
+- Clarified the relationship between the original PHASIS and the completely
+  rewritten Phasis 2, including the intentional capitalization distinction.
 
-Native detection, scoring, clustering, classification, and RRL algorithms are
-unchanged by these additions. The original manuscript-associated Zenodo archive
+Detection, scoring, clustering, feature thresholds, and RRL rules are unchanged.
+GMM initialization is now explicit as described above; this can affect calls.
+The original manuscript-associated Zenodo archive
 is unchanged. Development commits and tests do not constitute a stable release.

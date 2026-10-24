@@ -26,9 +26,8 @@ Kakrana et al. (2017), remains available for reproducibility. **Phasis 2 is a
 complete rewrite**, with a redesigned architecture and implementation, not an
 incremental update of that codebase. The capitalization is intentional:
 **PHASIS** names the original software; **Phasis** names the rewritten successor.
-The projects have independent version histories, so their version numbers
-should not be compared to determine which implementation is newer. The
-maintained implementation is [blakemeyerslab/Phasis](https://github.com/blakemeyerslab/Phasis).
+The maintained implementation is
+[blakemeyerslab/Phasis](https://github.com/blakemeyerslab/Phasis).
 
 ## Installation
 
@@ -266,6 +265,12 @@ settings you can change and which filters Phasis still applies.
 
 ## Troubleshooting
 
+- **Classification reproducibility:** This development build fixes GMM
+  initialization to `random_from_data`, seed `0`, and one initialization, rather
+  than switching methods after an environment error. Calls may differ from
+  earlier k-means-initialized runs. See [reproducibility details](docs/advanced_usage.md#classification-reproducibility)
+  for the validation scope and why a seed alone cannot guarantee cross-system
+  identity.
 - **Command not found:** activate your Phasis environment and check `which phasis`,
   `which hisat2`, and `which samtools`.
 - **Installation or dependency errors:** use the environment above. NumPy
