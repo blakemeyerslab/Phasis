@@ -6,12 +6,13 @@ package:
 
 source:
   url: https://github.com/blakemeyerslab/Phasis/archive/refs/tags/v{{ version }}.tar.gz
-  # Replace only after downloading the approved, immutable release source.
-  sha256: REPLACE_WITH_VERIFIED_RELEASE_SHA256
+  sha256: 3a5b5f54af566a304174151238512e60fec78c8d022c5e0e4b3bb3dfe581dd62
 
 build:
   number: 0
   noarch: python
+  run_exports:
+    - {{ pin_subpackage('phasis', max_pin='x') }}
   script: {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
   entry_points:
     - phasis = phasis.cli:main

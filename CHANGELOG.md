@@ -47,9 +47,9 @@ described below.
 - Included supporting scripts, tests, and public guides in the source
   distribution. Auxiliary scripts remain source-checkout tools, not installed
   Phasis commands.
-- Prepared and locally tested a Bioconda recipe on macOS and Linux. Public
-  Bioconda installation remains pending final source/checksum selection,
-  submission, CI, and maintainer approval.
+- Prepared and locally tested a Bioconda recipe on macOS and Linux, now
+  [submitted for review](https://github.com/bioconda/bioconda-recipes/pull/70852).
+  Public Bioconda installation remains pending CI and maintainer approval.
 
 ### Validation
 

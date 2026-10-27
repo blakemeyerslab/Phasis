@@ -34,7 +34,9 @@ The recommended Conda environment includes HISAT2, the default aligner, and
 SAMtools. Use Git to clone the source, or `curl` and `unzip` for the ZIP route
 below. The example also uses `wget`.
 
-Direct installation of Phasis from Bioconda is planned but not yet available.
+The Phasis 2.8.4 [Bioconda recipe](https://github.com/bioconda/bioconda-recipes/pull/70852)
+has been submitted and is awaiting CI and maintainer approval. Direct
+installation from the public Bioconda channel is not yet available.
 For now, Conda installs the dependencies and pip installs Phasis itself.
 On a cluster, see [HPC installation and batch jobs](docs/advanced_usage.md#hpc-installation-and-batch-jobs)
 before choosing environment and cache directories.
