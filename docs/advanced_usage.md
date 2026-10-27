@@ -138,24 +138,63 @@ flag is needed.
 
 Consult `phasis -h` for the available options and defaults.
 
-### Classification Reproducibility
-
-The upcoming v2.8.4 build explicitly uses GMM initialization
-`init_params="random_from_data"`, `random_state=0`, and `n_init=1`, and prints
-these settings. This fixes the policy previously used only after a specific
-BLAS/thread-pool initialization failure; that error no longer silently selects
-a different classifier starting point. Runs that previously used normal k-means
-initialization can therefore produce different calls. This policy reproduced
-the historical four-library maize example, not yet every manuscript dataset.
-
-A fixed seed controls random initialization, not all numerical variation.
-For reproducible comparisons retain identical inputs, candidate ordering,
-parameters, software commit, and dependency versions (including NumPy, SciPy,
-scikit-learn and the BLAS implementation). Different numerical environments or
-input ordering can still affect fitted mixtures, particularly borderline calls.
-Do not assume universal cross-platform identity from the seed alone.
-
 ## HPC and Resource Tuning
+
+### HPC installation and batch jobs
+
+Install into an environment you own, using a persistent project filesystem
+accessible from compute nodes. Put Conda/Pip caches on a filesystem with
+enough quota, following your cluster's policy. On Hive, validation used
+Quobyte paths for environments and caches. Node-local temporary storage is
+appropriate for disposable scratch files, not an environment needed by later jobs.
+
+Use either the cluster's Conda module or your own Conda installation in a job,
+not both. Check `command -v conda`, `command -v python`, `command -v phasis`,
+and `python -c "import phasis; print(phasis.__file__)"` after activation.
+Avoid inherited `PYTHONPATH` or user-site packages selecting another checkout.
+
+For a module-based setup, initialize modules as instructed by your HPC site
+and load its Conda module before activating your environment. Hive validation
+used `/etc/profile.d/modules.sh` and `module load conda`. An inherited personal
+Miniconda setup conflicted with that module; starting the batch shell without
+those inherited Conda variables/functions resolved it. Do not uninstall or
+modify your personal environment to repair a job shell.
+
+For example, after selecting one Conda installation, replace this project
+path with your writable location before creating the environment:
+
+```bash
+export PHASIS_PROJECT=/path/to/writable/project
+export CONDA_PKGS_DIRS="$PHASIS_PROJECT/cache/conda"
+export PIP_CACHE_DIR="$PHASIS_PROJECT/cache/pip"
+mkdir -p "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$PHASIS_PROJECT/envs"
+conda create -p "$PHASIS_PROJECT/envs/phasis" --override-channels \
+  -c conda-forge -c bioconda --strict-channel-priority \
+  python=3.12 numpy=1.26.4 scikit-learn=1.3.2 hisat2 'samtools>=1.10' wget -y
+conda activate "$PHASIS_PROJECT/envs/phasis"
+```
+
+Then follow the README's source download and pip installation steps. Activate
+the same environment explicitly in each batch job. Run analyses inside a
+scheduler allocation, using no more CPUs than allocated, with only one Phasis
+run active per working directory. For Slurm jobs, the following settings keep
+imports and plotting caches separate from unrelated interactive sessions:
+
+```bash
+unset PYTHONPATH
+export PYTHONNOUSERSITE=1
+export MPLBACKEND=Agg
+export MPLCONFIGDIR="${TMPDIR:-/tmp}/phasis-mpl-${SLURM_JOB_ID:?}"
+mkdir -p "$MPLCONFIGDIR"
+```
+
+If Conda reports a cache verification error, preserve the error log and retry
+with a fresh, private `CONDA_PKGS_DIRS` on suitable storage. Do not delete a
+shared cache. Such installation/cache failures are distinct from Phasis
+analysis failures. Record the environment specification and command alongside
+the analysis outputs.
+
+### Resource allocation
 
 Start by setting `-cores` to your job's CPU allocation. More workers can mean
 more concurrent memory and disk use. Keep sufficient temporary storage and
@@ -193,7 +232,7 @@ Smaller chunks trade RAM for temporary I/O. Lower fan-in limits simultaneously
 open files but can add merge passes. Spill directories are removed on normal
 completion; cleanup also removes remnants of interrupted runs.
 
-### PHAS-cluster construction
+### *PHAS*-cluster construction
 
 After assigning universal IDs, Phase II builds `{phase}_PHAS_to_detect.tab`
 in batches within chromosome/library groups. Defaults are 100,000 input rows,

@@ -1,7 +1,7 @@
 # Use Bowtie 1 or BWA Alignments With Phasis
 
 Phasis normally maps reads with HISAT2. If you already use Bowtie 1 or
-BWA-backtrack, this optional workflow turns their BAM alignments into native
+BWA-aln (`bwa aln` + `bwa samse`), this optional workflow turns their BAM alignments into native
 Phasis candidate clusters, then runs the normal classification stage.
 You do not need it for a [standard Phasis analysis](../README.md#run-a-real-example).
 
@@ -36,7 +36,9 @@ HISAT2-based Phasis analysis.
 
 The supported interchange format is BAM. Convert SAM to BAM with
 `samtools view -b -o sample.bam sample.sam`; CRAM is not a supported input
-contract. The BAM can be unsorted and need not be indexed.
+contract. The supporting importer accepts unsorted, unindexed BAM files and
+performs the required sorting internally. It also writes a coordinate-sorted,
+indexed BAM containing the accepted alignments.
 
 Prepare a directory containing:
 
@@ -97,7 +99,7 @@ samtools view -b -o sample.bam sample.sam
 `-v 0` requests exact matches. `-k 25` provides enough reported placements for
 the importer's default hit cutoff. Keep every alignment in the resulting BAM.
 
-### BWA-backtrack
+### BWA-aln (`bwa aln` + `bwa samse`)
 
 Use `sample.fastq` containing exactly the same collapsed sequences and read
 names as `sample.fas`, not an uncollapsed raw-read library. If converting from
@@ -164,7 +166,7 @@ outputs to check are:
 Inspect rejection counts before proceeding. Do not treat a partially written
 candidate file without `IMPORT_SUCCESS.json` as a successful import.
 
-## 4. Call PHAS Loci
+## 4. Call *PHAS* Loci
 
 Use the original library and the candidate file with `-steps class`:
 
@@ -290,7 +292,7 @@ strategies can still produce different reported alignments.
 
 Bowtie 1's `-v` mode supports limits 0-3; the importer's nonnegative limit does
 not expand the aligner's capabilities. See the [Bowtie manual](https://bowtie-bio.sourceforge.net/manual.shtml)
-and [BWA-backtrack source](https://github.com/lh3/bwa/blob/v0.7.17/bwase.c)
+and [BWA-aln source](https://github.com/lh3/bwa/blob/v0.7.17/bwase.c)
 for reporting semantics.
 
 ## Troubleshooting and Advanced Details
@@ -357,11 +359,9 @@ python -m unittest tests.test_external_bam
 
 Run tests from the source checkout. The auxiliary tool lives entirely in
 `support_scripts/bam_to_candidates.py`; it is not a main Phasis CLI option.
-See the official [Bowtie 1 manual](https://bowtie-bio.sourceforge.net/manual.shtml)
-and [BWA manual](https://bio-bwa.sourceforge.net/bwa.shtml) for mapper options.
 
 For an optional small end-to-end validation with real installed HISAT2,
-Bowtie 1, BWA-backtrack, and SAMtools executables:
+Bowtie 1, BWA (for `bwa aln` + `bwa samse`), and SAMtools executables:
 
 ```bash
 python tests/run_external_bam_integration.py --output-dir /tmp/phasis-bam-check

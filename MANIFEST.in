@@ -1,0 +1,6 @@
+include README.md CHANGELOG.md LICENSE.txt
+recursive-include support_scripts *.py *.sh *.txt
+recursive-include tests *.py
+include docs/advanced_usage.md docs/external_bam.md docs/scoring.md docs/phasirna_output.md
+recursive-include docs/images *.png
+recursive-include packaging *.md *.yaml

@@ -1,7 +1,6 @@
 # Phasis - Phased sRNA Cluster Discovery and Annotation
 
 **Version:** v2.8.4
-Development validation build; not yet a tagged release. See [release notes](CHANGELOG.md).
 
 Phasis identifies phased small-RNA-producing (*PHAS*) loci from small-RNA
 (sRNA) libraries and a reference genome or transcriptome. It reports
@@ -23,9 +22,8 @@ parameters to get started.
 
 The original [PHASIS](https://github.com/atulkakrana/PHASIS), described by
 Kakrana et al. (2017), remains available for reproducibility. **Phasis 2 is a
-complete rewrite**, with a redesigned architecture and implementation, not an
-incremental update of that codebase. The capitalization is intentional:
-**PHASIS** names the original software; **Phasis** names the rewritten successor.
+complete rewrite** with a redesigned architecture, rather than an incremental
+update of the original software.
 The maintained implementation is
 [blakemeyerslab/Phasis](https://github.com/blakemeyerslab/Phasis).
 
@@ -33,7 +31,13 @@ The maintained implementation is
 
 Phasis supports Python 3.10 through 3.12 on Linux and macOS.
 The recommended Conda environment includes HISAT2, the default aligner, and
-SAMtools. You will also need Git to download the source and `wget` for the example.
+SAMtools. Use Git to clone the source, or `curl` and `unzip` for the ZIP route
+below. The example also uses `wget`.
+
+Direct installation of Phasis from Bioconda is planned but not yet available.
+For now, Conda installs the dependencies and pip installs Phasis itself.
+On a cluster, see [HPC installation and batch jobs](docs/advanced_usage.md#hpc-installation-and-batch-jobs)
+before choosing environment and cache directories.
 
 ### 1. Create an environment
 
@@ -46,40 +50,68 @@ conda activate phasis
 
 ### 2. Download and install Phasis
 
+Choose **one** of these download methods, using a new directory so you do not
+overwrite an existing checkout or analysis.
+
+**Clone with Git:**
+
 ```bash
 git clone https://github.com/blakemeyerslab/Phasis.git
 cd Phasis
+```
+
+**Or download and extract a ZIP:**
+
+```bash
+curl -fL https://github.com/blakemeyerslab/Phasis/archive/refs/heads/main.zip -o Phasis-main.zip
+unzip Phasis-main.zip
+cd Phasis-main
+```
+
+Both methods download the maintained `main` branch. Then, from the directory
+containing `pyproject.toml`, install Phasis into the activated environment:
+
+```bash
 python -m pip install -U pip
 python -m pip install -e .
+```
+
+Keep this source directory in place: `-e` installs in editable mode, so the
+installed command uses these files. The optional supporting scripts also
+remain in this directory; they are not installed as Phasis commands.
+
+### 3. Verify the installation
+
+```bash
+phasis -version
 phasis -h
+python -m pip check
+hisat2 --version
+samtools --version
+python -c "from phasis.deps_check import require_dependencies; require_dependencies()"
 ```
 
 If you already have a source checkout, run the installation commands from its
 root instead of cloning again. Keep analysis files in a separate directory.
-
-The commands above install the default branch. To test the upcoming v2.8.4
-without changing an existing installation, clone into a separate directory and
-install it in a separate Conda environment:
-
-```bash
-git clone --branch dev/v2.8.4 --single-branch https://github.com/blakemeyerslab/Phasis.git Phasis-v2.8.4-dev
-cd Phasis-v2.8.4-dev
-python -m pip install -e '.[bam]'
-phasis -version
-git rev-parse HEAD
-```
-
-The development branch is mutable. Record the commit alongside the version for
-reproducible tests; this branch is not a replacement for the frozen manuscript
-archive.
+The commands above check installation without running an analysis. Continue
+with the [real example](#run-a-real-example) to test an analysis end to end.
 
 ## Run a Real Example
 
-This example downloads four maize tag-count libraries and the B73 RefGen v2
-genome, then runs 21-*PHAS* and 24-*PHAS* analyses. It is a real dataset, not a
-small demonstration fixture: allow time and disk space for downloading the
-genome, building its index, and processing the libraries. Adjust `-cores 12`
+This example downloads four maize [tag-count libraries](#supported-library-formats)
+and the maize (*Zea mays*) B73 reference genome, assembly RefGen v2 (AGPv2),
+from [MaizeGDB](https://download.maizegdb.org/B73_RefGen_v2/), then runs
+21-*PHAS* and 24-*PHAS* analyses.
+It uses real sequencing data rather than a small test dataset, so allow time
+and disk space for downloading the genome, building its index, and processing
+the libraries. Adjust `-cores 12`
 to the resources available to your job.
+
+**Run only one Phasis analysis at a time in each working directory.** In this
+example, wait for the 21-*PHAS* analysis to finish before starting the
+24-*PHAS* analysis. Runs share intermediate files and caches, so different
+`--outdir` values do not make simultaneous runs in the same working directory
+safe. Use separate working directories for analyses that must run simultaneously.
 
 Run the commands in a new analysis directory outside the source checkout:
 
@@ -113,6 +145,10 @@ default; pooling is an optional analysis choice.
 
 ## Understand the Outputs
 
+In the filenames below, `{phase}` is the phase length in nucleotides selected
+with `-phase`, usually 21 or 24 for 21-nt or 24-nt phased sRNAs. For example,
+`-phase 24` produces `24_calls.tsv`.
+
 For each phase, Phasis writes final results to `--outdir` (default:
 `21_results/` or `24_results/`).
 
@@ -125,23 +161,52 @@ For each phase, Phasis writes final results to `--outdir` (default:
 | `{phase}_PHAS.pdf` | Individual-library classification heatmap for loci called in at least one library. |
 | `{phase}_Abundance_PHAS.pdf` | Abundance heatmap for loci called as *PHAS* at least once. |
 | `{phase}_Abundance_PHAS_and_nonPHAS.pdf` | Abundance heatmap including non-*PHAS* signal at those loci. |
-| `{phase}_Howell_scores.pdf` | Individual-library Howell-score heatmaps. |
+| `{phase}_Howell_scores.pdf` | Individual-library [Howell-score heatmaps](docs/scoring.md), showing the main and strict scores separately. |
 | `{phase}_PHAS_locus_plots/` | Diagnostic plots for inspecting individual loci. |
-| `{phase}_phasiRNAs.tsv` | Phased-register sRNAs associated with final *PHAS* loci. |
+| `{phase}_phasiRNAs.tsv` | Individual phasiRNA sequences, abundances, and assignments to main or secondary phased units within called *PHAS* loci. See the [phasiRNA table guide](docs/phasirna_output.md). |
 | `{phase}_PHAS_like/` | Separate *PHAS*-like calls, evidence, GFF, phasiRNAs, and plots. |
 
-### What is *PHAS*-like?
+### Individual phasiRNAs and phased units
 
-Phasis evaluates whether a candidate's sRNAs support a coherent phased register:
-regularly spaced positions separated by the selected phase length.
-High-confidence *PHAS* calls require sufficient exact-register support.
-Candidates with phased structure but weaker exact-register support may be
-retained as *PHAS*-like for follow-up. They are **not** added to the
-high-confidence calls table.
+One *PHAS* locus can contain more than one supported **phased unit**: a group
+of phased windows describing a local phasiRNA-producing region. These units
+can include overlapping alternative registers or spatially separated regions
+within the same locus. `{phase}_phasiRNAs.tsv` records individual sRNA
+sequences and abundances together with their library, position, and phased-unit
+assignment, rather than treating every locus as one uniform region.
 
-This assessment is performed by the Register-Resolved Locus Interpretation
-Layer (RRL), after candidate detection. The evidence table and diagnostic plots
-help explain each candidate's interpretation.
+Use this table to inspect which phasiRNAs support each unit and to prepare
+sequences for downstream analyses such as target prediction. The
+[phasiRNA table guide](docs/phasirna_output.md) explains the columns, sequence
+orientation, and how to avoid double-counting repeated assignments.
+
+### What are *PHAS* and *PHAS*-like loci?
+
+A ***PHAS* locus** is a genomic region whose transcripts give rise to phased
+small interfering RNAs (phasiRNAs). Successive processing of a double-stranded
+RNA precursor by Dicer-like (DCL) enzymes produces sRNAs in a regular register,
+usually at 21- or 24-nucleotide intervals. See
+[Allen et al. (2005)](https://doi.org/10.1016/j.cell.2005.04.004) for the mechanistic basis of phased siRNA production.
+
+DCL processing produces sRNA duplexes with characteristic **two-nucleotide
+3' overhangs**, giving paired products from opposite strands a specific
+positional relationship. This geometry provides additional evidence for
+DCL-dependent processing; see the primary study on
+[RDR6-dependent precursor synthesis and phased duplex production](https://pubmed.ncbi.nlm.nih.gov/21930511/).
+
+After candidate detection, the Register-Resolved Locus Interpretation Layer
+(RRL) evaluates exact-register support, competing registers, and supported
+phased windows. When evaluating opposite-strand partners, it checks their
+compatibility with the expected two-nucleotide overhang geometry. An observed
+opposite-strand partner is not required for every high-confidence call.
+
+***PHAS*** calls pass the detection and interpretation criteria, including
+sufficient exact-register support. ***PHAS*-like** candidates have evidence of
+phased structure but weaker or ambiguous support for a high-confidence
+interpretation. They are retained separately for follow-up and are **not**
+added to the high-confidence calls table. The evidence table and diagnostic
+plots help explain each candidate's interpretation; neither label alone is
+experimental confirmation of its biogenesis.
 
 ### Read an individual locus plot
 
@@ -151,8 +216,8 @@ help explain each candidate's interpretation.
   represent mapped sRNAs; color indicates length and fill distinguishes
   uniquely and multiply mapped reads. Phase-colored halos identify reads
   assigned to the interpreted register.
-- **Bottom panel:** score/register context for candidate phased windows.
-  The red point is the highest phasing score position, used as the register
+- **Bottom panel:** [Howell score and register context](docs/scoring.md#scores-in-the-plots) for candidate phased windows.
+  The red point marks the highest phasing score position (HPSP), used as the register
   anchor. Hollow gray points are nearby windows that were not promoted;
   rose-colored windows are promoted secondary phased windows.
 - **Blue region:** the main phased unit in this example.
@@ -162,20 +227,77 @@ help explain each candidate's interpretation.
 Use these plots to inspect phased structure, opposite-strand support, and
 secondary or overlapping windows rather than relying on a score alone.
 
+### Understanding the scores
+
+The **Phasis score** summarizes statistical evidence for phasing across candidate
+windows. The **Howell score** measures support for regularly spaced sRNA
+positions using their abundance and the number of occupied phase cycles.
+They are different measures, not interchangeable names for the same score.
+See the [scoring guide](docs/scoring.md) for how Phasis calculates them,
+the distinction between the main and strict Howell scores, and their use in
+filtering and register-resolved interpretation.
+
 ## Use Your Own Data
 
-You need sRNA libraries and a reference FASTA. Both library inputs and the
-reference can be plain text or gzip-compressed.
+You need a **reference genome or transcriptome in FASTA format**, supplied
+with `-reference`, and one or more sRNA libraries supplied with `-libs`.
+The reference can be uncompressed (for example, `genome.fa` or `transcripts.fa`)
+or gzip-compressed (`genome.fa.gz` or `transcripts.fa.gz`); no manual
+decompression is needed.
 
-| Library format | Option | Preparation |
+### Supported library formats
+
+Phasis accepts FASTA, FASTQ, and tag-count libraries, either uncompressed or
+gzip-compressed. **All libraries must come from adapter-trimmed,
+quality-controlled sRNA reads.** Phasis is not an adapter or quality trimmer.
+Select the format with `-libformat`:
+
+| Library format | Option | Contents |
 | --- | --- | --- |
-| Tag-count | `-libformat T` | Sequence and abundance per tag. |
 | FASTA | `-libformat F` | sRNA sequences. |
-| FASTQ | `-libformat Q` | Adapter/quality-trimmed sRNAs, expected to be 18-35 nt. |
+| FASTQ | `-libformat Q` | sRNA sequences and quality scores. |
+| Tag-count | `-libformat T` | Each distinct sRNA sequence and its read count. |
 
-Phasis is not an adapter or quality trimmer. FASTQ input is checked and filtered
-for invalid, ambiguous, short, and long reads; input that appears to contain raw
-sequencing reads triggers an error rather than being silently truncated.
+**Tag-count is recommended for already processed sRNA libraries.** Repeated
+reads are stored as one sequence with a count, reducing file size and avoiding
+the need for Phasis to count duplicate sequences during input preparation.
+The original read abundance is preserved. This is a convenience for storage
+and preprocessing, not a different analysis method; you can also provide
+preprocessed FASTA or FASTQ directly.
+
+A tag-count file has two tab-separated columns and no header: sequence first,
+then read count. For example:
+
+```text
+ACGTACGTACGTACGTACGTA	120
+TGCATGCATGCATGCATGCAT	8
+```
+
+Here, the first sequence was observed 120 times and the second 8 times.
+Use whole-number read counts, not normalized abundances. Select this format
+with `-libformat T`; files can be uncompressed (for example, `sample.tag`)
+or gzip-compressed (`sample.tag.gz`).
+
+To convert quality-controlled libraries to tag-count format, use the supporting
+scripts from your downloaded Phasis source directory (replace the input paths
+with your own):
+
+```bash
+python support_scripts/fastaToTag.py /path/to/sample_fasta.fasta
+python support_scripts/fastqToTag.py /path/to/sample_fastq.fastq.gz
+```
+
+These commands create `sample_fasta.tag` and `sample_fastq.tag` beside their
+input files. The FASTA helper requires uncompressed input with one record per
+read; it does not recover abundance counts from collapsed FASTA headers.
+The FASTQ helper accepts plain or gzip-compressed input. These helpers retain
+18-35 nt sequences and apply ambiguous-base handling; they do not replace
+adapter trimming or quality control. See [format conversion](docs/advanced_usage.md#convert-library-formats)
+for details and the FASTQ helper's memory-control option.
+
+Direct FASTQ input also expects 18-35 nt sRNAs and checks for invalid,
+ambiguous, short, and long reads. Input that appears to contain raw sequencing
+reads triggers an error rather than being silently truncated.
 
 ### Choose the phase length
 
@@ -249,7 +371,7 @@ These workflows are optional; they are not prerequisites for a standard analysis
 | Task | Guide |
 | --- | --- |
 | Classify existing candidate clusters without repeating discovery | [Reuse candidate files](docs/advanced_usage.md#classify-existing-candidate-clusters) |
-| Use Bowtie 1 or BWA-backtrack alignments instead of native HISAT2 mapping | [Alternative-aligner tutorial](docs/external_bam.md) |
+| Use Bowtie 1 or BWA-aln (`bwa aln` + `bwa samse`) alignments instead of native HISAT2 mapping | [Alternative-aligner tutorial](docs/external_bam.md) |
 | Combine completed runs or evaluate calls against known loci | [Compare results](docs/advanced_usage.md#combine-completed-runs) |
 | Convert library formats or manage chromosome names | [Input preparation](docs/advanced_usage.md#input-preparation) |
 | Tune memory, temporary disk use, or shared-filesystem performance | [HPC and resource tuning](docs/advanced_usage.md#hpc-and-resource-tuning) |
@@ -265,12 +387,6 @@ settings you can change and which filters Phasis still applies.
 
 ## Troubleshooting
 
-- **Classification reproducibility:** This development build fixes GMM
-  initialization to `random_from_data`, seed `0`, and one initialization, rather
-  than switching methods after an environment error. Calls may differ from
-  earlier k-means-initialized runs. See [reproducibility details](docs/advanced_usage.md#classification-reproducibility)
-  for the validation scope and why a seed alone cannot guarantee cross-system
-  identity.
 - **Command not found:** activate your Phasis environment and check `which phasis`,
   `which hisat2`, and `which samtools`.
 - **Installation or dependency errors:** use the environment above. NumPy
@@ -292,6 +408,13 @@ settings you can change and which filters Phasis still applies.
 When reporting a problem, include the command, Phasis version, relevant log
 messages, input format, and whether you reused a run directory. Do not share
 private sequencing data or credentials in a public issue.
+
+## License
+
+Phasis is distributed under the [Artistic License 2.0](LICENSE.txt).
+The software is provided "AS IS", without warranties. Section 14 of the
+license disclaims liability for damages arising from its use, subject to
+applicable law. See the license for the full terms.
 
 ## Authors
 

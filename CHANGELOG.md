@@ -1,9 +1,9 @@
 # Changelog
 
-## 2.8.4 - Unreleased
+## 2.8.4 - 2026-10-27
 
-Development validation build on `dev/v2.8.4`. A GitHub Release and version tag
-will be created only after maintainer testing and approval.
+This release has passed macOS and Linux/Hive validation within the scope
+described below.
 
 ### Added
 
@@ -20,11 +20,6 @@ will be created only after maintainer testing and approval.
 
 ### Fixed
 
-- Explicit GMM initialization (`random_from_data`, seed 0, one initialization)
-  replaces the environment-dependent k-means/fallback choice. This preserves
-  the historical fallback policy validated on the four-library maize example;
-  calls can differ from prior normal k-means runs. Broader validation remains
-  required before release.
 - Reference preparation now distinguishes sampled fingerprinting from whole
   cleaned-FASTA compression, with elapsed times and byte-based compression
   progress. Compression level is unchanged.
@@ -38,11 +33,35 @@ will be created only after maintainer testing and approval.
 ### Documentation
 
 - Reorganized the README from installation and an executable example to output
-  interpretation and advanced workflows; added generic Bowtie 1/BWA tutorials.
+  interpretation and advanced workflows; added Git and ZIP installation,
+  HPC guidance, and generic Bowtie 1/BWA tutorials.
+- Added explanations of Howell scoring, phased units, and the phasiRNA export,
+  including sequence-orientation and repeated-assignment cautions.
 - Clarified the relationship between the original PHASIS and the completely
-  rewritten Phasis 2, including the intentional capitalization distinction.
+  rewritten Phasis 2.
 
-Detection, scoring, clustering, feature thresholds, and RRL rules are unchanged.
-GMM initialization is now explicit as described above; this can affect calls.
-The original manuscript-associated Zenodo archive
-is unchanged. Development commits and tests do not constitute a stable release.
+### Packaging
+
+- Declared Artistic-2.0 license metadata and included the unchanged license
+  text in built packages.
+- Included supporting scripts, tests, and public guides in the source
+  distribution. Auxiliary scripts remain source-checkout tools, not installed
+  Phasis commands.
+- Prepared and locally tested a Bioconda recipe on macOS and Linux. Public
+  Bioconda installation remains pending final source/checksum selection,
+  submission, CI, and maintainer approval.
+
+### Validation
+
+- Source, wheel, and local Conda installation checks passed on Linux/Hive.
+- All 277 regression tests passed, along with real HISAT2/Bowtie 1/BWA-aln
+  integration and native/importer parity checks on synthetic data.
+- The complete four-library 21-*PHAS* README example passed on Hive:
+  349 distinct locus identifiers and 1,084 library-specific call rows, with
+  standard outputs and no warnings reported.
+
+These results apply to the checksummed candidate recorded in the
+[validation record](packaging/HIVE_VALIDATION_21.md). Documentation revisions
+after testing do not change the tested software, but require separately
+identified release artifacts. No Phasis source fixes were needed for the
+recovered Hive environment and validation-script issues.
