@@ -372,7 +372,7 @@ These workflows are optional; they are not prerequisites for a standard analysis
 
 | Task | Guide |
 | --- | --- |
-| Classify existing candidate clusters without repeating discovery | [Reuse candidate files](docs/advanced_usage.md#classify-existing-candidate-clusters) |
+| Classify existing candidate clusters without repeating discovery | [Reuse candidate files](docs/advanced_usage.md#classify-existing-candidate-clusters); [18-field format and example](docs/candidate_clusters.md) |
 | Use Bowtie 1 or BWA-aln (`bwa aln` + `bwa samse`) alignments instead of native HISAT2 mapping | [Alternative-aligner tutorial](docs/external_bam.md) |
 | Combine completed runs or evaluate calls against known loci | [Compare results](docs/advanced_usage.md#combine-completed-runs) |
 | Convert library formats or manage chromosome names | [Input preparation](docs/advanced_usage.md#input-preparation) |

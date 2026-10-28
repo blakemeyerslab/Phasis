@@ -23,6 +23,11 @@ If `-class_cluster_files` is omitted, Phasis tries to infer expected candidate
 paths from `-libs`, `-phase`, and the run directory. Arbitrary interval tables
 are not candidate-cluster files.
 
+See the [18-field format specification and real runnable example](candidate_clusters.md)
+before preparing files independently. Candidate records include precomputed
+per-read statistics, not just coordinates. A very small candidate set can
+change the fitted classification, and a single usable feature row is insufficient.
+
 To generate native candidates from external alignments, follow the
 [Bowtie 1 / BWA tutorial](external_bam.md). Use separate calling workspaces for
 different aligners so that their intermediates and caches cannot be mixed.
