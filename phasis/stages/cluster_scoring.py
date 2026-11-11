@@ -32,6 +32,7 @@ from phasis.cache import (
 )
 from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress
+from phasis.stages import fast_scoring
 
 # Match legacy advanced defaults
 UNIQRATIO_HIT = 2
@@ -1159,12 +1160,30 @@ def compute_p_vals(test_values_list_f,test_values_list_r):
     pval_corr_r          = round(stouffer([pval_h_r,pval_r_r]),15)
     return pval_h_f,N_f,X_f,pval_r_f,pval_corr_f,pval_h_r,N_r,X_r,pval_r_r,pval_corr_r
 
+def _legacy_scoring_stats_requested() -> bool:
+    """
+    True when ``Phasis_CLUSTER_SCORING_LEGACY_STATS`` asks for the original
+    SciPy-per-position path (kept for validation of the fast path).
+    """
+    raw = getenv("Phasis_CLUSTER_SCORING_LEGACY_STATS")
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
 def clustscore(aclust, poslist, sens, asens=None):
     """
     Scores an individual cluster and appends p-values.
     `asens` kept for signature compatibility but not used.
     """
     scoredclust = []
+
+    if not _legacy_scoring_stats_requested():
+        # Same values as the legacy loop below, without the per-call SciPy
+        # overhead and without scanning positions outside the window.
+        pos_dict = fast_scoring.position_stats(poslist, sens, WINDOW_SIZE, int(phase))
+        for taginfo in aclust:
+            taginfo.extend(pos_dict[int(taginfo[5])])
+            scoredclust.append(taginfo)
+        return scoredclust
+
     cluster_pvals_f = []
     cluster_pvals_r = []
     pos_dict = {}
