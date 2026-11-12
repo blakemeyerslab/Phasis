@@ -162,8 +162,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         default=True,
         help=(
-            "Do not write the individual PHAS and PHAS-like locus plots; result "
-            "tables, GFF files and summary PDFs are still written"
+            "Do not render the individual PHAS and PHAS-like locus plots; all "
+            "result tables (including the phasiRNA tables), GFF files and "
+            "summary PDFs are still written"
         ),
     )
     compression_group = parser.add_mutually_exclusive_group()

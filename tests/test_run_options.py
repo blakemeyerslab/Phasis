@@ -158,3 +158,60 @@ class FeatureAssemblyWorkReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoLocusPlotsKeepsPhasiRNATablesTests(unittest.TestCase):
+    """--no_locus_plots must skip only the rendering, never a result table."""
+
+    @staticmethod
+    def _inputs():
+        labeled = pd.DataFrame(
+            [
+                {"identifier": "chr1:100..196", "alib": "libA", "cID": "cluster_1", "label": "PHAS"},
+                {"identifier": "chr2:500..596", "alib": "libB", "cID": "cluster_2", "label": "non-PHAS"},
+            ]
+        )
+        rows = []
+        for cid, ident, alib, start in (("cluster_1", "chr1:100..196", "libA", 100), ("cluster_2", "chr2:500..596", "libB", 500)):
+            for k in range(4):
+                rows.append(
+                    {"clusterID": cid, "identifier": ident, "alib": alib, "pos": start + 24 * k,
+                     "abun": 5 + k, "len": 24, "strand": "w", "tag_seq": "ACGT" * 6}
+                )
+        return labeled, pd.DataFrame(rows)
+
+    def _run(self, outdir, **kwargs):
+        from phasis.stages import locus_plots
+
+        def serial(func, iterable, **_kwargs):
+            return [func(item) for item in list(iterable)]
+
+        labeled, clusters = self._inputs()
+        with mock.patch.object(locus_plots, "run_parallel_with_progress", side_effect=serial), \
+                mock.patch.object(locus_plots.rt, "plot_staging", "direct"), \
+                mock.patch.object(locus_plots.rt, "save_snapshot", return_value=None):
+            locus_plots.write_individual_phas_locus_plots(
+                "GMM", labeled, clusters, job_outdir=outdir, job_phase=24, **kwargs
+            )
+
+    def test_tables_are_identical_and_no_plot_is_written(self):
+        tables = ("24_phasiRNAs.tsv", os.path.join("24_PHAS_like", "24_PHAS_like_phasiRNAs.tsv"))
+        with tempfile.TemporaryDirectory() as with_plots, tempfile.TemporaryDirectory() as without_plots:
+            self._run(with_plots)
+            self._run(without_plots, render_plots=False)
+
+            for name in tables:
+                with open(os.path.join(with_plots, name), "rb") as a, open(os.path.join(without_plots, name), "rb") as b:
+                    self.assertEqual(a.read(), b.read(), name)
+            self.assertGreater(os.path.getsize(os.path.join(without_plots, tables[0])), 50)
+
+            plotted = [n for _r, _d, files in os.walk(with_plots) for n in files if n.endswith(".png")]
+            skipped = [n for _r, _d, files in os.walk(without_plots) for n in files if n.endswith(".png")]
+            self.assertEqual(len(plotted), 1)
+            self.assertEqual(skipped, [])
+            self.assertFalse(os.path.isdir(os.path.join(without_plots, "24_PHAS_locus_plots")))
+
+    def test_pipeline_always_runs_the_locus_stage(self):
+        source = open(phase2_pipeline.__file__, encoding="utf-8").read()
+        self.assertIn('locus_plot_kwargs["render_plots"] = False', source)
+        self.assertNotIn("Locus plots skipped (--no_locus_plots)", source)

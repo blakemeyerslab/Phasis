@@ -3113,7 +3113,13 @@ def write_individual_phas_locus_plots(
     *,
     job_outdir: str | None = None,
     job_phase: str | int | None = None,
+    render_plots: bool = True,
 ) -> None:
+    """
+    Analyse every PHAS and PHAS-like call, write the phasiRNA tables and render
+    one plot per locus.  With ``render_plots=False`` (``--no_locus_plots``) the
+    analysis and the phasiRNA tables are kept and only the rendering is skipped.
+    """
     phase_value = int(job_phase) if job_phase is not None else int(getattr(rt, "phase", 21))
     bucket_specs = _plot_bucket_specs(phase_value, method_name)
     final_class_series = labeled_features.get("final_class", labeled_features.get("label", pd.Series(dtype=str))).astype(str)
@@ -3226,9 +3232,14 @@ def write_individual_phas_locus_plots(
             print(f"[INFO] Wrote 0 phase-length in-register phasiRNA row(s) to {phasirna_out}")
             continue
 
-        strategy = _resolve_plot_staging_strategy(final_plot_dir)
-        activated_plan = _activate_plot_staging(final_plot_dir, strategy)
-        _persist_plot_staging_plan(activated_plan)
+        if render_plots:
+            strategy = _resolve_plot_staging_strategy(final_plot_dir)
+            activated_plan = _activate_plot_staging(final_plot_dir, strategy)
+            _persist_plot_staging_plan(activated_plan)
+        else:
+            # No plot is written, so no plot or staging directory is created.
+            strategy = {"requested_mode": "direct", "staging_root": None}
+            activated_plan = {"mode": "direct", "plot_dir": final_plot_dir, "final_plot_dir": final_plot_dir}
 
         if activated_plan["mode"] == "local":
             print(
@@ -3269,6 +3280,13 @@ def write_individual_phas_locus_plots(
 
         export_count = _write_phasirna_export(phasirna_out, export_rows)
         print(f"[INFO] Wrote {export_count} phase-length in-register phasiRNA row(s) to {phasirna_out}")
+
+        if not render_plots:
+            print(
+                f"[INFO] Skipped {len(plot_payloads)} individual {spec['display_class']} "
+                "locus plot(s) (--no_locus_plots)."
+            )
+            continue
 
         render_worker_cap = _resolve_locus_plot_worker_cap(
             len(plot_payloads),

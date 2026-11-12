@@ -293,10 +293,11 @@ remote/distributed output path is detected. Confirm that staged plots reach
 
 ### Skipping locus plots
 
-Add `--no_locus_plots` to skip the individual *PHAS* and *PHAS*-like locus
-plots. Result tables, GFF files and summary PDFs are still written. Use it for
-timing tests or when only the tables are needed; rerun without the option to
-get the plots.
+Add `--no_locus_plots` to skip rendering the individual *PHAS* and
+*PHAS*-like locus plots. Every result table, including `{phase}_phasiRNAs.tsv`,
+the GFF files and the summary PDFs are still written; the per-locus analysis
+that fills the phasiRNA tables still runs. Use it for timing tests or when only
+the tables are needed; rerun without the option to get the plots.
 
 ### Logs and executable checks
 

@@ -28,8 +28,9 @@ Not yet released; the package version is still 2.8.4.
 
 ### Added
 
-- `--no_locus_plots` skips the individual PHAS and PHAS-like locus plots.
-  Result tables, GFF files and summary PDFs are still written.
+- `--no_locus_plots` skips rendering the individual PHAS and PHAS-like locus
+  plots. All result tables, including the phasiRNA tables, the GFF files and
+  the summary PDFs are still written.
 
 ### Fixed
 
