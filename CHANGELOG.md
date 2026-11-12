@@ -19,6 +19,9 @@ Not yet released; the package version is still 2.8.4.
   to the workers, which shortens scoring and lowers peak memory; scored
   clusters are unchanged. A `.dict` written by 2.8.4 is still accepted, but a
   run directory parsed by this version cannot be reused by 2.8.4.
+- The Howell phasing-score scans in feature assembly build each window's
+  position set and total once instead of once per register. Feature rows are
+  unchanged and the step runs about twice as fast on 24-nt data.
 - Feature assembly reports its work while it runs: batches, input rows done
   and total, clusters, feature rows written, rate and estimated time left. Set
   `Phasis_FEATURE_ASSEMBLY_COUNT_ROWS=0` to skip counting the input rows.

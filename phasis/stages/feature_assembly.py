@@ -11,6 +11,7 @@ import gc
 import gzip
 import threading
 import time
+from bisect import bisect_left, bisect_right
 import numpy as np
 import pandas as pd
 from phasis.progress import tqdm
@@ -1381,12 +1382,62 @@ def _score_window_registers(window_positions, pos_abun, win_start, win_end, phas
     best_reg_filled = 0
     best_reg = None
     register_scores: list[float] = []
-    evaluator = _evaluate_register_strict_exact if exact_only else _evaluate_register
+
+    # Shared by every register of this window.  The per-register evaluators
+    # (_evaluate_register_strict_exact / _evaluate_register) rebuilt the set
+    # and re-summed the window for each of the `ph` registers; the loops below
+    # apply the same rules in the same order, so the values are unchanged.
+    positions_set = set(window_positions)
+    total_in_window = sum(pos_abun[p] for p in window_positions)
+    step = ph if forward else -ph
 
     for reg in range(ph):
-        in_sum, eff_total, n_filled = evaluator(
-            window_positions, pos_abun, win_start, win_end, ph, reg, forward=forward
-        )
+        expected_pos = (win_start + reg) if forward else (win_end - reg)
+        in_sum = 0.0
+        n_filled = 0
+        if exact_only:
+            for _cycle in range(num_cycles):
+                if expected_pos in positions_set:
+                    in_sum += pos_abun[expected_pos]
+                    n_filled += 1
+                expected_pos += step
+            eff_total = total_in_window
+        else:
+            used_positions = set()
+            ignored_positions = set()
+            for _cycle in range(num_cycles):
+                left = expected_pos - 1
+                right = expected_pos + 1
+                if expected_pos in positions_set and expected_pos not in used_positions:
+                    # Exact hit: use it and quarantine its +-1 neighbours.
+                    in_sum += pos_abun[expected_pos]
+                    used_positions.add(expected_pos)
+                    n_filled += 1
+                    if left in positions_set and left not in used_positions:
+                        ignored_positions.add(left)
+                    if right in positions_set and right not in used_positions:
+                        ignored_positions.add(right)
+                else:
+                    # No exact hit: take the better +-1 neighbour (left wins a
+                    # tie, as max() over [left, right] did) and quarantine the other.
+                    has_left = left in positions_set and left not in used_positions
+                    has_right = right in positions_set and right not in used_positions
+                    if has_left or has_right:
+                        if has_left and has_right:
+                            best = left if pos_abun[left] >= pos_abun[right] else right
+                        else:
+                            best = left if has_left else right
+                        in_sum += pos_abun[best]
+                        used_positions.add(best)
+                        n_filled += 1
+                        sibling = right if best == left else left
+                        if sibling in positions_set and sibling not in used_positions:
+                            ignored_positions.add(sibling)
+                expected_pos += step
+            if ignored_positions:
+                eff_total = sum(pos_abun[p] for p in window_positions if p not in ignored_positions)
+            else:
+                eff_total = total_in_window
         reg_score, out_of_phase = _compute_howell_score_from_register(
             in_sum,
             eff_total,
@@ -4759,13 +4810,16 @@ def _best_sliding_window_score_generic_strict(pos_abun, phase, win_size, seq_sta
     best_score = -float("inf")
     best_window = (None, None)
 
+    ph = int(phase)
+    step = ph if forward else -ph
     for win_start in range(lower_bound, upper_bound + 1):
         win_end = win_start + win_size - 1
-        window_positions = [p for p in positions if win_start <= p <= win_end]
+        # `positions` is sorted, so the window is a slice of it.
+        window_positions = positions[bisect_left(positions, win_start):bisect_right(positions, win_end)]
         if not window_positions:
             score = 0.0
         else:
-            num_cycles = max(0, (win_end - win_start + 1) // int(phase))
+            num_cycles = max(0, (win_end - win_start + 1) // ph)
             if num_cycles < 4:
                 score = 0.0
             else:
@@ -4773,10 +4827,19 @@ def _best_sliding_window_score_generic_strict(pos_abun, phase, win_size, seq_sta
                 best_reg_total = 0.0
                 best_reg_filled = 0
 
-                for reg in range(int(phase)):
-                    in_sum, total, n_filled = _evaluate_register_strict_exact(
-                        window_positions, pos_abun, win_start, win_end, int(phase), reg, forward=forward
-                    )
+                # Same rule and order as _evaluate_register_strict_exact, with the
+                # window's set and total computed once instead of once per register.
+                positions_set = set(window_positions)
+                total = sum(pos_abun[p] for p in window_positions)
+                for reg in range(ph):
+                    expected_pos = (win_start + reg) if forward else (win_end - reg)
+                    in_sum = 0.0
+                    n_filled = 0
+                    for _cycle in range(num_cycles):
+                        if expected_pos in positions_set:
+                            in_sum += pos_abun[expected_pos]
+                            n_filled += 1
+                        expected_pos += step
                     if in_sum > best_reg_sum:
                         best_reg_sum = in_sum
                         best_reg_total = total
