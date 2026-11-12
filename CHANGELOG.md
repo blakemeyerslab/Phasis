@@ -12,6 +12,13 @@ Not yet released; the package version is still 2.8.4.
   result tables were identical to 2.8.4 on the README maize example for 21- and
   24-nt runs. Set `Phasis_CLUSTER_SCORING_LEGACY_STATS=1` to use the former
   code path.
+- The alignment parser stores the parsed tags of each library in one file per
+  chromosome (`<library>_<phase>.dict.shards/`) with a small index at the
+  former `.dict` path, and every cluster-scoring worker reads its own
+  chromosome. The main process no longer loads a library's tags or sends them
+  to the workers, which shortens scoring and lowers peak memory; scored
+  clusters are unchanged. A `.dict` written by 2.8.4 is still accepted, but a
+  run directory parsed by this version cannot be reused by 2.8.4.
 - Feature assembly reports its work while it runs: batches, input rows done
   and total, clusters, feature rows written, rate and estimated time left. Set
   `Phasis_FEATURE_ASSEMBLY_COUNT_ROWS=0` to skip counting the input rows.
