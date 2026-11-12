@@ -269,6 +269,12 @@ Lower batch sizes reduce per-task memory. A single cluster larger than the
 setting remains intact to preserve its features; Phasis reports these cases.
 Completed features are streamed to a temporary table.
 
+After every group of batches Phasis prints one `[feature-assembly]` line with
+the batches done, the input rows done and their total, the clusters handled,
+the feature rows written, the rate and the estimated time left. The total is
+counted in the background; set `Phasis_FEATURE_ASSEMBLY_COUNT_ROWS=0` to skip
+that count, in which case the share and the time left are not shown.
+
 ### Plot staging
 
 Large runs can stage individual locus plots through local scratch instead of
@@ -284,6 +290,13 @@ your normal command:
 The default `auto` stages plots when an HPC-style environment or
 remote/distributed output path is detected. Confirm that staged plots reach
 `--outdir` before removing job-local scratch.
+
+### Skipping locus plots
+
+Add `--no_locus_plots` to skip the individual *PHAS* and *PHAS*-like locus
+plots. Result tables, GFF files and summary PDFs are still written. Use it for
+timing tests or when only the tables are needed; rerun without the option to
+get the plots.
 
 ### Logs and executable checks
 
