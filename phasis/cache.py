@@ -293,6 +293,7 @@ CLEANUP_PATTERNS = [
     "suffix:.bam",
     "suffix:.sorted.bam",
     "suffix:.dict",
+    "suffix:.dict.shards",
     "suffix:.count",
     "suffix:.sum",
     "suffix:.clean.fa",

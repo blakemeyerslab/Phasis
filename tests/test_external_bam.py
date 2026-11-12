@@ -223,8 +223,8 @@ class ExternalBamTests(unittest.TestCase):
         with patch.object(rt, 'phase', 24, create=True), patch.object(rt, 'norm', False, create=True), \
              patch.object(sam_parsing, '_iter_alignment_lines', return_value=iter(lines)):
             dp, cp = sam_parsing.samparser_streaming((str(self.root/'lib.bam'), 25, 1))
-        with open(dp, 'rb') as stream:
-            self.assertEqual(pickle.load(stream), expected)
+        from phasis import nest_shards
+        self.assertEqual(nest_shards.load_expanded(dp), expected)
         with open(cp, 'rb') as stream:
             self.assertEqual(pickle.load(stream), counts)
 

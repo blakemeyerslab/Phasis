@@ -33,6 +33,7 @@ from phasis.cache import (
 from phasis.env import getenv
 from phasis.parallel import run_parallel_with_progress
 from phasis.stages import fast_scoring
+from phasis import nest_shards
 
 # Match legacy advanced defaults
 UNIQRATIO_HIT = 2
@@ -533,6 +534,7 @@ def load_filtered_nestdict_source(job):
     if not isinstance(loaded, dict):
         return idx, None, f"[WARN] Dict file '{src}' did not contain a dict; got {type(loaded)}"
 
+    nest_shards.resolve_refs(loaded, src)
     if needed_keys is None:
         return idx, loaded, None
 
@@ -585,7 +587,7 @@ def _load_nestdict_source_direct(src):
         print(f"[WARN] Dict file '{src}' did not contain a dict; got {type(loaded)}")
         return None
 
-    return loaded
+    return nest_shards.resolve_refs(loaded, src)
 
 
 def _nestdict_source_label(src):
@@ -1244,7 +1246,17 @@ def clustassemble(aninput):
     """
     sync_from_runtime()
     akey, lclustdict, nesteddict, sens, asens, scored_clust_folder = aninput
+    if isinstance(lclustdict, str):
+        # Path handed over instead of the loaded clusters (per-chromosome tag files).
+        try:
+            with open(lclustdict, "rb") as fh:
+                lclustdict = pickle.load(fh)
+        except Exception as e:
+            print(f"[WARN] Could not load {lclustdict}: {e}")
+            return None
     nesteddict = nesteddict[0]
+    if nest_shards.is_ref(nesteddict):
+        nesteddict = nest_shards.load_ref(nesteddict)
     clustlist  = []
     phasedlist = []
 
@@ -1646,14 +1658,29 @@ def scoringprocess(
             f"[scan] {label}: loading {len(to_process)} .lclust file(s)...",
             flush=True,
         )
-        loaded = run_parallel_with_progress(
-            load_lclust_for_scoring,
-            to_process,
-            desc=f"Loading .lclust ({progress_desc}, {len(to_process)} akeys)",
-            min_chunk=1,
-            unit="lib-chr",
-            **load_parallel_kwargs,
+        # With per-chromosome tag files the scoring workers read their own
+        # .lclust and tag file, so nothing is loaded or serialised here.
+        workers_read_inputs = bool(nestdict_for_batch) and all(
+            nest_shards.is_ref_list(value) for value in nestdict_for_batch.values()
         )
+        if workers_read_inputs:
+            print(
+                f"[scan] {label}: scoring workers read their own .lclust and tag files.",
+                flush=True,
+            )
+            loaded = [
+                (p_abs, os.path.splitext(os.path.basename(p_abs))[0], p_abs)
+                for _akey, p_abs in to_process
+            ]
+        else:
+            loaded = run_parallel_with_progress(
+                load_lclust_for_scoring,
+                to_process,
+                desc=f"Loading .lclust ({progress_desc}, {len(to_process)} akeys)",
+                min_chunk=1,
+                unit="lib-chr",
+                **load_parallel_kwargs,
+            )
 
         # Build lookup tables using canonical keys for robust matching
         by_path = {}

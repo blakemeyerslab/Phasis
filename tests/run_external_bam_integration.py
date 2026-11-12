@@ -182,7 +182,11 @@ def main():
     run([sys.executable, Path(__file__).resolve(), '--native', root / 'native',
          root / 'hisat2.bam', reference, str(args.mismatches),
          '2' if args.multimapping == 'unique-only' else '25'], 'native.log')
-    for suffix in ('.dict', '.count'):
+    from phasis import nest_shards
+    # The native parser stores tags per chromosome; compare the expanded content.
+    assert nest_shards.load_expanded(root / 'hisat2' / 'sample_24.dict') == \
+        nest_shards.load_expanded(root / 'native' / 'sample_24.dict'), '.dict'
+    for suffix in ('.count',):
         with (root / 'native' / ('sample_24' + suffix)).open('rb') as stream:
             expected = pickle.load(stream)
         with (root / 'hisat2' / ('sample_24' + suffix)).open('rb') as stream:

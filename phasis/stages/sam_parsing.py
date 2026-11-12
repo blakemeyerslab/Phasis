@@ -13,6 +13,7 @@ import phasis.runtime as rt
 from phasis.parallel import run_parallel_with_progress
 from phasis.cache import MemCache, compute_md5_str, default_memfile_path, sig_key, stage_signature
 from phasis.samtools import runtime_samtools_path
+from phasis import nest_shards
 
 
 def _resolve_mem_file() -> str:
@@ -413,6 +414,9 @@ def parserprocess(libs: Sequence[str], load_dicts: bool = False):
             prev_count_sig = (config[SAM_PARSING_SECTION].get(sig_key(count_path)) or "").strip()
             dict_hit = bool(dict_fp and prev_dict_fp == dict_fp and prev_dict_sig == input_sig)
             count_hit = bool(count_fp and prev_count_fp == count_fp and prev_count_sig == input_sig)
+            if dict_hit and count_hit and not nest_shards.index_is_complete(dict_path):
+                print(f"Per-chromosome tag files are missing for {dict_path}; parsing again")
+                dict_hit = False
             if dict_hit and count_hit:
                 print(f"Cache hit for parsed library: {alib.rpartition('.')[0]}")
                 compat_dirty = _record_compat_fp(config, "PARSED", dict_path, dict_fp) or compat_dirty
@@ -526,26 +530,20 @@ def samparser_streaming(aninput):
             tempdict1[anid].append((apos, taginfo))
             posdict[anid].append(apos)
 
-    nestdict = defaultdict(list)
-    for akey, aval in tempdict1.items():
-        tmp = defaultdict(list)
-        for p, tinfo in aval:
-            tmp[p].append(tinfo)
-        nestdict[akey].append(tmp)
-
     poscountdict = {
         akey: OrderedDict(sorted(Counter(aval).items(), key=lambda x: int(x[0])))
         for akey, aval in posdict.items()
     }
 
-    with open(outfile1, "wb") as f1:
-        pickle.dump(nestdict, f1, protocol=pickle.HIGHEST_PROTOCOL)
+    # One tag file per library-chromosome key plus a small index at outfile1.
+    # tempdict1 is emptied chromosome by chromosome while it is written.
+    nest_shards.write_nest_shards(outfile1, tempdict1)
     with open(outfile2, "wb") as f2:
         pickle.dump(poscountdict, f2, protocol=pickle.HIGHEST_PROTOCOL)
     with open(asum, "a") as fsum:
         fsum.write(f"Reads passed filters for {alib}:\t{reads_passed}\n")
 
-    del tempdict1, posdict, nestdict, poscountdict
+    del tempdict1, posdict, poscountdict
     gc.collect()
 
     return outfile1, outfile2
