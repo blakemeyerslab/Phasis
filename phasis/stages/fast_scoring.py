@@ -37,6 +37,21 @@ _SQRT2 = float(np.linalg.norm(np.ones(2)))
 _UINT64_MAX = int(np.iinfo(np.uint64).max)
 _f64 = np.float64
 
+
+def _round_like_numpy(x, scale):
+    """``round(np.float64(x), d)`` for ``scale == 10.0 ** d``, without the NumPy call.
+
+    NumPy rounds a float64 scalar as ``rint(x * 10**d) / 10**d``.  Python's
+    ``round`` to an integer is the same round-half-to-even ``rint``, so the
+    result is bit-identical while costing a fraction of the scalar NumPy call.
+    NaN and infinities are returned unchanged, as NumPy does.
+    """
+    try:
+        return _f64(round(float(x) * scale) / scale)
+    except (ValueError, OverflowError):
+        return _f64(x)
+
+
 # (X, M, n, N) -> rounded hypergeometric tail
 _HYPER_CACHE: dict = {}
 # (n_small, n_large) -> (pmf list, cdf list) for u = 0 .. n_small*n_large//2
@@ -187,7 +202,7 @@ def ranksum_rounded(abun_p_all, abun_np_all):
                 break
     if same:
         return 1.0
-    return round(_f64(mannwhitneyu_greater_pvalue(abun_p_all, abun_np_all)), 10)
+    return _round_like_numpy(mannwhitneyu_greater_pvalue(abun_p_all, abun_np_all), 1e10)
 
 
 # --------------------------------------------------------------------------- #
@@ -196,7 +211,7 @@ def ranksum_rounded(abun_p_all, abun_np_all):
 def stouffer2_rounded(p1, p2):
     """``round(combine_pvalues([p1, p2], method='stouffer').pvalue, 15)``."""
     stat = ((-_ndtri(p1)) + (-_ndtri(p2))) / _SQRT2
-    return round(_f64(_ndtr(-stat)), 15)
+    return _round_like_numpy(_ndtr(-stat), 1e15)
 
 
 # --------------------------------------------------------------------------- #

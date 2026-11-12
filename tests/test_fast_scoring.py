@@ -96,6 +96,26 @@ class StoufferAndHypergeomTests(unittest.TestCase):
                     self.assertTrue(_same_float(expected, got), msg=f"X={X} N={N} {expected!r} {got!r}")
 
 
+class RoundLikeNumpyTests(unittest.TestCase):
+    def test_matches_numpy_scalar_round_bit_for_bit(self):
+        rng = random.Random(7)
+        values = [0.0, 1.0, 0.5, 1e-10, 5e-11, 1.5e-10, 2.5e-10, 1e-15, 5e-16, 1 - 1e-10,
+                  1 - 5e-11, 0.12345678905, 0.12345678915, 0.123456789012345, 1e-300,
+                  float("nan"), float("inf")]
+        values += [rng.random() for _ in range(200000)]
+        values += [10 ** -rng.uniform(0, 20) for _ in range(200000)]
+        values += [(k + 0.5) / 1e10 for k in rng.sample(range(10 ** 9), 20000)]
+        values += [1 - 10 ** -rng.uniform(0, 17) for _ in range(50000)]
+        with np.errstate(all="ignore"):
+            for digits, scale in ((10, 1e10), (15, 1e15)):
+                for v in values:
+                    expected = round(np.float64(v), digits)
+                    got = fast_scoring._round_like_numpy(v, scale)
+                    self.assertTrue(_same_float(expected, got), msg=f"{v!r} d={digits} {expected!r} {got!r}")
+                    self.assertEqual(str(expected), str(got))
+                    self.assertIs(type(got), np.float64)
+
+
 def _random_cluster(rng, phase, n_sites, span, phased_fraction):
     """Random tags over both strands; some placed in a phased register."""
     start = 1000
