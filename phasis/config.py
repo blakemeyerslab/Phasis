@@ -34,6 +34,7 @@ class Phase2Config:
     legacy_classification: bool = False
     classification_overrides: Optional[str] = None
     locus_plot_mode: str = "clean"
+    locus_plots: bool = True
 
     # cache
     memFile: Optional[str] = None
@@ -58,6 +59,7 @@ class Phase2Config:
             legacy_classification=bool(getattr(rt, "legacy_classification", False)),
             classification_overrides=getattr(rt, "classification_overrides", None),
             locus_plot_mode=str(getattr(rt, "locus_plot_mode", "clean") or "clean"),
+            locus_plots=bool(getattr(rt, "locus_plots", True)),
             memFile=getattr(rt, "memFile", None),
             compress_intermediates=bool(getattr(rt, "compress_intermediates", True)),
         )

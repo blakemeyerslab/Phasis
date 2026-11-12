@@ -1020,7 +1020,8 @@ def finalize_and_write_results(
     # Keep PHAS-like material together so it can be reviewed independently.
     phas_like_dir = _join_outdir(outdir, f"{phase}_PHAS_like")
     os.makedirs(phas_like_dir, exist_ok=True)
-    os.makedirs(os.path.join(phas_like_dir, "locus_plots"), exist_ok=True)
+    if bool(getattr(rt, "locus_plots", True)):
+        os.makedirs(os.path.join(phas_like_dir, "locus_plots"), exist_ok=True)
     phas_like_calls_out = os.path.join(phas_like_dir, f"{phase}_PHAS_like_calls.tsv")
     phas_like_gff_out = os.path.join(phas_like_dir, f"{phase}_PHAS_like.gff")
     phas_like_evidence_out = os.path.join(

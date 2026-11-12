@@ -28,6 +28,7 @@ classification_overrides = None
 locus_plot_mode = None
 reference_id_mode = None
 compress_intermediates = True
+locus_plots = True
 samtools_path = None
 samtools_version = None
 parallel_lib_worker_cap = None
@@ -49,7 +50,7 @@ _RUNTIME_KEYS = [
     "feature_assembly_batch_rows",
     "plot_staging","plot_staging_mode","plot_staging_root",
     "legacy_classification","classification_overrides","locus_plot_mode",
-    "compress_intermediates","samtools_path","samtools_version","parallel_lib_worker_cap","fastq_chunk_unique_tags",
+    "compress_intermediates","locus_plots","samtools_path","samtools_version","parallel_lib_worker_cap","fastq_chunk_unique_tags",
 ]
 
 def _snapshot_path(run_dir_override: str | None = None) -> str:

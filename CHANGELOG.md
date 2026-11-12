@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased (development branches dev/v2.8.5 and dev/v2.8.6)
+
+Not yet released; the package version is still 2.8.4.
+
+### Changed
+
+- Per-position cluster scoring computes the same hypergeometric,
+  Mann-Whitney and Stouffer values without one SciPy call per test, and labels
+  phased positions inside the scoring window only. Scored-cluster files and all
+  result tables were identical to 2.8.4 on the README maize example for 21- and
+  24-nt runs. Set `Phasis_CLUSTER_SCORING_LEGACY_STATS=1` to use the former
+  code path.
+- Feature assembly reports its work while it runs: batches, input rows done
+  and total, clusters, feature rows written, rate and estimated time left. Set
+  `Phasis_FEATURE_ASSEMBLY_COUNT_ROWS=0` to skip counting the input rows.
+
+### Added
+
+- `--no_locus_plots` skips the individual PHAS and PHAS-like locus plots.
+  Result tables, GFF files and summary PDFs are still written.
+
+### Fixed
+
+- `phasis -cleanup` and `-cleanup_all` now also remove the gzip-compressed
+  Phase II tables (`*_PHAS_to_detect.tab.gz` and the other `.tab.gz` and
+  `.tsv.gz` intermediates), which are the default since intermediates are
+  compressed.
+
 ## 2.8.4 - 2026-10-27
 
 This release has passed macOS and Linux/Hive validation within the scope

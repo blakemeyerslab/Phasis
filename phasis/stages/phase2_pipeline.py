@@ -348,21 +348,24 @@ def run_phase2_pipeline(
         legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
         overrides_path=getattr(cfg, "classification_overrides", None),
     )
-    print("[INFO] Streaming PHAS rows required for locus plots.")
-    plot_clusters_data = st_locus_plots.load_plot_clusters_for_labeled_calls(
-        phas_output,
-        labeled,
-    )
-    st_locus_plots.write_individual_phas_locus_plots(
-        "GMM",
-        labeled,
-        plot_clusters_data,
-        job_outdir=cfg.outdir,
-        job_phase=cfg.phase,
-    )
-    # The locus-plot stage is the final consumer of the compact per-read table.
-    del plot_clusters_data
-    gc.collect()
+    if bool(getattr(cfg, "locus_plots", True)):
+        print("[INFO] Streaming PHAS rows required for locus plots.")
+        plot_clusters_data = st_locus_plots.load_plot_clusters_for_labeled_calls(
+            phas_output,
+            labeled,
+        )
+        st_locus_plots.write_individual_phas_locus_plots(
+            "GMM",
+            labeled,
+            plot_clusters_data,
+            job_outdir=cfg.outdir,
+            job_phase=cfg.phase,
+        )
+        # The locus-plot stage is the final consumer of the compact per-read table.
+        del plot_clusters_data
+        gc.collect()
+    else:
+        print("[INFO] Locus plots skipped (--no_locus_plots).")
     st_output.finalize_and_write_results(
         "GMM",
         labeled,

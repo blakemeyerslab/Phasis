@@ -156,6 +156,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="clean",
         help="Locus Howell panel mode: clean hides relaxed off-lattice trace points; debug preserves the full relaxed trace [default clean]",
     )
+    parser.add_argument(
+        "--no_locus_plots",
+        dest="locus_plots",
+        action="store_false",
+        default=True,
+        help=(
+            "Do not write the individual PHAS and PHAS-like locus plots; result "
+            "tables, GFF files and summary PDFs are still written"
+        ),
+    )
     compression_group = parser.add_mutually_exclusive_group()
     compression_group.add_argument(
         "--compress_intermediates",
@@ -365,6 +375,7 @@ def configure_runtime(args: argparse.Namespace) -> None:
     )
     rt.locus_plot_mode = str(args.locus_plot_mode or "clean").strip().lower()
     rt.compress_intermediates = bool(getattr(args, "compress_intermediates", True))
+    rt.locus_plots = bool(getattr(args, "locus_plots", True))
 
     # store optional flags too
     rt.cleanup = args.cleanup

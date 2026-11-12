@@ -8,6 +8,9 @@ import re
 import multiprocessing
 import tempfile
 import gc
+import gzip
+import threading
+import time
 import numpy as np
 import pandas as pd
 from phasis.progress import tqdm
@@ -319,6 +322,9 @@ class _FeatureAssemblyStreamStats:
         self.source_rows = 0
         self.cluster_groups = 0
         self.batch_count = 0
+        # Rows and clusters of the batches handed to the scheduler so far.
+        self.batched_rows = 0
+        self.batched_clusters = 0
         self.oversized_clusters = 0
         self.chromosomes: set[str] = set()
         # ``DataFrameGroupBy.indices`` (used by the legacy in-memory path)
@@ -517,6 +523,9 @@ def _iter_streamed_feature_assembly_batches(
             completed = batch_parts[0]
         else:
             completed = pd.concat(batch_parts, ignore_index=True)
+        # Each part is one whole cluster, so the part count is the cluster count.
+        stats.batched_clusters += len(batch_parts)
+        stats.batched_rows += batch_row_count
         batch_parts = []
         batch_row_count = 0
         stats.batch_count += 1
@@ -549,6 +558,81 @@ def _iter_streamed_feature_assembly_batches(
     completed = _finish_batch()
     if completed is not None:
         yield completed
+
+
+class _StreamRowCounter:
+    """Count the data rows of the streamed PHAS table in a background thread.
+
+    The count is only used to report how much feature-assembly work is left;
+    ``total`` stays ``None`` until the count is known or when it fails.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.total = None
+        self._thread = threading.Thread(target=self._run, args=(str(path),), daemon=True)
+        self._thread.start()
+
+    def _run(self, path: str) -> None:
+        try:
+            opener = gzip.open if path.endswith(".gz") else open
+            newlines = 0
+            last = b"\n"
+            with opener(path, "rb") as handle:
+                while True:
+                    block = handle.read(1 << 24)
+                    if not block:
+                        break
+                    newlines += block.count(b"\n")
+                    last = block[-1:]
+            if last != b"\n":
+                newlines += 1
+            self.total = max(0, newlines - 1)  # minus the header line
+        except Exception:
+            self.total = None
+
+    def join(self, timeout=None) -> None:
+        self._thread.join(timeout)
+
+
+def _feature_assembly_count_rows_enabled() -> bool:
+    raw = getenv("Phasis_FEATURE_ASSEMBLY_COUNT_ROWS")
+    return str(raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = int(max(0, round(float(seconds))))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
+def _feature_assembly_progress_line(
+    *,
+    batches: int,
+    rows_done: int,
+    rows_total,
+    clusters_done: int,
+    feature_rows: int,
+    workers: int,
+    elapsed: float,
+) -> str:
+    """One log line that states how much feature-assembly work is done."""
+    parts = [f"{int(batches):,} batches done"]
+    if rows_total:
+        share = 100.0 * min(int(rows_done), int(rows_total)) / int(rows_total)
+        parts.append(f"{int(rows_done):,} of {int(rows_total):,} input rows ({share:.1f}%)")
+    else:
+        parts.append(f"{int(rows_done):,} input rows")
+    parts.append(f"{int(clusters_done):,} clusters")
+    parts.append(f"{int(feature_rows):,} feature rows written")
+    parts.append(f"{int(workers)} concurrent batch(es)")
+    parts.append(f"elapsed {_format_duration(elapsed)}")
+    if elapsed > 0 and rows_done:
+        rate = float(rows_done) / float(elapsed)
+        parts.append(f"{rate:,.0f} input rows/s")
+        if rows_total and int(rows_total) > int(rows_done):
+            parts.append(f"about {_format_duration((int(rows_total) - int(rows_done)) / rate)} left")
+    return "[feature-assembly] " + " | ".join(parts)
 
 
 def _restore_streamed_feature_order(
@@ -889,6 +973,8 @@ def features_to_detection(clusters_data: pd.DataFrame | None = None,*,clusters_p
     batch_positions = None
     stream_source_path = None
     stream_stats = None
+    stream_row_counter = None
+    stream_started = time.monotonic()
     stream_reader_chunk_rows = None
     if streaming_input:
         stream_source_path = _resolve_feature_assembly_stream_source(
@@ -896,6 +982,8 @@ def features_to_detection(clusters_data: pd.DataFrame | None = None,*,clusters_p
             required_cols=required_cols,
         )
         stream_stats = _FeatureAssemblyStreamStats()
+        if _feature_assembly_count_rows_enabled():
+            stream_row_counter = _StreamRowCounter(stream_source_path)
         stream_reader_chunk_rows = _feature_assembly_stream_chunk_rows()
         # One staging window is no larger than the configured worker cap.  It
         # gives later windows all available workers without ever retaining the
@@ -1061,6 +1149,23 @@ def features_to_detection(clusters_data: pd.DataFrame | None = None,*,clusters_p
                             **window_parallel_kwargs,
                         )
                         stream_progress.update(len(stream_window))
+                        print(
+                            "\n"
+                            + _feature_assembly_progress_line(
+                                batches=stream_stats.batch_count,
+                                rows_done=stream_stats.batched_rows,
+                                rows_total=(
+                                    stream_row_counter.total
+                                    if stream_row_counter is not None
+                                    else None
+                                ),
+                                clusters_done=stream_stats.batched_clusters,
+                                feature_rows=stream_writer.streamed_rows,
+                                workers=window_start_cap,
+                                elapsed=time.monotonic() - stream_started,
+                            ),
+                            flush=True,
+                        )
                         stream_worker_cap = min(
                             int(feature_parallel_kwargs["max_worker_cap"]),
                             _coerce_positive_int(
@@ -1119,6 +1224,14 @@ def features_to_detection(clusters_data: pd.DataFrame | None = None,*,clusters_p
                 f"  - Streamed {stream_stats.source_rows:,} PHAS rows across "
                 f"{stream_stats.cluster_groups:,} clusters into "
                 f"{stream_stats.batch_count:,} feature batches."
+            )
+            stream_elapsed = time.monotonic() - stream_started
+            print(
+                "  - Feature assembly work: "
+                f"{stream_stats.batched_rows:,} input rows -> "
+                f"{stream_writer.streamed_rows if stream_writer is not None else 0:,} feature rows in "
+                f"{_format_duration(stream_elapsed)} "
+                f"({stream_stats.batched_rows / max(stream_elapsed, 1e-9):,.0f} input rows/s)."
             )
             if stream_stats.oversized_clusters:
                 print(
