@@ -1326,10 +1326,12 @@ def _build_pos_abun_exact_phase(df: pd.DataFrame, seq_start: int, seq_end: int, 
     df_ph = df.loc[pd.to_numeric(df['len'], errors='coerce') == ph]
     if df_ph.empty:
         return d
-    for _, row in df_ph.iterrows():
-        pos = int(row['pos'])
+    # Same rows, order and arithmetic as iterating the frame row by row,
+    # without building a Series per row.
+    for pos, abun in zip(df_ph['pos'].tolist(), df_ph['abun'].tolist()):
+        pos = int(pos)
         if seq_start <= pos <= seq_end:
-            d[pos] = d.get(pos, 0.0) + float(row['abun'])
+            d[pos] = d.get(pos, 0.0) + float(abun)
     return d
 
 
@@ -1462,6 +1464,280 @@ def _score_window_registers(window_positions, pos_abun, win_start, win_end, phas
     }
 
 
+# ---------------------------------------------------------------------------
+# Array form of the Howell register scans
+#
+# The scans above walk every window of a cluster strand and, inside each
+# window, every register and cycle in Python.  The array form computes the
+# same numbers for all windows and registers of a strand at once.
+#
+# It relies on three facts about the scan rules:
+#   * A window is `num_cycles` whole cycles long, so the expected positions of
+#     a register depend only on the coordinate of its first position.
+#   * With phase > 2, the +-1 neighbourhoods of two expected positions never
+#     overlap.  A cycle therefore never sees a position used or quarantined by
+#     another cycle, and each cycle's contribution depends only on the three
+#     coordinates around its expected position.  The one exception is the
+#     window edge: the left neighbour of the first coordinate and the right
+#     neighbour of the last coordinate lie outside the window.
+#   * When every abundance is a non-negative whole number, the sums are exact
+#     in any order.
+# The array form is used only when these hold; otherwise the Python loops run.
+# Logarithms are taken one value at a time with the same call as the loops,
+# so the scores are the same floating point numbers.
+# ---------------------------------------------------------------------------
+_HOWELL_ARRAY_CHUNK_WINDOWS = 8192
+_HOWELL_ARRAY_MAX_SPAN = 20_000_000
+
+
+def _howell_array_scan_enabled() -> bool:
+    raw = getenv("Phasis_HOWELL_ARRAY_SCAN")
+    return str(raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _howell_scalar_logs(values: np.ndarray) -> np.ndarray:
+    """np.log of each value, taken one value at a time as the Python loops do."""
+    if values.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    unique, inverse = np.unique(values, return_inverse=True)
+    logs = np.array([np.log(v) for v in unique.tolist()], dtype=np.float64)
+    return logs[inverse.reshape(-1)].reshape(values.shape)
+
+
+def _howell_scores_from_arrays(in_sum: np.ndarray, eff_total: np.ndarray, n_filled: np.ndarray, num_cycles: int):
+    """Array form of _compute_howell_score_from_register: (scores, out_of_phase)."""
+    out_of_phase = np.maximum(0.0, eff_total - in_sum)
+    scores = np.zeros(in_sum.shape, dtype=np.float64)
+    valid = (in_sum > 0.0) & (n_filled > 3)
+    if valid.any():
+        log_arg = 1.0 + 10.0 * (in_sum[valid] / (1.0 + out_of_phase[valid]))
+        usable = (log_arg > 0.0) & (log_arg == log_arg)
+        scale = np.maximum(np.minimum(n_filled[valid], int(num_cycles)) - 2, 0)
+        values = np.zeros(log_arg.shape, dtype=np.float64)
+        if usable.any():
+            values[usable] = scale[usable] * _howell_scalar_logs(log_arg[usable])
+        scores[valid] = values
+    return scores, out_of_phase
+
+
+class _HowellRegisterArrays:
+    """Per-coordinate cycle sums of one cluster strand, for windows starting in [min_start, max_start]."""
+
+    __slots__ = (
+        "ph", "win_size", "num_cycles", "base", "cum_abun", "cum_present",
+        "exact_sum", "exact_filled", "relaxed_sum", "relaxed_filled", "relaxed_ignored",
+        "first_fix_sum", "first_fix_filled", "first_fix_ignored",
+        "last_fix_sum", "last_fix_filled", "last_fix_ignored",
+    )
+
+    @classmethod
+    def build(cls, pos_abun, phase, win_size, min_start, max_start, *, relaxed=True):
+        """Return the arrays, or None when the array form does not apply to this input."""
+        if not _howell_array_scan_enabled() or not pos_abun:
+            return None
+        ph = int(phase)
+        win_size = int(win_size)
+        num_cycles = win_size // ph if ph > 0 else 0
+        if ph < 3 or num_cycles < 4 or num_cycles * ph != win_size:
+            return None
+        min_start = int(min_start)
+        max_start = int(max_start)
+        if max_start < min_start:
+            return None
+        # Coordinates min_start-1 .. max_start+win_size, so every window has a
+        # coordinate on each side of it.
+        base = min_start - 1
+        size = max_start - min_start + win_size + 2
+        if size > _HOWELL_ARRAY_MAX_SPAN:
+            return None
+
+        try:
+            coords = np.fromiter(pos_abun.keys(), dtype=np.int64, count=len(pos_abun))
+            values = np.fromiter(pos_abun.values(), dtype=np.float64, count=len(pos_abun))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not np.all(np.isfinite(values)) or np.any(values < 0.0) or np.any(values != np.floor(values)):
+            return None
+        if float(values.sum()) >= 2.0 ** 52:
+            return None
+
+        inside = (coords >= base) & (coords < base + size)
+        abun = np.zeros(size, dtype=np.float64)
+        present = np.zeros(size, dtype=bool)
+        abun[coords[inside] - base] = values[inside]
+        present[coords[inside] - base] = True
+
+        self = cls()
+        self.ph = ph
+        self.win_size = win_size
+        self.num_cycles = num_cycles
+        self.base = base
+        self.cum_abun = np.concatenate(([0.0], np.cumsum(abun)))
+        self.cum_present = np.concatenate(([0], np.cumsum(present, dtype=np.int64)))
+
+        def lattice(per_coordinate):
+            total = per_coordinate.copy()
+            for cycle in range(1, num_cycles):
+                shift = cycle * ph
+                total[: size - shift] += per_coordinate[shift:]
+            return total
+
+        present_int = present.astype(np.int64)
+        self.exact_sum = lattice(abun)
+        self.exact_filled = lattice(present_int)
+        if not relaxed:
+            return self
+
+        left = np.zeros(size, dtype=np.float64)
+        left[1:] = abun[:-1]
+        right = np.zeros(size, dtype=np.float64)
+        right[:-1] = abun[1:]
+        has_left = np.zeros(size, dtype=bool)
+        has_left[1:] = present[:-1]
+        has_right = np.zeros(size, dtype=bool)
+        has_right[:-1] = present[1:]
+
+        # A cycle with both neighbours inside the window: the exact position
+        # wins and quarantines its neighbours; otherwise the larger neighbour
+        # (left on a tie) is taken and the other one is quarantined.
+        cyc_sum = np.where(present, abun, np.maximum(left, right))
+        cyc_filled = (present | has_left | has_right).astype(np.int64)
+        cyc_ignored = np.where(present, left + right, np.minimum(left, right))
+        self.relaxed_sum = lattice(cyc_sum)
+        self.relaxed_filled = lattice(cyc_filled)
+        self.relaxed_ignored = lattice(cyc_ignored)
+
+        # First coordinate of a window: its left neighbour is outside the window.
+        self.first_fix_sum = np.where(present, abun, right) - cyc_sum
+        self.first_fix_filled = (present | has_right).astype(np.int64) - cyc_filled
+        self.first_fix_ignored = np.where(present, right, 0.0) - cyc_ignored
+        # Last coordinate of a window: its right neighbour is outside the window.
+        self.last_fix_sum = np.where(present, abun, left) - cyc_sum
+        self.last_fix_filled = (present | has_left).astype(np.int64) - cyc_filled
+        self.last_fix_ignored = np.where(present, left, 0.0) - cyc_ignored
+        return self
+
+    def window_basics(self, win_starts: np.ndarray):
+        """(first index, last index, total abundance, number of positions) per window."""
+        first = win_starts - self.base
+        last = first + self.win_size - 1
+        total = self.cum_abun[last + 1] - self.cum_abun[first]
+        n_positions = self.cum_present[last + 1] - self.cum_present[first]
+        return first, last, total, n_positions
+
+    def exact_registers(self, first, *, forward):
+        """(in-phase sum, filled cycles) per window and register, exact positions only."""
+        index = first[:, None] + np.arange(self.ph)[None, :]
+        in_sum = self.exact_sum[index]
+        filled = self.exact_filled[index]
+        if not forward:
+            in_sum = in_sum[:, ::-1]
+            filled = filled[:, ::-1]
+        return in_sum, filled
+
+    def relaxed_registers(self, first, last, *, forward):
+        """(in-phase sum, filled cycles, quarantined abundance) per window and register, +-1 wobble."""
+        index = first[:, None] + np.arange(self.ph)[None, :]
+        in_sum = self.relaxed_sum[index]
+        filled = self.relaxed_filled[index]
+        ignored = self.relaxed_ignored[index]
+        in_sum[:, 0] += self.first_fix_sum[first]
+        filled[:, 0] += self.first_fix_filled[first]
+        ignored[:, 0] += self.first_fix_ignored[first]
+        in_sum[:, -1] += self.last_fix_sum[last]
+        filled[:, -1] += self.last_fix_filled[last]
+        ignored[:, -1] += self.last_fix_ignored[last]
+        if not forward:
+            in_sum = in_sum[:, ::-1]
+            filled = filled[:, ::-1]
+            ignored = ignored[:, ::-1]
+        return in_sum, filled, ignored
+
+
+def _howell_window_scan_arrays(
+    pos_abun,
+    phase,
+    win_size,
+    win_starts,
+    *,
+    forward=True,
+    relaxed=True,
+    exact=True,
+    strict=False,
+    register_scores=False,
+):
+    """
+    Score the windows starting at `win_starts` (a sequence of coordinates).
+
+    Returns a dict of per-window arrays, or None when the array form does not
+    apply and the caller must use the Python loops:
+      n_positions                       positions inside the window
+      score, best_register, best_in_phase_sum, best_out_of_phase, best_filled
+                                        (relaxed=True)  as _score_window_registers
+      exact_score, exact_best_register  (exact=True)    as _score_window_registers(exact_only=True)
+      strict_score                      (strict=True)   as _best_sliding_window_score_generic_strict
+      register_scores, exact_register_scores
+                                        (register_scores=True) one row of scores per window
+    """
+    starts = np.asarray(win_starts, dtype=np.int64).reshape(-1)
+    if starts.size == 0:
+        return None
+    arrays = _HowellRegisterArrays.build(
+        pos_abun, phase, win_size, int(starts.min()), int(starts.max()), relaxed=relaxed
+    )
+    if arrays is None:
+        return None
+
+    num_cycles = arrays.num_cycles
+    pieces: dict[str, list] = {}
+
+    def keep(name, values):
+        pieces.setdefault(name, []).append(values)
+
+    for begin in range(0, starts.size, _HOWELL_ARRAY_CHUNK_WINDOWS):
+        chunk = starts[begin:begin + _HOWELL_ARRAY_CHUNK_WINDOWS]
+        rows = np.arange(chunk.size)
+        first, last, total, n_positions = arrays.window_basics(chunk)
+        keep("n_positions", n_positions)
+
+        if relaxed:
+            in_sum, filled, ignored = arrays.relaxed_registers(first, last, forward=forward)
+            scores, out_of_phase = _howell_scores_from_arrays(
+                in_sum, total[:, None] - ignored, filled, num_cycles
+            )
+            best = np.argmax(scores, axis=1)
+            keep("score", scores[rows, best])
+            keep("best_register", best)
+            keep("best_in_phase_sum", in_sum[rows, best])
+            keep("best_out_of_phase", out_of_phase[rows, best])
+            keep("best_filled", filled[rows, best])
+            if register_scores:
+                keep("register_scores", scores)
+
+        if exact or strict:
+            in_sum, filled = arrays.exact_registers(first, forward=forward)
+            if exact:
+                scores, _out = _howell_scores_from_arrays(
+                    in_sum, np.broadcast_to(total[:, None], in_sum.shape), filled, num_cycles
+                )
+                best = np.argmax(scores, axis=1)
+                keep("exact_score", scores[rows, best])
+                keep("exact_best_register", best)
+                if register_scores:
+                    keep("exact_register_scores", scores)
+            if strict:
+                # The strict scan keeps the register with the largest in-phase
+                # sum (the first one on a tie) and scores only that register.
+                best = np.argmax(in_sum, axis=1)
+                best_sum = in_sum[rows, best]
+                best_filled = np.where(best_sum > 0.0, filled[rows, best], 0)
+                best_total = np.where(best_sum > 0.0, total, 0.0)
+                strict_scores, _out = _howell_scores_from_arrays(best_sum, best_total, best_filled, num_cycles)
+                keep("strict_score", strict_scores)
+
+    return {name: np.concatenate(parts) for name, parts in pieces.items()}
+
+
 def _windows_overlap(start_a, end_a, start_b, end_b) -> bool:
     return int(max(start_a, start_b)) <= int(min(end_a, end_b))
 
@@ -1525,6 +1801,76 @@ def _exact_register_origin(
         return None
 
 
+def _candidate_windows_from_arrays(scan, pos_abun, phase_local, win_size, lower_bound, forward):
+    """Build the candidate list and peak detail of _enumerate_relaxed_candidate_windows from a scan."""
+    strand_code = "w" if forward else "c"
+    candidate_windows = []
+    columns = zip(
+        (scan["n_positions"] > 0).tolist(),
+        scan["score"].tolist(),
+        scan["best_register"].tolist(),
+        scan["exact_score"].tolist(),
+        scan["exact_best_register"].tolist(),
+    )
+    for offset, (occupied, score, best_register, exact_score, exact_best_register) in enumerate(columns):
+        win_start = lower_bound + offset
+        win_end = win_start + win_size - 1
+        if not occupied:
+            best_register = None
+            exact_best_register = None
+        candidate_windows.append(
+            {
+                "strand": strand_code,
+                "anchor_position": int(win_start if forward else win_end),
+                "window_start": int(win_start),
+                "window_end": int(win_end),
+                "score": float(score),
+                "best_register": best_register,
+                "exact_score": float(exact_score),
+                "exact_best_register": exact_best_register,
+                "exact_frame": _canonical_exact_frame(
+                    window_start=win_start,
+                    window_end=win_end,
+                    exact_best_register=exact_best_register,
+                    strand_code=strand_code,
+                    phase=phase_local,
+                ),
+                "exact_register_position": _exact_register_origin(
+                    window_start=win_start,
+                    window_end=win_end,
+                    exact_best_register=exact_best_register,
+                    strand_code=strand_code,
+                ),
+            }
+        )
+
+    # The first window with the highest relaxed score, as the loop keeps it.
+    candidate = candidate_windows[int(np.argmax(scan["score"]))]
+    peak = _howell_window_scan_arrays(
+        pos_abun,
+        phase_local,
+        win_size,
+        [candidate["window_start"]],
+        forward=forward,
+        register_scores=True,
+    )
+    best_detail = {
+        "strand": strand_code,
+        "anchor_position": candidate["anchor_position"],
+        "window_start": candidate["window_start"],
+        "window_end": candidate["window_end"],
+        "score": candidate["score"],
+        "best_register": candidate["best_register"],
+        "register_scores": peak["register_scores"][0].tolist(),
+        "exact_score": candidate["exact_score"],
+        "exact_best_register": candidate["exact_best_register"],
+        "exact_register_scores": peak["exact_register_scores"][0].tolist(),
+        "exact_frame": candidate["exact_frame"],
+        "exact_register_position": candidate["exact_register_position"],
+    }
+    return candidate_windows, best_detail
+
+
 def _enumerate_relaxed_candidate_windows(
     pos_abun,
     phase,
@@ -1544,6 +1890,16 @@ def _enumerate_relaxed_candidate_windows(
         seq_start=seq_start,
         seq_end=seq_end,
     )
+
+    scan = _howell_window_scan_arrays(
+        pos_abun,
+        int(phase),
+        win_size,
+        np.arange(lower_bound, upper_bound + 1, dtype=np.int64),
+        forward=forward,
+    )
+    if scan is not None:
+        return _candidate_windows_from_arrays(scan, pos_abun, int(phase), int(win_size), lower_bound, forward)
 
     best_score = -float("inf")
     best_detail = None
@@ -1776,6 +2132,19 @@ def _best_sliding_window_score_generic(
             int(best_detail["window_end"]),
             detail,
         )
+
+    scan = _howell_window_scan_arrays(
+        pos_abun,
+        int(phase),
+        win_size,
+        np.arange(lower_bound, upper_bound + 1, dtype=np.int64),
+        forward=forward,
+        exact=False,
+    )
+    if scan is not None:
+        best_index = int(np.argmax(scan["score"]))
+        best_start = lower_bound + best_index
+        return float(scan["score"][best_index]), best_start, best_start + win_size - 1
 
     best_score = -float("inf")
     best_window = (None, None)
@@ -2068,6 +2437,41 @@ def _enumerate_relaxed_trace_for_strand(pos_abun, phase, win_size, *, forward=Tr
         anchors = positions
     else:
         anchors = list(reversed(positions))
+
+    scan = _howell_window_scan_arrays(
+        pos_abun,
+        int(phase),
+        int(win_size),
+        [int(a) if forward else int(a) - int(win_size) + 1 for a in anchors],
+        forward=forward,
+        exact=False,
+    )
+    if scan is not None:
+        trace = []
+        columns = zip(
+            anchors,
+            (scan["n_positions"] > 0).tolist(),
+            scan["score"].tolist(),
+            scan["best_in_phase_sum"].tolist(),
+            scan["best_out_of_phase"].tolist(),
+            scan["best_filled"].tolist(),
+            scan["best_register"].tolist(),
+        )
+        for anchor, occupied, score, in_phase_sum, out_of_phase, n_filled, best_reg in columns:
+            win_start = int(anchor) if forward else int(anchor) - int(win_size) + 1
+            trace.append(
+                {
+                    "anchor_position": int(anchor),
+                    "window_start": int(win_start),
+                    "window_end": int(win_start) + int(win_size) - 1,
+                    "score": float(score),
+                    "in_phase_abund": float(in_phase_sum) if occupied else 0.0,
+                    "out_phase_abund": float(out_of_phase) if occupied else 0.0,
+                    "occupied_cycles": int(n_filled) if occupied else 0,
+                    "best_register": best_reg if occupied else None,
+                }
+            )
+        return trace
 
     trace = []
     for anchor in anchors:
@@ -4806,6 +5210,23 @@ def _best_sliding_window_score_generic_strict(pos_abun, phase, win_size, seq_sta
     if upper_bound < lower_bound:
         lower_bound = positions[0]
         upper_bound = lower_bound
+
+    scan = _howell_window_scan_arrays(
+        pos_abun,
+        int(phase),
+        win_size,
+        np.arange(lower_bound, upper_bound + 1, dtype=np.int64),
+        forward=forward,
+        relaxed=False,
+        exact=False,
+        strict=True,
+    )
+    if scan is not None:
+        best_index = int(np.argmax(scan["strict_score"]))
+        best_value = scan["strict_score"][best_index]
+        best_start = lower_bound + best_index
+        # The loop returns a NumPy scalar for a scored window and 0.0 otherwise.
+        return (best_value if best_value > 0.0 else 0.0), best_start, best_start + win_size - 1
 
     best_score = -float("inf")
     best_window = (None, None)

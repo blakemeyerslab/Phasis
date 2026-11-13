@@ -275,6 +275,11 @@ the feature rows written, the rate and the estimated time left. The total is
 counted in the background; set `Phasis_FEATURE_ASSEMBLY_COUNT_ROWS=0` to skip
 that count, in which case the share and the time left are not shown.
 
+The Howell phasing-score scans of this step use array operations when the
+abundances are non-negative whole numbers (runs without `-norm`). Set
+`Phasis_HOWELL_ARRAY_SCAN=0` to use the former Python loops, which give the
+same feature rows.
+
 ### Plot staging
 
 Large runs can stage individual locus plots through local scratch instead of

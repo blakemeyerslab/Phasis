@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (development branches dev/v2.8.5 and dev/v2.8.6)
+## Unreleased (development branches dev/v2.8.5 to dev/v2.8.7)
 
 Not yet released; the package version is still 2.8.4.
 
@@ -22,6 +22,13 @@ Not yet released; the package version is still 2.8.4.
 - The Howell phasing-score scans in feature assembly build each window's
   position set and total once instead of once per register. Feature rows are
   unchanged and the step runs about twice as fast on 24-nt data.
+- The Howell phasing-score scans in feature assembly score all windows and
+  registers of a cluster strand with array operations instead of Python loops
+  over windows, registers and cycles. The array form is used when the
+  abundances are non-negative whole numbers, which is the case without `-norm`;
+  other input keeps the former loops. Feature rows are unchanged and feature
+  assembly ran 5 to 9 times as fast on maize 21- and 24-nt test batches. Set
+  `Phasis_HOWELL_ARRAY_SCAN=0` to use the loops.
 - Feature assembly reports its work while it runs: batches, input rows done
   and total, clusters, feature rows written, rate and estimated time left. Set
   `Phasis_FEATURE_ASSEMBLY_COUNT_ROWS=0` to skip counting the input rows.
