@@ -184,6 +184,61 @@ def _resolve_maxtasksperchild(
     return 16 if method == "spawn" else 8
 
 
+def _memory_aware_ramp_enabled() -> bool:
+    raw = getenv("Phasis_MEMORY_AWARE_RAMP")
+    return str(raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _pool_peak_rss_bytes(pool) -> int | None:
+    """Largest peak resident memory among the live workers of a pool (Linux /proc), else None."""
+    peak = 0
+    try:
+        workers = list(getattr(pool, "_pool", None) or [])
+    except Exception:
+        return None
+    for worker in workers:
+        try:
+            with open(f"/proc/{int(worker.pid)}/status", encoding="ascii", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("VmHWM:"):
+                        peak = max(peak, int(line.split()[1]) * 1024)
+                        break
+        except (OSError, ValueError, TypeError, AttributeError, IndexError):
+            continue
+    return peak or None
+
+
+def _available_memory_bytes() -> int | None:
+    """Memory the kernel reports as available without swapping (Linux), else None."""
+    try:
+        with open("/proc/meminfo", encoding="ascii", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def memory_supported_workers(peak_worker_rss, *, share: float = 0.5) -> int | None:
+    """
+    Number of workers whose measured peak memory fits in `share` of the
+    available memory, or None when either value is unknown.  A start with few
+    workers measures what one worker needs; this turns that measurement into
+    the largest worker count that is known to fit, instead of doubling blindly.
+    """
+    if not _memory_aware_ramp_enabled():
+        return None
+    try:
+        peak = int(peak_worker_rss or 0)
+    except (TypeError, ValueError):
+        return None
+    available = _available_memory_bytes()
+    if peak <= 0 or not available:
+        return None
+    return int(available * float(share) // peak)
+
+
 def _ordered_buffered_results(buffered_results):
     return [buffered_results[key] for key in sorted(buffered_results.keys())]
 
@@ -238,6 +293,7 @@ def run_parallel_with_progress(
     recovery_growth_steps=None,
     show_progress=True,
     return_state=False,
+    memory_aware_growth=False,
 ):
 
     """
@@ -261,6 +317,11 @@ def run_parallel_with_progress(
       * Keep `chunksize=1` to avoid big internal queues in the pool.
       * ``show_progress=False`` suppresses an inner progress bar when a caller
         already reports an outer streaming stage.
+      * ``memory_aware_growth=True`` lets a caller that starts with few
+        workers go to its full worker count after one clean slice, when the
+        measured peak memory of a worker shows that the full count fits in
+        half of the available memory.  Otherwise the usual stepwise recovery
+        applies.
       * ``return_state=True`` additionally returns the final effective worker
         and task-window caps, allowing a bounded streaming caller to carry a
         reduction forward into its next source window.
@@ -270,6 +331,7 @@ def run_parallel_with_progress(
         "worker_cap": 1,
         "chunk_size": 1,
         "had_failures": False,
+        "peak_worker_rss": None,
     }
     if n_data == 0:
         return ([], state) if return_state else []
@@ -325,6 +387,7 @@ def run_parallel_with_progress(
     keep_results = (on_result is None) or return_results
     results = [] if keep_results else None
     had_failures = False
+    peak_worker_rss = None
 
     i = 0
     with tqdm(total=n_data, desc=desc, unit=unit, disable=not bool(show_progress)) as pbar:
@@ -337,7 +400,28 @@ def run_parallel_with_progress(
                     success_slices_since_failure = 0
                     items_since_failure = 0
                 else:
-                    if (
+                    # A clean first slice measured what one worker needs.  When
+                    # the full worker count is known to fit in half of the
+                    # available memory, go there directly.
+                    full_worker_target = min(ncores, max_chunk_size, resolved_max_worker_cap) or 1
+                    supported_workers = (
+                        memory_supported_workers(peak_worker_rss)
+                        if (memory_aware_growth and not had_failures and success_slices_since_failure >= 1)
+                        else None
+                    )
+                    if supported_workers is not None and supported_workers >= full_worker_target:
+                        if chunk_size != max_chunk_size or nworkers != full_worker_target:
+                            print(
+                                "[INFO] One worker used at most "
+                                f"{peak_worker_rss / 1e9:.1f} GB; {full_worker_target} workers fit in the "
+                                f"available memory. Expanding to chunk_size={max_chunk_size}, "
+                                f"workers={full_worker_target}."
+                            )
+                        chunk_size = max_chunk_size
+                        nworkers = full_worker_target
+                        success_slices_since_failure = 0
+                        items_since_failure = 0
+                    elif (
                         success_slices_since_failure >= max(1, int(recovery_success_slices))
                         and items_since_failure >= recovery_progress_items
                     ):
@@ -425,6 +509,9 @@ def run_parallel_with_progress(
 
                             # If we reached here without exceptions, the chunk is done
                             slice_completed = True
+                            slice_peak_rss = _pool_peak_rss_bytes(pool)
+                            if slice_peak_rss:
+                                peak_worker_rss = max(int(peak_worker_rss or 0), slice_peak_rss)
 
                         _commit_buffered_results(
                             _ordered_buffered_results(buffered_results),
@@ -502,6 +589,7 @@ def run_parallel_with_progress(
         "worker_cap": int(max(1, nworkers)),
         "chunk_size": int(max(1, chunk_size)),
         "had_failures": bool(had_failures),
+        "peak_worker_rss": peak_worker_rss,
     }
     result = results if keep_results else None
     return (result, state) if return_state else result

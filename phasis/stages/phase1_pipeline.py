@@ -16,11 +16,11 @@ Design constraints:
 - minimal behavior drift: preserves legacy's execution order and runtime log file
 """
 
-import datetime
 import os
 from typing import Any, Optional, Sequence
 
 import phasis.runtime as rt
+from phasis import stage_timer
 
 from phasis.stages import cluster_build as st_cluster_build
 from phasis.stages import cluster_scoring as st_cluster_scoring
@@ -55,8 +55,9 @@ def run_phase1_pipeline(
     # Preserve legacy behavior: print header + write runtime log
     print("######            Starting Phase I           #########")
 
-    runLog = "runtime_%s" % datetime.datetime.now().strftime("%m_%d_%H_%M")
-    fh_run = open(runLog, "w")
+    # The runtime file holds the index time and one line per finished stage.
+    runLog = stage_timer.open_run_log()
+    fh_run = open(runLog, "a")
 
     clusterFilePaths = None
     try:
@@ -64,32 +65,39 @@ def run_phase1_pipeline(
 
         # Create folders, build/reuse index
         clustfolder = st_folder_setup.createfolders(wd)
-        genoIndex = st_indexing.getindex(fh_run)
+        with stage_timer.stage("Index and reference"):
+            genoIndex = st_indexing.getindex(fh_run)
+            fh_run.flush()
 
         # Preprocess → map → parse
-        libs_processed = st_library_processing.libraryprocess(libs)
+        with stage_timer.stage("Library processing"):
+            libs_processed = st_library_processing.libraryprocess(libs)
 
         ncores_local = getattr(rt, "ncores", None)
         if ncores_local is None:
             ncores_local = getattr(rt, "cores", None)
 
-        _ = st_mapping.mapprocess(
-            libs_processed,
-            genoIndex,
-            ncores_local=ncores_local,
-        )
-        libs_nestdict, libs_poscountdict = st_sam_parsing.parserprocess(libs_processed)
+        with stage_timer.stage("Mapping"):
+            _ = st_mapping.mapprocess(
+                libs_processed,
+                genoIndex,
+                ncores_local=ncores_local,
+            )
+        with stage_timer.stage("Parsing alignments"):
+            libs_nestdict, libs_poscountdict = st_sam_parsing.parserprocess(libs_processed)
 
         # Find clusters
-        libs_clustdicts = st_cluster_build.clusterprocess(libs_poscountdict, clustfolder)
+        with stage_timer.stage("Finding clusters"):
+            libs_clustdicts = st_cluster_build.clusterprocess(libs_poscountdict, clustfolder)
 
         # Score (bucketed hashing will skip when cached)
-        clusterFilePaths = st_cluster_scoring.scoringprocess(
-            libs=libs_processed,
-            libs_clustdicts=libs_clustdicts,
-            libs_nestdict=libs_nestdict,
-            clustfolder=clustfolder,
-        )
+        with stage_timer.stage("Cluster scoring"):
+            clusterFilePaths = st_cluster_scoring.scoringprocess(
+                libs=libs_processed,
+                libs_clustdicts=libs_clustdicts,
+                libs_nestdict=libs_nestdict,
+                clustfolder=clustfolder,
+            )
     finally:
         try:
             fh_run.close()

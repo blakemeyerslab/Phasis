@@ -30,6 +30,7 @@ import pandas as pd
 
 import phasis.runtime as rt
 import phasis.ids as ids
+from phasis import stage_timer
 from phasis.cache import artifact_exists, phase2_basename, resolve_artifact_path
 from phasis.config import Phase2Config
 from phasis.state import set_win_score_lookup
@@ -212,52 +213,59 @@ def run_phase2_pipeline(
     if cfg is None:
         cfg = Phase2Config.from_runtime()
 
+    # A class-only run has no Phase I, so it opens the runtime file here.
+    stage_timer.ensure_run_log()
+
     # If running 'class' only, take explicit cluster files or infer them from -libs.
     if cfg.steps == "class":
         clusterFilePaths = infer_class_cluster_files(cfg)
 
     # 1) Aggregate (writes processed_clusters.tab; returns dataframe)
-    agg_df = st_cluster_aggregation.aggregate_and_write_processed_clusters(
-        clusterFilePaths, memFile=cfg.memFile
-    )
-
-    # Build "allClusters" baseline from aggregator result or file fallback
-    if isinstance(agg_df, pd.DataFrame) and not agg_df.empty:
-        allClusters = agg_df
-    else:
-        proc_path = phase2_basename("processed_clusters.tab")
-        allClusters = (
-            pd.read_csv(resolve_artifact_path(proc_path) or proc_path, sep="\t")
-            if artifact_exists(proc_path)
-            else pd.DataFrame()
+    with stage_timer.stage("Aggregation: processed clusters"):
+        agg_df = st_cluster_aggregation.aggregate_and_write_processed_clusters(
+            clusterFilePaths, memFile=cfg.memFile
         )
 
-    # Normalize for downstream grouping
-    allClusters = _normalize_cluster_df(allClusters, is_concat=cfg.concat_libs)
-    # ``allClusters`` is the sole remaining consumer of the aggregator return
-    # value.  Drop this extra alias before Phase II builds additional tables.
-    del agg_df
-    gc.collect()
+    # Build "allClusters" baseline from aggregator result or file fallback
+    with stage_timer.stage("Aggregation: load processed clusters"):
+        if isinstance(agg_df, pd.DataFrame) and not agg_df.empty:
+            allClusters = agg_df
+        else:
+            proc_path = phase2_basename("processed_clusters.tab")
+            allClusters = (
+                pd.read_csv(resolve_artifact_path(proc_path) or proc_path, sep="\t")
+                if artifact_exists(proc_path)
+                else pd.DataFrame()
+            )
+
+        # Normalize for downstream grouping
+        allClusters = _normalize_cluster_df(allClusters, is_concat=cfg.concat_libs)
+        # ``allClusters`` is the sole remaining consumer of the aggregator return
+        # value.  Drop this extra alias before Phase II builds additional tables.
+        del agg_df
+        gc.collect()
 
     # 2) ALWAYS emit loci table BEFORE merge (guarantees the input exists for merge)
-    loci_table_df = st_cmerge.loci_table_from_clusters(allClusters)
-    loci_table_path = phase2_basename("candidate.loci_table.tab")
+    with stage_timer.stage("Aggregation: loci table and candidate merge"):
+        loci_table_df = st_cmerge.loci_table_from_clusters(allClusters)
+        loci_table_path = phase2_basename("candidate.loci_table.tab")
 
-    # 3) Merge candidates (concat only). Non-concat continues with the pre-merge representation.
-    merged_out_path = phase2_basename("merged_candidates.tab")
-    if cfg.concat_libs:
-        # Cache-aware merge: returns a DataFrame (loads TSV on cache hit)
-        _ = st_cmerge.merge_candidate_clusters_across_libs(loci_table_path, merged_out_path)
+        # 3) Merge candidates (concat only). Non-concat continues with the pre-merge representation.
+        merged_out_path = phase2_basename("merged_candidates.tab")
+        if cfg.concat_libs:
+            # Cache-aware merge: returns a DataFrame (loads TSV on cache hit)
+            _ = st_cmerge.merge_candidate_clusters_across_libs(loci_table_path, merged_out_path)
 
     # 3.5) Always ensure universal-ID dict (used by ids.getUniversalID)
-    mcd = ids.ensure_mergedClusterDict_always(
-        concat_libs=cfg.concat_libs,
-        phase=str(cfg.phase),
-        merged_out_path=merged_out_path,
-        loci_table_df=loci_table_df,
-        allClusters_df=allClusters,
-        memFile=cfg.memFile,
-    )
+    with stage_timer.stage("Aggregation: universal IDs"):
+        mcd = ids.ensure_mergedClusterDict_always(
+            concat_libs=cfg.concat_libs,
+            phase=str(cfg.phase),
+            merged_out_path=merged_out_path,
+            loci_table_df=loci_table_df,
+            allClusters_df=allClusters,
+            memFile=cfg.memFile,
+        )
 
     # Optional: surface this in runtime for any remaining legacy compatibility
     try:
@@ -276,13 +284,14 @@ def run_phase2_pipeline(
     # 4) Build PHAS clusters (handles empty input).  Use write-only mode so the
     # raw candidate table can be released before downstream stages consume the
     # completed PHAS table from bounded disk-backed batches.
-    phas_output = st_phas_clusters.build_and_save_phas_clusters(
-        allClusters,
-        phase=int(cfg.phase) if str(cfg.phase).isdigit() else None,
-        memFile=cfg.memFile,
-        concat_libs=cfg.concat_libs,
-        return_dataframe=False,
-    )
+    with stage_timer.stage("Aggregation: PHAS clusters"):
+        phas_output = st_phas_clusters.build_and_save_phas_clusters(
+            allClusters,
+            phase=int(cfg.phase) if str(cfg.phase).isdigit() else None,
+            memFile=cfg.memFile,
+            concat_libs=cfg.concat_libs,
+            return_dataframe=False,
+        )
 
     # The raw candidate table is not used after PHAS clusters have been built.
     del allClusters
@@ -299,80 +308,86 @@ def run_phase2_pipeline(
 
     # 6) Select windows from the disk-backed PHAS table.  The streaming reader
     # retains complete clusters while bounding each parse/task batch.
-    clusters_windows = st_winsel.select_scoring_windows_from_path(
-        phas_output,
-        window_len=cfg.window_len,
-        sliding=cfg.sliding,
-        minClusterLength=cfg.minClusterLength,
-        memFile=cfg.memFile,
-    )
+    with stage_timer.stage("Windows: selection"):
+        clusters_windows = st_winsel.select_scoring_windows_from_path(
+            phas_output,
+            window_len=cfg.window_len,
+            sliding=cfg.sliding,
+            minClusterLength=cfg.minClusterLength,
+            memFile=cfg.memFile,
+        )
     if clusters_windows is None or getattr(clusters_windows, "empty", True):
         print("[INFO] No scoring windows found; exiting classification early.")
         return
 
     # 7) Score windows, expose compact lookup to workers, extract features, classify
-    win_phasis_score = st_winscore.compute_and_save_phasis_scores(clusters_windows)
-    set_win_score_lookup(win_phasis_score)
+    with stage_timer.stage("Windows: scoring"):
+        win_phasis_score = st_winscore.compute_and_save_phasis_scores(clusters_windows)
+        set_win_score_lookup(win_phasis_score)
 
-    # Feature assembly uses the compact score lookup set above, not these full
-    # intermediate DataFrames.  Drop them before allocating feature batches.
-    del clusters_windows
-    del win_phasis_score
-    gc.collect()
+        # Feature assembly uses the compact score lookup set above, not these full
+        # intermediate DataFrames.  Drop them before allocating feature batches.
+        del clusters_windows
+        del win_phasis_score
+        gc.collect()
 
-    features = st_feat.features_to_detection(
-        clusters_path=phas_output,
-        phase=int(cfg.phase) if str(cfg.phase).isdigit() else cfg.phase,
-        outdir=cfg.outdir,
-        concat_libs=cfg.concat_libs,
-        memFile=cfg.memFile,
-    )
+    with stage_timer.stage("Feature assembly"):
+        features = st_feat.features_to_detection(
+            clusters_path=phas_output,
+            phase=int(cfg.phase) if str(cfg.phase).isdigit() else cfg.phase,
+            outdir=cfg.outdir,
+            concat_libs=cfg.concat_libs,
+            memFile=cfg.memFile,
+        )
 
     # 8) Classify (stage returns labeled DF), then finalize outputs (output stage).
     # Phasis 2.8.3 keeps -classifier as a deprecated CLI compatibility flag, but
     # GMM is the only active classifier.
-    labeled = st_classify.gmm_classify(
-        features,
-        phasisScoreCutoff=float(cfg.phasisScoreCutoff),
-        min_Howell_score=float(cfg.min_Howell_score),
-        max_complexity=float(cfg.max_complexity),
-        n_clusters=int(getattr(cfg, "n_clusters", 2) or 2),
-    )
-    # The classifier returns an independent labeled table.  Free feature rows
-    # before evidence classification creates its own labeled-table copy.
-    del features
-    gc.collect()
-    labeled = st_classify.apply_evidence_classification(
-        labeled,
-        phase=cfg.phase,
-        legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
-        overrides_path=getattr(cfg, "classification_overrides", None),
-    )
-    print("[INFO] Streaming PHAS rows required for locus plots.")
-    plot_clusters_data = st_locus_plots.load_plot_clusters_for_labeled_calls(
-        phas_output,
-        labeled,
-    )
-    locus_plot_kwargs = {}
-    if not bool(getattr(cfg, "locus_plots", True)):
-        # --no_locus_plots: the locus analysis still runs because it produces
-        # the phasiRNA tables; only the plot rendering is skipped.
-        locus_plot_kwargs["render_plots"] = False
-    st_locus_plots.write_individual_phas_locus_plots(
-        "GMM",
-        labeled,
-        plot_clusters_data,
-        job_outdir=cfg.outdir,
-        job_phase=cfg.phase,
-        **locus_plot_kwargs,
-    )
-    # The locus-plot stage is the final consumer of the compact per-read table.
-    del plot_clusters_data
-    gc.collect()
-    st_output.finalize_and_write_results(
-        "GMM",
-        labeled,
-        job_outdir=cfg.outdir,
-        job_phase=cfg.phase,
-        job_concat_libs=cfg.concat_libs,
-    )
+    with stage_timer.stage("Classification"):
+        labeled = st_classify.gmm_classify(
+            features,
+            phasisScoreCutoff=float(cfg.phasisScoreCutoff),
+            min_Howell_score=float(cfg.min_Howell_score),
+            max_complexity=float(cfg.max_complexity),
+            n_clusters=int(getattr(cfg, "n_clusters", 2) or 2),
+        )
+        # The classifier returns an independent labeled table.  Free feature rows
+        # before evidence classification creates its own labeled-table copy.
+        del features
+        gc.collect()
+        labeled = st_classify.apply_evidence_classification(
+            labeled,
+            phase=cfg.phase,
+            legacy_classification=bool(getattr(cfg, "legacy_classification", False)),
+            overrides_path=getattr(cfg, "classification_overrides", None),
+        )
+    with stage_timer.stage("Locus plots and phasiRNA tables"):
+        print("[INFO] Streaming PHAS rows required for locus plots.")
+        plot_clusters_data = st_locus_plots.load_plot_clusters_for_labeled_calls(
+            phas_output,
+            labeled,
+        )
+        locus_plot_kwargs = {}
+        if not bool(getattr(cfg, "locus_plots", True)):
+            # --no_locus_plots: the locus analysis still runs because it produces
+            # the phasiRNA tables; only the plot rendering is skipped.
+            locus_plot_kwargs["render_plots"] = False
+        st_locus_plots.write_individual_phas_locus_plots(
+            "GMM",
+            labeled,
+            plot_clusters_data,
+            job_outdir=cfg.outdir,
+            job_phase=cfg.phase,
+            **locus_plot_kwargs,
+        )
+        # The locus-plot stage is the final consumer of the compact per-read table.
+        del plot_clusters_data
+        gc.collect()
+    with stage_timer.stage("Writing results"):
+        st_output.finalize_and_write_results(
+            "GMM",
+            labeled,
+            job_outdir=cfg.outdir,
+            job_phase=cfg.phase,
+            job_concat_libs=cfg.concat_libs,
+        )

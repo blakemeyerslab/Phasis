@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (development branches dev/v2.8.5 to dev/v2.8.7)
+## Unreleased (development branches dev/v2.8.5 to dev/v2.8.8)
 
 Not yet released; the package version is still 2.8.4.
 
@@ -30,12 +30,28 @@ Not yet released; the package version is still 2.8.4.
   the former loops. Feature rows are unchanged and feature
   assembly ran 5 to 9 times as fast on maize 21- and 24-nt test batches. Set
   `Phasis_HOWELL_ARRAY_SCAN=0` to use the loops.
+- PHAS-cluster building, window selection and feature assembly still start
+  with two concurrent batches, but after the first clean group they go to
+  their full worker count at once when the measured peak memory of a worker
+  shows that the full count fits in half of the available memory. When it does
+  not fit, or the memory cannot be read (non-Linux systems), the former
+  stepwise doubling applies. Set `Phasis_MEMORY_AWARE_RAMP=0` to always use
+  the stepwise doubling.
+- Completed Phase II tables are compressed at gzip level 4 instead of 9. On
+  the maize test tables this is about four times as fast for files about 6%
+  larger; the tables inside are unchanged. Set
+  `Phasis_INTERMEDIATE_GZIP_LEVEL` (1-9) to choose another level.
 - Feature assembly reports its work while it runs: batches, input rows done
   and total, clusters, feature rows written, rate and estimated time left. Set
   `Phasis_FEATURE_ASSEMBLY_COUNT_ROWS=0` to skip counting the input rows.
 
 ### Added
 
+- The `runtime_*` file of each run now has one line per finished stage with
+  its start, end and duration in seconds, and the log prints a
+  `[stage-time]` line when a stage ends. This covers the stages that had no
+  timing before (mapping, classification, writing results) and the parts of
+  Phase II between its progress bars.
 - `--no_locus_plots` skips rendering the individual PHAS and PHAS-like locus
   plots. All result tables, including the phasiRNA tables, the GFF files and
   the summary PDFs are still written.

@@ -85,6 +85,25 @@ def compress_intermediates_enabled(default: bool = True) -> bool:
     return bool(getattr(rt, "compress_intermediates", default))
 
 
+INTERMEDIATE_GZIP_LEVEL_DEFAULT = 4
+
+
+def intermediate_gzip_level() -> int:
+    """
+    Compression level for completed text intermediates.
+
+    Level 9, the former setting, took four times as long as level 4 on the
+    Phase II tables for files about 6% smaller.  ``Phasis_INTERMEDIATE_GZIP_LEVEL``
+    (1-9) overrides the default.  The level changes the compressed bytes only,
+    never the table inside.
+    """
+    try:
+        level = int(str(getenv("Phasis_INTERMEDIATE_GZIP_LEVEL") or "").strip())
+    except ValueError:
+        return INTERMEDIATE_GZIP_LEVEL_DEFAULT
+    return level if 1 <= level <= 9 else INTERMEDIATE_GZIP_LEVEL_DEFAULT
+
+
 def gzip_text_artifact(path: str) -> str:
     """Atomically gzip a completed text artifact and remove the plain file.
 
@@ -103,7 +122,9 @@ def gzip_text_artifact(path: str) -> str:
     tmp_path = f"{gz_path}.tmp"
     try:
         with open(path, "rb") as src, open(tmp_path, "wb") as raw_dst:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0) as dst:
+            with gzip.GzipFile(
+                filename="", mode="wb", fileobj=raw_dst, mtime=0, compresslevel=intermediate_gzip_level()
+            ) as dst:
                 shutil.copyfileobj(src, dst)
         os.replace(tmp_path, gz_path)
         os.remove(path)

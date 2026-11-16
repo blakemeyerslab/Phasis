@@ -171,6 +171,9 @@ def _window_selection_parallel_kwargs(task_count: int) -> Dict[str, Any]:
         "initial_chunk_size": initial_task_window,
         "max_chunk_size": max_task_window,
         "adaptive_recovery": True,
+        # After one clean slice, go to the full worker count when the measured
+        # worker memory shows that it fits (see parallel.memory_supported_workers).
+        "memory_aware_growth": True,
     }
 
 

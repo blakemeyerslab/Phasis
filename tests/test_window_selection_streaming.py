@@ -222,6 +222,7 @@ class StreamingWindowSelectionTests(unittest.TestCase):
                         "initial_chunk_size": 2,
                         "max_chunk_size": 8,
                         "adaptive_recovery": True,
+                        "memory_aware_growth": True,
                     },
                 )
 

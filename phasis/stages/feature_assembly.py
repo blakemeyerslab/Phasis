@@ -26,7 +26,7 @@ from phasis.cache import (
     stage_signature,
 )
 from phasis.env import getenv
-from phasis.parallel import run_parallel_with_progress
+from phasis.parallel import memory_supported_workers, run_parallel_with_progress
 
 DCL_OVERHANG = 2          # canonical 2-nt 3' overhang used for opposite-strand duplex pairing
 WINDOW_MULTIPLIER = 10    # 10 cycles per window
@@ -1102,6 +1102,7 @@ def features_to_detection(clusters_data: pd.DataFrame | None = None,*,clusters_p
                         feature_parallel_kwargs["initial_worker_cap"]
                     )
                     stream_success_windows = 0
+                    stream_had_failures = False
                     stream_progress = tqdm(
                         desc="Assemble streamed features",
                         unit="batch",
@@ -1176,9 +1177,32 @@ def features_to_detection(clusters_data: pd.DataFrame | None = None,*,clusters_p
                         )
                         if bool((window_state or {}).get("had_failures")):
                             stream_success_windows = 0
+                            stream_had_failures = True
                         else:
                             stream_success_windows += 1
-                            if stream_success_windows >= 2:
+                            # The first clean window measured what one batch
+                            # needs.  When the full number of concurrent
+                            # batches is known to fit in half of the available
+                            # memory, use it; otherwise keep doubling.
+                            full_worker_cap = int(feature_parallel_kwargs["max_worker_cap"])
+                            supported_workers = (
+                                memory_supported_workers((window_state or {}).get("peak_worker_rss"))
+                                if not stream_had_failures
+                                else None
+                            )
+                            if (
+                                supported_workers is not None
+                                and supported_workers >= full_worker_cap
+                                and full_worker_cap > stream_worker_cap
+                            ):
+                                print(
+                                    "[INFO] One feature batch used at most "
+                                    f"{window_state['peak_worker_rss'] / 1e9:.1f} GB; expanding feature assembly "
+                                    f"to {full_worker_cap} concurrent batch(es)."
+                                )
+                                stream_worker_cap = full_worker_cap
+                                stream_success_windows = 0
+                            elif stream_success_windows >= 2:
                                 next_worker_cap = min(
                                     int(feature_parallel_kwargs["max_worker_cap"]),
                                     max(stream_worker_cap + 1, stream_worker_cap * 2),

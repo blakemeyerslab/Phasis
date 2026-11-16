@@ -275,11 +275,31 @@ the feature rows written, the rate and the estimated time left. The total is
 counted in the background; set `Phasis_FEATURE_ASSEMBLY_COUNT_ROWS=0` to skip
 that count, in which case the share and the time left are not shown.
 
+PHAS-cluster building, window selection and feature assembly start with two
+concurrent batches to measure what one worker needs. After the first clean
+group they use their full worker count when that fits in half of the available
+memory; otherwise they double step by step as before. Set
+`Phasis_MEMORY_AWARE_RAMP=0` to always double step by step.
+
 The Howell phasing-score scans of this step use array operations when the
 abundances are non-negative whole numbers, which Phasis produces with and
 without `-norm`. Set
 `Phasis_HOWELL_ARRAY_SCAN=0` to use the former Python loops, which give the
 same feature rows.
+
+### Stage times
+
+Every run writes a `runtime_<month>_<day>_<hour>_<minute>` file in the run
+directory. Besides the index time it holds one tab-separated line per finished
+stage: `Stage`, the stage name, its start and end time, and its duration in
+seconds. The same durations are printed in the log as `[stage-time]` lines.
+`phasis -cleanup` removes these files, so copy them first if you need them.
+
+### Compression of intermediate tables
+
+Completed Phase II tables are gzip-compressed at level 4. Set
+`Phasis_INTERMEDIATE_GZIP_LEVEL` to a value from 1 to 9 for faster or smaller
+files; the level never changes the table inside.
 
 ### Plot staging
 
