@@ -28,7 +28,10 @@ class ReferenceCompressionProgressTests(unittest.TestCase):
             updates = progress.return_value.__enter__.return_value.update.call_args_list
             self.assertEqual(sum(call.args[0] for call in updates), len(content))
             self.assertTrue(all(call.args[0] <= 1024 * 1024 for call in updates))
-            self.assertEqual(archive.read_bytes(), expected.getvalue())
+            # The compression level may differ from the default; the content and the
+            # reproducible header (no file name, mtime 0) must not.
+            self.assertEqual(gzip.decompress(archive.read_bytes()), content)
+            self.assertEqual(archive.read_bytes()[:8], expected.getvalue()[:8])
             self.assertEqual(gzip.decompress(archive.read_bytes()), content)
             self.assertFalse(source.exists())
             self.assertFalse(Path(str(archive) + ".tmp").exists())

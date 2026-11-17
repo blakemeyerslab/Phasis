@@ -297,7 +297,8 @@ seconds. The same durations are printed in the log as `[stage-time]` lines.
 
 ### Compression of intermediate tables
 
-Completed Phase II tables are gzip-compressed at level 6. Set
+Completed Phase II tables, the cleaned reference and the processed libraries
+are gzip-compressed at level 6. Set
 `Phasis_INTERMEDIATE_GZIP_LEVEL` to a value from 1 to 9 for faster or smaller
 files; the level never changes the table inside.
 

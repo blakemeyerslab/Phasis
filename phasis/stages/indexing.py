@@ -11,6 +11,7 @@ import phasis.cache as cache
 import phasis.index_integrity as index_integrity
 from phasis.cache import compute_md5_str, default_memfile_path, read_mem_verbose
 from phasis.progress import tqdm
+from phasis.cache import intermediate_gzip_level as _gzip_level
 
 
 # Stage-local globals
@@ -113,7 +114,7 @@ def _archive_file_to_gz(path):
 
     try:
         with open(path, "rb") as src, open(tmp_path, "wb") as raw_dst:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0) as dst:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0, compresslevel=_gzip_level()) as dst:
                 with tqdm(total=size, desc="Compressing cleaned reference", unit="B", unit_scale=True) as progress:
                     while chunk := src.read(1024 * 1024):
                         dst.write(chunk)

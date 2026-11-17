@@ -7,6 +7,7 @@ import hashlib
 from phasis import libprep
 from phasis import runtime as rt
 from phasis.cache import MemCache, compute_md5_str, default_memfile_path, sig_key, stage_signature
+from phasis.cache import intermediate_gzip_level as _gzip_level
 from phasis.env import getenv
 from phasis.parallel import (
     FASTQ_DYNAMIC_LIBRARY_WORKER_STEPS,
@@ -139,7 +140,7 @@ def _archive_fas_to_gz(fas_path):
 
     try:
         with open(fas_path, "rb") as src, open(tmp_path, "wb") as raw_dst:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0) as dst:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_dst, mtime=0, compresslevel=_gzip_level()) as dst:
                 shutil.copyfileobj(src, dst)
         os.replace(tmp_path, gz_path)
         os.remove(fas_path)

@@ -37,7 +37,8 @@ Developed on the branches dev/v2.8.5 to dev/v2.8.8; not yet released.
   not fit, or the memory cannot be read (non-Linux systems), the former
   stepwise doubling applies. Set `Phasis_MEMORY_AWARE_RAMP=0` to always use
   the stepwise doubling.
-- Completed Phase II tables are compressed at gzip level 6 instead of 9. On
+- Completed Phase II tables, the cleaned reference and the processed
+  libraries are compressed at gzip level 6 instead of 9. On
   a maize test table this is about three times as fast for a file about 2%
   larger; the tables inside are unchanged. Set
   `Phasis_INTERMEDIATE_GZIP_LEVEL` (1-9) to choose another level.
