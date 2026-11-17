@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phasis"
-version = "2.8.4"
+version = "2.8.8"
 description = "PHAS locus detection and scoring pipeline"
 license = "Artistic-2.0"
 license-files = ["LICENSE.txt"]

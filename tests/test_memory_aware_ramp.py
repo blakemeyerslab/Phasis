@@ -104,10 +104,10 @@ class IntermediateGzipLevelTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("Phasis_INTERMEDIATE_GZIP_LEVEL", None)
             os.environ.pop("PHASIS_INTERMEDIATE_GZIP_LEVEL", None)
-            self.assertEqual(cache.intermediate_gzip_level(), 4)
+            self.assertEqual(cache.intermediate_gzip_level(), 6)
         for bad in ("0", "12", "fast"):
             with mock.patch.dict(os.environ, {"Phasis_INTERMEDIATE_GZIP_LEVEL": bad}):
-                self.assertEqual(cache.intermediate_gzip_level(), 4)
+                self.assertEqual(cache.intermediate_gzip_level(), 6)
 
 
 if __name__ == "__main__":

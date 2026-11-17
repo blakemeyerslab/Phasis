@@ -1,0 +1,33 @@
+Stage	Aggregation: processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: load processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.08
+Stage	Aggregation: loci table and candidate merge	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: universal IDs	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: PHAS clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Windows: selection	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: load processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.04
+Stage	Aggregation: loci table and candidate merge	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: universal IDs	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: PHAS clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: load processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.05
+Stage	Aggregation: loci table and candidate merge	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: universal IDs	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: PHAS clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: load processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.04
+Stage	Aggregation: loci table and candidate merge	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: universal IDs	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: PHAS clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Windows: selection	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Windows: scoring	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.04
+Stage	Feature assembly	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Classification	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.04
+Stage	Locus plots and phasiRNA tables	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.04
+Stage	Writing results	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: load processed clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.05
+Stage	Aggregation: loci table and candidate merge	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: universal IDs	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Aggregation: PHAS clusters	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00
+Stage	Windows: selection	2026-11-16T20:30:57-05:00	2026-11-16T20:30:57-05:00	0.00

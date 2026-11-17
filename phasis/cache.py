@@ -85,15 +85,15 @@ def compress_intermediates_enabled(default: bool = True) -> bool:
     return bool(getattr(rt, "compress_intermediates", default))
 
 
-INTERMEDIATE_GZIP_LEVEL_DEFAULT = 4
+INTERMEDIATE_GZIP_LEVEL_DEFAULT = 6
 
 
 def intermediate_gzip_level() -> int:
     """
     Compression level for completed text intermediates.
 
-    Level 9, the former setting, took four times as long as level 4 on the
-    Phase II tables for files about 6% smaller.  ``Phasis_INTERMEDIATE_GZIP_LEVEL``
+    Level 9, the former setting, took about three times as long as level 6 on
+    a Phase II table for a file about 2% smaller.  ``Phasis_INTERMEDIATE_GZIP_LEVEL``
     (1-9) overrides the default.  The level changes the compressed bytes only,
     never the table inside.
     """

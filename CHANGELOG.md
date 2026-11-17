@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased (development branches dev/v2.8.5 to dev/v2.8.8)
+## 2.8.8 - unreleased
 
-Not yet released; the package version is still 2.8.4.
+Developed on the branches dev/v2.8.5 to dev/v2.8.8; not yet released.
 
 ### Changed
 
@@ -37,8 +37,8 @@ Not yet released; the package version is still 2.8.4.
   not fit, or the memory cannot be read (non-Linux systems), the former
   stepwise doubling applies. Set `Phasis_MEMORY_AWARE_RAMP=0` to always use
   the stepwise doubling.
-- Completed Phase II tables are compressed at gzip level 4 instead of 9. On
-  the maize test tables this is about four times as fast for files about 6%
+- Completed Phase II tables are compressed at gzip level 6 instead of 9. On
+  a maize test table this is about three times as fast for a file about 2%
   larger; the tables inside are unchanged. Set
   `Phasis_INTERMEDIATE_GZIP_LEVEL` (1-9) to choose another level.
 - Feature assembly reports its work while it runs: batches, input rows done

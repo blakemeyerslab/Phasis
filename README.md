@@ -1,6 +1,6 @@
 # Phasis - Phased sRNA Cluster Discovery and Annotation
 
-**Version:** v2.8.4
+**Version:** v2.8.8
 
 Phasis identifies phased small-RNA-producing (*PHAS*) loci from small-RNA
 (sRNA) libraries and a reference genome or transcriptome. It reports
