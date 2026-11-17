@@ -13,5 +13,7 @@ dist/
 AGENTS.md
 docs/handoff.md
 
+# Run files written when Phasis or its tests run from the repo root
+/runtime_*
 # Runtime Phase II scoring-window caches when a run is started from the repo root
 *_windows_sl*_wl*_mcl*/
