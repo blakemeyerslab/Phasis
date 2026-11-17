@@ -1,8 +1,60 @@
 # Changelog
 
-## 2.8.8 - unreleased
+## 2.8.8 - 2026-11-17
 
-Developed on the branches dev/v2.8.5 to dev/v2.8.8; not yet released.
+A speed and memory release. The detected *PHAS* and *PHAS*-like loci are the
+same as in 2.8.4: on the README maize example (21- and 24-nt runs) every result
+table is identical to 2.8.4, and only some intermediate tables list the same
+rows in a different order. The same held with `-norm`, with FASTQ input, and
+on macOS (see Validation below).
+
+### Speed and memory compared with 2.8.4
+
+README maize example (four tag-count libraries, B73 RefGen v2), 12 cores,
+`-mindepth 1 -maxhits 25`, Linux:
+
+| Run | 2.8.4 | 2.8.8 |
+| --- | --- | --- |
+| 21-nt run, whole (includes building the index) | 91.6 min | 52.5 min |
+| 24-nt run, whole (index and mapping reused) | 490 min | 48 min |
+| Peak memory of the largest process, 21-nt run | 11.5 GB | 5.9 GB |
+| Peak memory of the largest process, 24-nt run | 12.4 GB | 7.8 GB |
+
+The 24-nt run of 2.8.8 shared the machine with another job using about 54 of
+its 80 cores; its Phase II alone took 28 min when rerun on a quiet machine.
+
+Stages that changed most (24-nt run, minutes):
+
+| Stage | 2.8.4 | 2.8.8 |
+| --- | --- | --- |
+| Cluster scoring | 76.9 | 1.3 |
+| Aggregation and scoring windows | 30.3 | 13.1 |
+| Feature assembly | 367.8 | 13.7 |
+
+Other measurements:
+
+- macOS (Apple M5 Pro, 18 cores, maize chromosomes 9 and 10, two libraries,
+  `-norm`): 24-nt run 27.8 min in 2.8.4 against 3.9 min in 2.8.8, and
+  21-nt run 7.0 against 6.0 min; maximum resident memory 11.8 GB against
+  7.2 GB.
+- FASTQ input (Linux, 40 cores, maize chromosomes 9 and 10, two libraries of
+  18 and 20 million reads, `-norm`): 21-nt run 11.6 against 7.5 min, 24-nt
+  run 13.6 against 2.9 min; peak memory of Phasis and its workers 4.5 against
+  2.5 GB.
+
+Times depend on the machine and its load; the ratios are the useful part.
+
+### Validation
+
+- README maize example, Linux, 21 and 24 nt: 146 output files compared with
+  2.8.4, no differences in content.
+- Maize chromosomes 9 and 10 with `-norm` and with FASTQ input: result
+  tables identical to 2.8.4. `--pool_libraries` was checked the same way on
+  an earlier development build (dev/v2.8.6).
+- macOS: unit tests pass and outputs match 2.8.4 on the chromosome 9 and 10
+  test with `-norm`.
+- Not tested: the optional external-BAM importer (its 48 unit tests are
+  skipped unless `Phasis[bam]` is installed).
 
 ### Changed
 
