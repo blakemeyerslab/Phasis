@@ -2,7 +2,28 @@
 
 ## 2.8.9 - unreleased
 
-In development on dev/v2.8.9.
+In development on dev/v2.8.9. Unlike 2.8.5 to 2.8.8, this version changes which
+loci are reported by default.
+
+### Added
+
+- `--evidence_mode {combined,individual,pooled}`. The new default, `combined`,
+  runs the per-library and the pooled analysis in the same run directory and
+  combines them: every per-library locus is kept; pooled loci that overlap one
+  are reported as support; pooled-only loci are kept when their strict Howell
+  score reaches `--pooled_strict_howell_cutoff`, and the others are written to
+  `{phase}_exploratory/`. With one library, or `-steps` other than `both`,
+  Phasis runs `individual`, the former default. `--pool_libraries` is the same
+  as `--evidence_mode pooled`.
+- `--pooled_strict_howell_cutoff {auto,off,NUMBER}`. `auto` (default) sets the
+  cut-off with a target-decoy estimate of the false-discovery rate: each
+  pooled-only locus is rescored after its reads are moved by random offsets
+  that remove phasing, and the cut-off is the lowest strict score with an
+  estimated FDR at most `--pooled_fdr` (default 0.05). The decoys are
+  reproducible (fixed seed per locus); `Phasis_POOLED_DECOY_REPLICATES` sets
+  their number (default 20).
+- `{phase}_evidence_summary.txt` and `{phase}_pooled_evidence.tsv` in the
+  combined results.
 
 ## 2.8.8 - 2026-11-17
 

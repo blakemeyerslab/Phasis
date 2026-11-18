@@ -141,9 +141,11 @@ phasis -mindepth 1 -phase 24 -libformat T \
   -libs sTR_dcl5_1_2.0.tag.gz W23_2.0_2.tag.gz sTP_dcl5_1_2.0.tag.gz W23_2.0_1.tag.gz
 ```
 
-Results appear in `21_results/` and `24_results/`. Start with the calls table
-and the individual locus plots described below. Libraries remain separate by
-default; pooling is an optional analysis choice.
+Results appear in `21_results/` and `24_results/`. Start with the calls table.
+With more than one library, Phasis analyses the libraries both separately and
+pooled and combines the two (see [Choose the evidence mode](#choose-the-evidence-mode));
+the full per-library and pooled results, including the locus plots, are in
+`21_results_individual/`, `21_results_pooled/` and the same for 24.
 
 ## Understand the Outputs
 
@@ -317,19 +319,54 @@ phasis -libs sample.fastq.gz other_sample.fastq.gz \
   -libformat Q -reference genome.fa.gz -phase 24 -cores 4
 ```
 
-### Choose individual or pooled evidence
+### Choose the evidence mode
 
-By default, Phasis analyzes libraries individually. To combine their evidence
-into one virtual library, add `--pool_libraries`:
+`--evidence_mode` selects how the libraries are analysed:
 
-```bash
-phasis -libs *.tag -libformat T -reference genome.fa -phase 24 \
-  -cores 4 --pool_libraries --outdir 24_results_pooled
-```
+| Mode | What it does |
+| --- | --- |
+| `combined` (default) | Analyses the libraries separately and pooled, then combines the two. |
+| `individual` | Analyses each library separately (the default before 2.8.9). |
+| `pooled` | Pools all libraries into one virtual library; same as `--pool_libraries`. |
+
+Pooling adds reads to loci that are too weak in any one library, but it also
+adds noise: in a dense pooled cluster, reads can fall into a phase-length
+register by chance and look phased. The combined mode therefore treats pooled
+loci differently depending on whether a per-library analysis supports them:
+
+- Every locus called in a single library is kept, exactly as in `individual` mode.
+- A pooled locus that overlaps a per-library locus supports it and adds nothing new.
+- A pooled locus that overlaps no per-library locus (pooled-only) is kept only
+  if its strict Howell score (`Peak_Howell_score_strict`) reaches a cut-off.
+  Pooled-only loci below the cut-off are written to `{phase}_exploratory/`,
+  not deleted.
+
+`--pooled_strict_howell_cutoff` sets that cut-off:
+
+- `auto` (default) sets it from the run's own data. Each pooled-only locus is
+  scored again 20 times after its reads are moved by random offsets that remove
+  any phasing but keep the reads, abundances and footprint of the cluster. These
+  decoy scores show how high noise of the same density scores by chance. The
+  cut-off is the lowest strict score at which the estimated false-discovery rate
+  among kept pooled-only loci is at most `--pooled_fdr` (default 0.05).
+- A number, for example `17.5`, uses that value.
+- `off` keeps every pooled-only locus.
+
+`{phase}_evidence_summary.txt` records the cut-off and how it was set, the
+number of loci of each kind, and how many of the pooled loci also found per
+library reach the cut-off, as a check. `{phase}_pooled_evidence.tsv` lists every
+pooled locus with its strict score, q-value and tier.
+
+The combined mode runs the per-library analysis and then the pooled analysis in
+the same run directory, sharing the reference index and processed libraries, so
+it takes longer than either alone. With one library, or with `-steps cfind` or
+`-steps class`, Phasis runs the `individual` mode instead. The combined
+`{phase}_results/` holds tables and the GFF; the locus plots and heatmaps are in
+`{phase}_results_individual/` and `{phase}_results_pooled/`.
 
 Pooled mode produces tables, annotations, and individual locus plots, but not
 cross-library heatmaps because there is only one virtual library. Neither
-evidence mode is guaranteed to recover every locus found by the other.
+mode alone is guaranteed to recover every locus found by the other.
 
 ### Common options
 
@@ -340,7 +377,9 @@ evidence mode is guaranteed to recover every locus found by the other.
 | `-libformat` | `F` for FASTA, `T` for tag-count, or `Q` for preprocessed FASTQ. |
 | `-phase` | Phasing length, commonly 21 or 24. |
 | `-cores` | CPU count; `0` uses all available cores within detected allocation limits. |
-| `--pool_libraries` | Combine libraries into one virtual library before candidate detection. |
+| `--evidence_mode` | `combined` (default), `individual` or `pooled`; see above. |
+| `--pooled_strict_howell_cutoff` | Combined mode: `auto` (default), `off` or a number. |
+| `--pool_libraries` | Same as `--evidence_mode pooled`. |
 | `--outdir` | Final output directory; supports `{phase}` in its name. |
 
 Run `phasis -h` for all options. Start with the normal filtering settings before
