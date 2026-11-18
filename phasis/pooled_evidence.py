@@ -42,8 +42,11 @@ from . import result_comparison as rc
 DEFAULT_FDR = 0.05
 DEFAULT_DECOY_REPLICATES = 20
 DEFAULT_DECOY_SEED = 20261118
-# Used only when the decoys cannot be computed (no read table for the pooled run).
-FALLBACK_STRICT_CUTOFF = 20.0
+# The auto cut-off never goes below this floor; it is also the cut-off when there
+# are too few pooled-only loci for a stable estimate, or no read table for decoys.
+# The command line passes -min_Howell_score (default 12.5) here.
+DEFAULT_STRICT_FLOOR = 12.5
+DEFAULT_AUTO_MIN_LOCI = 20
 POOLED_LIBRARY = "ALL_LIBS"
 
 _READ_COLUMNS = ["identifier", "clusterID", "strand", "pos", "len", "abun"]
@@ -69,6 +72,14 @@ def parse_cutoff(value) -> float | str:
     if not math.isfinite(number) or number < 0:
         raise EvidenceError(f"cut-off must be a non-negative number, not {value!r}")
     return number
+
+
+def auto_min_loci() -> int:
+    try:
+        value = int(str(getenv("Phasis_POOLED_AUTO_MIN_LOCI") or DEFAULT_AUTO_MIN_LOCI))
+    except ValueError:
+        value = DEFAULT_AUTO_MIN_LOCI
+    return max(1, value)
 
 
 def decoy_replicates() -> int:
@@ -328,6 +339,8 @@ def combine_evidence(
     seed: int = DEFAULT_DECOY_SEED,
     cores: int = 1,
     phas_to_detect: str | Path | None = None,
+    floor: float = DEFAULT_STRICT_FLOOR,
+    min_auto_loci: int | None = None,
 ) -> EvidenceResult:
     """Write the combined result bundle to ``outdir``.
 
@@ -340,6 +353,8 @@ def combine_evidence(
     outdir = Path(outdir).resolve()
     cutoff_spec = parse_cutoff(cutoff)
     replicates = int(replicates or decoy_replicates())
+    min_auto_loci = int(min_auto_loci or auto_min_loci())
+    floor = float(floor)
 
     individual = rc._load_bundle(individual_dir, "run_a", "individual")
     pooled = rc._load_bundle(pooled_dir, "run_b", "pooled")
@@ -377,12 +392,15 @@ def combine_evidence(
     elif not pooled_only_ids:
         cutoff_value = float("nan")
         source = "auto (no pooled-only loci)"
+    elif len(pooled_only_ids) < min_auto_loci:
+        cutoff_value = floor
+        source = f"floor {floor:g} (fewer than {min_auto_loci} pooled-only loci for an auto estimate)"
     else:
         reads_path = Path(phas_to_detect) if phas_to_detect else find_phas_to_detect(run_dir, phase)
         reads = load_cluster_reads(reads_path, pooled_only_ids) if reads_path and reads_path.is_file() else {}
         if not reads:
-            cutoff_value = FALLBACK_STRICT_CUTOFF
-            source = f"fixed fallback {FALLBACK_STRICT_CUTOFF:g} (no pooled read table found for decoys)"
+            cutoff_value = floor
+            source = f"floor {floor:g} (no pooled read table found for decoys)"
         else:
             scored = score_pooled_only_loci(reads, strict, phase, replicates=replicates, seed=seed, cores=cores)
             ids = sorted(pooled_only_ids)
@@ -397,8 +415,11 @@ def combine_evidence(
                         mismatches += 1
             qs = qvalues(obs, decoys, replicates)
             q = dict(zip(ids, qs.tolist()))
-            cutoff_value = auto_cutoff(obs, qs, fdr)
+            estimate = auto_cutoff(obs, qs, fdr)
             source = f"auto (target-decoy FDR <= {fdr:g}, {replicates} decoys per locus)"
+            if estimate < floor:
+                source += f"; estimate {estimate:.6g} raised to the floor {floor:g}"
+            cutoff_value = max(estimate, floor)
 
     def passes(identifier: str) -> bool:
         if not math.isfinite(cutoff_value) and cutoff_value < 0:
@@ -469,6 +490,7 @@ def combine_evidence(
         "strict_cutoff": _fmt(cutoff_value) if not (not math.isfinite(cutoff_value) and cutoff_value < 0) else "off",
         "cutoff_source": source,
         "target_fdr": fdr if cutoff_spec == "auto" else "",
+        "floor": floor if cutoff_spec == "auto" else "",
         "decoy_scores": decoy_count,
         "recomputed_score_mismatches": mismatches if cutoff_spec == "auto" else "",
         "pooled_only_kept": len(kept_pooled_only),

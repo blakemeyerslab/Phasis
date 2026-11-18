@@ -150,8 +150,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Combined mode: minimum strict Howell score (Peak_Howell_score_strict) of loci "
             "found only in the pooled evidence; lower ones go to the exploratory tier. "
-            "auto sets it from the run's own data (target-decoy FDR, see --pooled_fdr); "
-            "off keeps them all [default auto]"
+            "auto sets it from the run's own data (target-decoy FDR, see --pooled_fdr), never "
+            "below -min_Howell_score, and uses -min_Howell_score itself when there are fewer "
+            "than 20 pooled-only loci; off keeps them all [default auto]"
         ),
     )
     parser.add_argument(
@@ -537,6 +538,7 @@ def _run_combined(argv: List[str], args: argparse.Namespace) -> int:
             run_dir=rt.run_dir,
             cutoff=args.pooled_strict_howell_cutoff,
             fdr=float(args.pooled_fdr),
+            floor=float(args.min_Howell_score),
             cores=max(1, int(args.cores) if int(args.cores) > 0 else (os.cpu_count() or 1)),
         )
     s = result.summary

@@ -19,7 +19,10 @@ loci are reported by default.
   cut-off with a target-decoy estimate of the false-discovery rate: each
   pooled-only locus is rescored after its reads are moved by random offsets
   that remove phasing, and the cut-off is the lowest strict score with an
-  estimated FDR at most `--pooled_fdr` (default 0.05). The decoys are
+  estimated FDR at most `--pooled_fdr` (default 0.05). It never goes below
+  `-min_Howell_score` (default 12.5), and with fewer than 20 pooled-only loci
+  it is `-min_Howell_score` itself (`Phasis_POOLED_AUTO_MIN_LOCI` changes the
+  20). The decoys are
   reproducible (fixed seed per locus); `Phasis_POOLED_DECOY_REPLICATES` sets
   their number (default 20).
 - `{phase}_evidence_summary.txt` and `{phase}_pooled_evidence.tsv` in the

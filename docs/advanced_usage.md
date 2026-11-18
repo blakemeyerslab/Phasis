@@ -140,7 +140,7 @@ flag is needed.
 | `-max_complexity` | Complexity filter. |
 | `-phasisScoreCutoff` | Phasis-score cutoff; phase-dependent limits also apply. |
 | `-min_Howell_score` | Minimum relaxed Howell score (`Peak_Howell_score`) of every locus; default 12.5. |
-| `--pooled_strict_howell_cutoff` | Combined evidence mode: minimum strict Howell score (`Peak_Howell_score_strict`) of pooled-only loci; `auto` (default), `off` or a number. |
+| `--pooled_strict_howell_cutoff` | Combined evidence mode: minimum strict Howell score (`Peak_Howell_score_strict`) of pooled-only loci; `auto` (default), `off` or a number. `auto` never goes below `-min_Howell_score` and equals it with fewer than 20 pooled-only loci. |
 | `--pooled_fdr` | Combined evidence mode with `auto`: target false-discovery rate among kept pooled-only loci; default 0.05. |
 
 Consult `phasis -h` for the available options and defaults.

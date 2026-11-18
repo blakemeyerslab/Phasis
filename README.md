@@ -348,7 +348,10 @@ loci differently depending on whether a per-library analysis supports them:
   any phasing but keep the reads, abundances and footprint of the cluster. These
   decoy scores show how high noise of the same density scores by chance. The
   cut-off is the lowest strict score at which the estimated false-discovery rate
-  among kept pooled-only loci is at most `--pooled_fdr` (default 0.05).
+  among kept pooled-only loci is at most `--pooled_fdr` (default 0.05). The
+  cut-off never goes below `-min_Howell_score` (default 12.5). With fewer than
+  20 pooled-only loci there are too few scores for a stable estimate, and the
+  cut-off is `-min_Howell_score` itself.
 - A number, for example `17.5`, uses that value.
 - `off` keeps every pooled-only locus.
 

@@ -171,7 +171,8 @@ class CombineEvidenceTests(unittest.TestCase):
             pd.DataFrame(rows).to_csv(os.path.join(root, "concat_21_PHAS_to_detect.tab.gz"), sep="\t", index=False)
             _set_strict(pool, phase, observed)
 
-            result = pe.combine_evidence(ind, pool, out, run_dir=root, cutoff="auto", fdr=0.05, replicates=20)
+            result = pe.combine_evidence(ind, pool, out, run_dir=root, cutoff="auto", fdr=0.05, replicates=20,
+                                         min_auto_loci=1, floor=0.0)
             self.assertEqual(result.summary["recomputed_score_mismatches"], 0)
             self.assertEqual(result.summary["decoy_scores"], 40)
             table = pd.read_csv(os.path.join(out, "21_pooled_evidence.tsv"), sep="\t")
@@ -187,9 +188,48 @@ class CombineEvidenceTests(unittest.TestCase):
             _write_result_directory(ind, phase=phase, loci=[_locus("1:1000..1500", "1", 1000, 1500, ("libA", "a1"))])
             _write_result_directory(pool, phase=phase, loci=[_locus("1:5000..5400", "1", 5000, 5400, ("ALL_LIBS", "p"))])
             _set_strict(pool, phase, {"1:5000..5400": 21.0})
-            result = pe.combine_evidence(ind, pool, os.path.join(root, "out"), run_dir=root)
-            self.assertEqual(result.cutoff, pe.FALLBACK_STRICT_CUTOFF)
+            result = pe.combine_evidence(ind, pool, os.path.join(root, "out"), run_dir=root, min_auto_loci=1)
+            self.assertEqual(result.cutoff, pe.DEFAULT_STRICT_FLOOR)
+            self.assertIn("no pooled read table", result.cutoff_source)
             self.assertEqual(result.summary["pooled_only_kept"], 1)
+
+    def test_few_pooled_only_loci_use_the_floor(self):
+        phase = 21
+        with tempfile.TemporaryDirectory() as root:
+            ind = os.path.join(root, "ind")
+            pool = os.path.join(root, "pool")
+            _write_result_directory(ind, phase=phase, loci=[_locus("1:1000..1500", "1", 1000, 1500, ("libA", "a1"))])
+            _write_result_directory(pool, phase=phase, loci=[
+                _locus("1:5000..5400", "1", 5000, 5400, ("ALL_LIBS", "p")),
+                _locus("1:7000..7400", "1", 7000, 7400, ("ALL_LIBS", "q")),
+            ])
+            _set_strict(pool, phase, {"1:5000..5400": 13.0, "1:7000..7400": 12.0})
+            result = pe.combine_evidence(ind, pool, os.path.join(root, "out"), run_dir=root)
+            self.assertEqual(result.cutoff, 12.5)
+            self.assertIn("fewer than 20", result.cutoff_source)
+            self.assertEqual((result.summary["pooled_only_kept"], result.summary["pooled_only_exploratory"]), (1, 1))
+
+    def test_auto_estimate_is_raised_to_the_floor(self):
+        phase = 21
+        with tempfile.TemporaryDirectory() as root:
+            ind = os.path.join(root, "ind")
+            pool = os.path.join(root, "pool")
+            _write_result_directory(ind, phase=phase, loci=[_locus("1:1000..1500", "1", 1000, 1500, ("libA", "a1"))])
+            identifier = "1:20000..20400"
+            _write_result_directory(pool, phase=phase, loci=[_locus(identifier, "1", 20000, 20400, ("ALL_LIBS", "p"))])
+            # Weakly phased: a real but low score that beats its decoys.
+            cluster = _phased_cluster(20000, 21, 4, abun=3.0)
+            df = _frame(cluster)
+            score = pe.strict_score_arrays(df.strand, df.pos, df.len, df.abun, phase)
+            pd.DataFrame([{"alib": "ALL_LIBS", "clusterID": "c", "chromosome": "1", "strand": s, "pos": p,
+                           "len": l, "abun": a, "identifier": identifier} for s, p, l, a in cluster]
+                         ).to_csv(os.path.join(root, "concat_21_PHAS_to_detect.tab.gz"), sep="\t", index=False)
+            _set_strict(pool, phase, {identifier: score})
+            result = pe.combine_evidence(ind, pool, os.path.join(root, "out"), run_dir=root,
+                                         min_auto_loci=1, floor=score + 1.0, fdr=0.5)
+            self.assertEqual(result.cutoff, score + 1.0)
+            self.assertIn("raised to the floor", result.cutoff_source)
+            self.assertEqual(result.summary["pooled_only_exploratory"], 1)
 
 
 if __name__ == "__main__":
