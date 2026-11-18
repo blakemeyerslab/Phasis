@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.8.9 - unreleased
+
+In development on dev/v2.8.9.
+
 ## 2.8.8 - 2026-11-17
 
 A speed and memory release. The detected *PHAS* and *PHAS*-like loci are the

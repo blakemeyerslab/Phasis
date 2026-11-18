@@ -14,6 +14,10 @@ from .env import getenv
 
 
 _CLEANUP_ONLY_FLAGS = {"-cleanup", "-cleanup_all", "-cleanup_index"}
+EVIDENCE_MODES = ("combined", "individual", "pooled")
+# Options that the combined mode sets itself for each of its two passes.
+_COMBINED_OPTIONS_WITH_VALUE = {"--evidence_mode", "--outdir", "--pooled_strict_howell_cutoff", "--pooled_fdr"}
+_COMBINED_FLAGS = {"--pool_libraries", "--concat_libs"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,6 +129,38 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--evidence_mode",
+        dest="evidence_mode",
+        choices=EVIDENCE_MODES,
+        default=None,
+        help=(
+            "combined: per-library and pooled evidence in one run; per-library loci are "
+            "kept and pooled-only loci must pass --pooled_strict_howell_cutoff "
+            "(runs as individual with one library or when -steps is not both). "
+            "individual: libraries analysed separately. pooled: same as --pool_libraries "
+            "[default combined]"
+        ),
+    )
+    parser.add_argument(
+        "--pooled_strict_howell_cutoff",
+        dest="pooled_strict_howell_cutoff",
+        default="auto",
+        metavar="{auto,off,NUMBER}",
+        help=(
+            "Combined mode: minimum strict Howell score (Peak_Howell_score_strict) of loci "
+            "found only in the pooled evidence; lower ones go to the exploratory tier. "
+            "auto sets it from the run's own data (target-decoy FDR, see --pooled_fdr); "
+            "off keeps them all [default auto]"
+        ),
+    )
+    parser.add_argument(
+        "--pooled_fdr",
+        dest="pooled_fdr",
+        type=float,
+        default=0.05,
+        help="Combined mode with an auto cut-off: target false-discovery rate among kept pooled-only loci [default 0.05]",
+    )
     parser.add_argument("--outdir", dest="outdir", metavar="DIR", type=str,
                         default="{phase}_results",
                         help="Output directory (supports {phase}); default {phase}_results")
@@ -231,6 +267,33 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.cores < 0:
         print("\nERROR: -cores must be 0 (all available cores) or a positive integer\n")
         raise SystemExit(2)
+
+    if args.concat_libs:
+        if args.evidence_mode not in (None, "pooled"):
+            print("\nERROR: --pool_libraries cannot be combined with --evidence_mode " + str(args.evidence_mode) + "\n")
+            raise SystemExit(2)
+        args.evidence_mode = "pooled"
+    if args.evidence_mode is None:
+        args.evidence_mode = "combined"
+    args.concat_libs = args.evidence_mode == "pooled"
+    if args.evidence_mode == "combined":
+        from .pooled_evidence import EvidenceError, parse_cutoff
+        try:
+            args.pooled_strict_howell_cutoff = parse_cutoff(args.pooled_strict_howell_cutoff)
+        except EvidenceError as exc:
+            print(f"\nERROR: --pooled_strict_howell_cutoff: {exc}\n")
+            raise SystemExit(2)
+        if not (0.0 < float(args.pooled_fdr) < 1.0):
+            print("\nERROR: --pooled_fdr must be between 0 and 1\n")
+            raise SystemExit(2)
+        unique_libs = {os.path.abspath(str(x)) for x in (args.libs or [])}
+        if len(unique_libs) < 2:
+            if unique_libs:
+                print("[INFO] One library: combined evidence runs as individual (per-library) evidence.")
+            args.evidence_mode = "individual"
+        elif str(args.steps).lower() != "both":
+            print("[INFO] -steps " + str(args.steps) + ": combined evidence needs -steps both; running individual evidence.")
+            args.evidence_mode = "individual"
 
     if args.runtype not in ("G", "T", "S"):
         print("\nERROR: Wrong runtype option (use G, T, or S)\n")
@@ -362,6 +425,7 @@ def configure_runtime(args: argparse.Namespace) -> None:
     rt.class_cluster_file = args.class_cluster_file
     rt.min_Howell_score = args.min_Howell_score
     rt.concat_libs = args.concat_libs
+    rt.evidence_mode = args.evidence_mode
     rt.outdir = outdir
     rt.plot_staging = str(
         args.plot_staging
@@ -402,6 +466,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     configure_runtime(args)
 
+    if args.evidence_mode == "combined":
+        return _run_combined(argv, args)
+
     # Dependencies should be checked only in the real run path.
     # This follows runtime configuration so the validated samtools path is
     # retained in the snapshot used by downstream worker processes.
@@ -417,3 +484,74 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Run the pipeline orchestrator directly.
     return run_pipeline()
+
+
+def _strip_combined_options(argv: List[str]) -> List[str]:
+    out: List[str] = []
+    skip = False
+    for token in argv:
+        if skip:
+            skip = False
+            continue
+        name = token.split("=", 1)[0]
+        if name in _COMBINED_FLAGS:
+            continue
+        if name in _COMBINED_OPTIONS_WITH_VALUE:
+            skip = "=" not in token
+            continue
+        out.append(token)
+    return out
+
+
+def _run_combined(argv: List[str], args: argparse.Namespace) -> int:
+    """Run per-library then pooled evidence in this run directory and combine them."""
+    import subprocess
+
+    from . import stage_timer
+    from .pooled_evidence import combine_evidence
+
+    require_dependencies()
+    outdir = rt.outdir
+    individual_dir = f"{outdir}_individual"
+    pooled_dir = f"{outdir}_pooled"
+    base = _strip_combined_options(list(argv))
+    passes = (
+        ("individual", individual_dir, ["--evidence_mode", "individual"]),
+        ("pooled", pooled_dir, ["--evidence_mode", "pooled"]),
+    )
+    for label, directory, extra in passes:
+        print(f"\n######  Combined evidence: {label} pass -> {directory}  ######", flush=True)
+        command = [sys.executable, "-m", "phasis.cli", *base, *extra, "--outdir", directory]
+        code = subprocess.call(command)
+        if code != 0:
+            print(f"[ERROR] The {label} pass failed with exit code {code}.")
+            return code
+
+    print("\n######  Combined evidence: per-library and pooled loci  ######", flush=True)
+    stage_timer.open_run_log()
+    with stage_timer.stage("Combined evidence"):
+        result = combine_evidence(
+            individual_dir,
+            pooled_dir,
+            outdir,
+            run_dir=rt.run_dir,
+            cutoff=args.pooled_strict_howell_cutoff,
+            fdr=float(args.pooled_fdr),
+            cores=max(1, int(args.cores) if int(args.cores) > 0 else (os.cpu_count() or 1)),
+        )
+    s = result.summary
+    print(
+        f"  - Per-library loci: {s['individual_loci']}; pooled loci: {s['pooled_loci']} "
+        f"({s['anchors']} also found per library, {s['pooled_only_loci']} pooled-only)."
+    )
+    print(f"  - Strict Howell cut-off for pooled-only loci: {s['strict_cutoff']} ({s['cutoff_source']}).")
+    print(
+        f"  - Pooled-only loci kept: {s['pooled_only_kept']}; exploratory: {s['pooled_only_exploratory']}; "
+        f"anchors at or above the cut-off: {s['anchors_at_or_above_cutoff']}."
+    )
+    print(f"  - Combined loci: {s['combined_loci']}. Results: {outdir}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
