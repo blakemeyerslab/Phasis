@@ -45,7 +45,7 @@ before choosing environment and cache directories.
 
 ```bash
 conda create -n phasis --override-channels -c conda-forge -c bioconda --strict-channel-priority \
-  python=3.12 "numpy=1.26.4" "scikit-learn=1.3.2" \
+  python=3.12 "numpy>=1.26.4" "scikit-learn>=1.3.2" \
   hisat2 "samtools>=1.10" wget -y
 conda activate phasis
 ```
@@ -433,10 +433,11 @@ settings you can change and which filters Phasis still applies.
 
 - **Command not found:** activate your Phasis environment and check `which phasis`,
   `which hisat2`, and `which samtools`.
-- **Installation or dependency errors:** use the environment above. NumPy
-  `1.26.4` and scikit-learn `1.3.2` are pinned for classifier reproducibility;
-  scikit-learn `1.3.2` supports the Python 3.12 Conda installation. SAMtools
-  must be version 1.10 or newer; check `samtools --version`.
+- **Installation or dependency errors:** use the environment above. Phasis
+  needs Python 3.10 or newer, NumPy 1.26.4 or newer and scikit-learn 1.3.2 or
+  newer. Newer NumPy and scikit-learn versions call the same loci; only the
+  last digits of some scores can differ. SAMtools must be version 1.10 or
+  newer; check `samtools --version`.
 - **FASTQ input rejected:** confirm adapter/quality trimming and the expected
   sRNA length range before running Phasis.
 - **No plots:** first check whether final *PHAS* or *PHAS*-like calls were

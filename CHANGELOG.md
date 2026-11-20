@@ -28,6 +28,24 @@ loci are reported by default.
 - `{phase}_evidence_summary.txt` and `{phase}_pooled_evidence.tsv` in the
   combined results.
 
+### Changed
+
+- Dependencies are no longer pinned to exact versions: `numpy>=1.26.4` (was
+  `==1.26.4`), `scikit-learn>=1.3.2` (was `==1.3.2`), and Python 3.10 or newer
+  (was below 3.13). On the README maize example, 2.8.8 with NumPy 2.5.5 and
+  scikit-learn 1.9.1, with pandas 3.0.6 and with pandas 3.1.1, called the
+  same loci, classes and phasiRNAs in every result table, in the same row
+  order; some scores differed only in their last digits (relative difference
+  at most 1e-13). The test suite passes on Python 3.12, 3.13 and 3.14.
+
+### Fixed
+
+- pandas 3.1 changed the order of `groupby(..., sort=False).indices` for
+  several keys. The in-memory feature assembly planned its batches in that
+  order, so with pandas 3.1 its feature rows came out in a different order.
+  Phasis now builds the earlier order itself (`phasis/group_order.py`), so the
+  output does not depend on the pandas version.
+
 ## 2.8.8 - 2026-11-17
 
 A speed and memory release. The detected *PHAS* and *PHAS*-like loci are the

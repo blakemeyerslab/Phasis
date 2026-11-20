@@ -177,7 +177,7 @@ export PIP_CACHE_DIR="$PHASIS_PROJECT/cache/pip"
 mkdir -p "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$PHASIS_PROJECT/envs"
 conda create -p "$PHASIS_PROJECT/envs/phasis" --override-channels \
   -c conda-forge -c bioconda --strict-channel-priority \
-  python=3.12 numpy=1.26.4 scikit-learn=1.3.2 hisat2 'samtools>=1.10' wget -y
+  python=3.12 'numpy>=1.26.4' 'scikit-learn>=1.3.2' hisat2 'samtools>=1.10' wget -y
 conda activate "$PHASIS_PROJECT/envs/phasis"
 ```
 

@@ -27,6 +27,7 @@ from phasis.cache import (
 )
 from phasis.env import getenv
 from phasis.parallel import memory_supported_workers, run_parallel_with_progress
+from phasis.group_order import legacy_group_indices
 
 DCL_OVERHANG = 2          # canonical 2-nt 3' overhang used for opposite-strand duplex pairing
 WINDOW_MULTIPLIER = 10    # 10 cycles per window
@@ -286,11 +287,9 @@ def _build_feature_assembly_batch_positions(
 
     # ``indices`` holds integer row positions, avoiding a DataFrame copy for
     # every cluster while preserving the prior chromosome -> cluster grouping.
-    cluster_indices = clusters_data.groupby(
-        ["chromosome", "clusterID"],
-        sort=False,
-        observed=True,
-    ).indices
+    # (pandas 3.1 changed the order of ``groupby(...).indices``; the helper keeps
+    # the earlier order whatever pandas is installed.)
+    cluster_indices = legacy_group_indices(clusters_data, ["chromosome", "clusterID"])
     for positions in cluster_indices.values():
         cluster_rows = len(positions)
         if current_parts and current_rows + cluster_rows > target_rows:
