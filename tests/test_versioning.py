@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import argparse
 import pathlib
-import tomllib
 import unittest
+
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    tomllib = None
 
 from phasis import __version__
 from phasis.cli import build_parser
@@ -22,6 +26,7 @@ class VersioningTests(unittest.TestCase):
         self.assertEqual(len(version_actions), 1)
         self.assertIn("2.8.9", version_actions[0].version)
 
+    @unittest.skipIf(tomllib is None, "tomllib needs Python 3.11 or newer")
     def test_pyproject_and_readme_release_metadata_match(self):
         pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["version"], "2.8.9")
